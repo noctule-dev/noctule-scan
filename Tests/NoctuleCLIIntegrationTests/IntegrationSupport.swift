@@ -46,6 +46,8 @@ func builtBinary(_ name: String) throws -> URL {
 // once, on three cores, beside the tests that time `noctule` and the mocks.
 
 /// Polls `condition` every 20 ms for at most `seconds`, suspending (not blocking) between polls.
+/// In a cancelled task (the test's time limit fired) it takes one last look and returns: a wait
+/// for an observation ends. A wait that cleans up uses `cleanupWait` instead.
 func waitFor(_ seconds: Double, _ condition: () throws -> Bool) async rethrows -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
@@ -54,6 +56,21 @@ func waitFor(_ seconds: Double, _ condition: () throws -> Bool) async rethrows -
     }
     return try condition()
 }
+
+/// `waitFor`, but run in a task of its own, which a cancelled test doesn't cancel: the wait for a
+/// tool to exit (an `hdiutil detach`, a mock printing its leak counts after SIGINT) still lasts up
+/// to `seconds` once the test's time limit has fired, instead of ending at once and having the
+/// tool killed (review I1, LESSONS.md 2026-11-21).
+func cleanupWait(_ seconds: Double, _ condition: @escaping @Sendable () -> Bool) async -> Bool {
+    await Task { await waitFor(seconds, condition) }.value
+}
+
+/// The environment every `noctule` a test launches gets (AGENTS.md, "Test suites"): the
+/// kill-switch, and a decoy port listing (a path where nothing is) in place of IOKit's.
+let noctuleTestEnvironment = [
+    "NOCTULE_NO_USB_DETECTION": "1",
+    "NOCTULE_TEST_SERIAL_PORTS": FileManager.default.temporaryDirectory.appending(path: "noctule-decoy-\(UUID().uuidString)").path,
+]
 
 // Subprocess helpers shared by the tests that launch `noctule` and `noctule-mock-scanner`.
 
@@ -108,12 +125,12 @@ final class Subprocess: @unchecked Sendable {
         // The handlers run on dispatch's own threads, not the cooperative pool, and the last call
         // (empty data) marks the end of the pipe, so `finish()` never has to read to the end itself.
         outPipe.fileHandleForReading.readabilityHandler = { [output] handle in
-            let data = handle.availableData
+            let data = handle.availableData  // off the cooperative pool: a readability handler
             if data.isEmpty { handle.readabilityHandler = nil; output.pipeEnded(); return }
             output.append(out: data)
         }
         errPipe.fileHandleForReading.readabilityHandler = { [output] handle in
-            let data = handle.availableData
+            let data = handle.availableData  // off the cooperative pool: a readability handler
             if data.isEmpty { handle.readabilityHandler = nil; output.pipeEnded(); return }
             output.append(err: data)
         }
@@ -125,49 +142,42 @@ final class Subprocess: @unchecked Sendable {
     var isRunning: Bool { process.isRunning }
 
     /// Waits at most `seconds` for the process to exit, suspending between looks. Returns false if
-    /// it's still running.
+    /// it's still running. A cleanup wait: a cancelled test still waits (`cleanupWait`).
     func waitForExit(within seconds: Double) async -> Bool {
-        await waitFor(seconds) { !process.isRunning }
+        let process = self.process
+        return await cleanupWait(seconds) { !process.isRunning }
     }
 
     /// Waits at most `seconds` for `condition` on the output so far.
     func waitForOutput(within seconds: Double, _ condition: (String) -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if condition(stdout) { return true }
-            if !process.isRunning { return condition(stdout) }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-        return condition(stdout)
+        await waitFor(seconds) { condition(stdout) || !process.isRunning } && condition(stdout)
     }
 
     /// Waits at most `seconds` for `condition` on the stderr output so far.
     func waitForStderr(within seconds: Double, _ condition: (String) -> Bool) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while Date() < deadline {
-            if condition(stderr) { return true }
-            if !process.isRunning { return condition(stderr) }
-            try? await Task.sleep(for: .milliseconds(20))
-        }
-        return condition(stderr)
+        await waitFor(seconds) { condition(stderr) || !process.isRunning } && condition(stderr)
     }
 
     func interrupt() { send(SIGINT) }
     func send(_ signal: Int32) { if process.isRunning { Darwin.kill(process.processIdentifier, signal) } }
     func kill() { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
 
-    /// After exit: the status and all output. Waits (suspended) at most 10 s for the exit, and
-    /// reports -1 if the process is somehow still running; then at most 10 s for both pipes to
-    /// reach end of file, which a child the process left behind can hold off (whatever arrived by
-    /// then is returned). Neither `Process.waitUntilExit()`, which called from a test's thread
-    /// sometimes never returned although the child had exited (LESSONS.md 2026-11-12), nor
-    /// `readDataToEndOfFile()` is used: both block a cooperative thread.
+    /// After exit: the status and all output. Waits at most 10 s for the exit and then at most
+    /// 10 s for both pipes to reach end of file, both as cleanup waits (a cancelled test still
+    /// waits). Records an issue, and reports -1, if the process is still running; records one if a
+    /// pipe stayed open (a child the process left holds it), so a check that some text is absent
+    /// can't pass on output cut short. Neither `Process.waitUntilExit()`, which called from a
+    /// test's thread sometimes never returned although the child had exited (LESSONS.md
+    /// 2026-11-12), nor `readDataToEndOfFile()` is used: both block a cooperative thread.
     func finish() async -> (status: Int32, stdout: String, stderr: String) {
         guard await waitForExit(within: 10) else {
-            Issue.record("process \(process.processIdentifier) still running after SIGKILL")
+            Issue.record("process \(process.processIdentifier) didn't exit within 10 s of finish()")
             return (-1, stdout, stderr)
         }
-        _ = await waitFor(10) { output.bothPipesEnded }
+        let output = self.output
+        if !(await cleanupWait(10) { output.bothPipesEnded }) {
+            Issue.record("process \(process.processIdentifier) exited, but its output didn't end within 10 s: something it started still holds the pipe")
+        }
         return (process.terminationStatus, stdout, stderr)
     }
 }
@@ -271,7 +281,7 @@ struct SerialMock {
 /// Runs `noctule` to completion (killed after `limit` seconds).
 func noctule(_ arguments: [String], limit: Double = 20) async throws
     -> (exited: Bool, status: Int32, stdout: String, stderr: String) {
-    let process = try Subprocess(try noctuleBinary(), arguments)
+    let process = try Subprocess(try noctuleBinary(), arguments, environment: noctuleTestEnvironment)
     let exited = await process.waitForExit(within: limit)
     process.kill()
     let result = await process.finish()

@@ -76,7 +76,9 @@ import Testing
         gate.handle(.willSleep) { log.events.append("allow") }
         #expect(await eventually(10) { log.events.contains("allow") })
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed >= 0.15, "allowed \(elapsed) s in, before the deadline")
+        // Not before the deadline; and within a bound loose enough for a late wakeup (the runner's
+        // were up to 2 s) that still catches a deadline that fires far too late.
+        #expect(elapsed >= 0.15 && elapsed < 5, "allowed \(elapsed) s in (deadline 0.15 s)")
         #expect(log.events == ["suspend started", "allow"])
         // The suspend carries on; the sleep is still allowed only once.
         released.value = true

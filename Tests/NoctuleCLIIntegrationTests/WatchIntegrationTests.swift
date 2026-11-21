@@ -126,7 +126,7 @@ private func run(_ arguments: [String], fake: FakeScanner, interruptOnFirstUpdat
 /// suspends (IntegrationSupport.swift, "Waiting in these tests").
 private func run(_ arguments: [String], port: UInt16, interruptOnFirstUpdate: Bool = false) async throws -> (status: Int32, stdout: String, stderr: String, timedOut: Bool, seconds: Double) {
     let start = Date()
-    let process = try Subprocess(try noctuleBinary(), arguments + ["--host", "127.0.0.1", "--port", String(port)])
+    let process = try Subprocess(try noctuleBinary(), arguments + ["--host", "127.0.0.1", "--port", String(port)], environment: noctuleTestEnvironment)
     if interruptOnFirstUpdate {
         _ = await process.waitForOutput(within: 10) { $0.contains("\n") }
         process.interrupt()

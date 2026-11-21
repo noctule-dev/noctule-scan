@@ -13,7 +13,7 @@ private final class Noctule: Sendable {
     let started = Date()
 
     init(_ arguments: [String]) throws {
-        process = try Subprocess(try noctuleBinary(), arguments)
+        process = try Subprocess(try noctuleBinary(), arguments, environment: noctuleTestEnvironment)
     }
 
     /// Waits at most `seconds` for the process to exit. Returns false if it's still running.

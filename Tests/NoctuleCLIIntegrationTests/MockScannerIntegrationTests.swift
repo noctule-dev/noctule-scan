@@ -62,7 +62,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
         do {
             let process = try Subprocess(
                 try noctuleBinary(), ["quick-keys", "--host", "127.0.0.1", "--port", String(mock.udpPort)],
-                environment: ["NOCTULE_NO_USB_DETECTION": "1"], currentDirectory: directory)
+                environment: noctuleTestEnvironment, currentDirectory: directory)
             let exited = await process.waitForExit(within: 20)
             process.kill()
             let result = await process.finish()
@@ -166,7 +166,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             let listen = try Subprocess(try noctuleBinary(), [
                 "listen", "--no-play", "--host", "127.0.0.1", "--port", String(mock.udpPort),
                 "--rtsp-port", String(mock.rtspPort), "--cooldown-seconds", "1", "--cooldown-store", store.path,
-            ])
+            ], environment: noctuleTestEnvironment)
             let streaming = await listen.waitForStderr(within: 15) { $0.contains("audio: streaming") }
             #expect(streaming, "\(listen.stderr)")
             listen.send(signal)
@@ -203,7 +203,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
                 #expect(result.stderr.contains("audio: streaming"), "run \(run): \(result.stderr)")
                 #expect(!result.stderr.contains("before reconnecting"), "run \(run): \(result.stderr)")
             }
-            let third = try Subprocess(try noctuleBinary(), base)
+            let third = try Subprocess(try noctuleBinary(), base, environment: noctuleTestEnvironment)
             let waiting = await third.waitForStderr(within: 10) { $0.contains("before reconnecting (scanner cooldown)") }
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
@@ -251,6 +251,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
         do {
             let process = Process()
             process.executableURL = try noctuleBinary()
+            process.environment = ProcessInfo.processInfo.environment.merging(noctuleTestEnvironment) { _, new in new }
             process.arguments = [
                 "listen", "--no-play", "--seconds", "2", "--host", "127.0.0.1", "--port", String(mock.udpPort),
                 "--rtsp-port", String(mock.rtspPort), "--cooldown-seconds", "1",
@@ -283,7 +284,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
     @Test func watchStopsPushOnSigterm() async throws {
         let mock = try await MockScanner.launch([])
         do {
-            let watch = try Subprocess(try noctuleBinary(), ["watch", "--host", "127.0.0.1", "--port", String(mock.udpPort)])
+            let watch = try Subprocess(try noctuleBinary(), ["watch", "--host", "127.0.0.1", "--port", String(mock.udpPort)], environment: noctuleTestEnvironment)
             let updating = await watch.waitForOutput(within: 10) { !$0.isEmpty }
             #expect(updating, "\(watch.stderr)")
             watch.send(SIGTERM)
