@@ -236,14 +236,154 @@ private func eventually(_ limit: Duration = .seconds(2),
             print("unansweredConnectsLeaveThePoolFree: a 50 ms sleep ended \(late) late while \(connects) connects waited")
             var outcomes: [POSIXSocketError?] = []
             for try await outcome in group { outcomes.append(outcome) }
-            // Only a connect left waiting tests anything; where 127.0.0.2 answers (an alias on lo0)
-            // the connects end at once and there is nothing to measure.
+            // Only a connect left waiting tests anything; where 127.0.0.2 answers (a Mac with it
+            // aliased on lo0) the connects end at once and this passes without measuring anything.
             if outcomes.allSatisfy({ $0 == .connectTimedOut }) {
                 #expect(late < .seconds(3), "a 50 ms sleep ended \(late) late while \(connects) connects waited (\(connects - 1) cores)")
             } else {
                 #expect(!outcomes.contains(nil), "connected to 127.0.0.2: \(outcomes)")
             }
         }
+    }
+}
+
+// MARK: TCP connect: cancellation and the per-address fallback (review I2, I3)
+
+/// Whether a connect to 127.0.0.2 is left waiting here: that address routes to lo0 but isn't this
+/// Mac's, so its SYN goes unanswered without leaving the machine, unless someone aliased it.
+private let unansweredLoopbackWaits: Bool = {
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_addr.s_addr = inet_addr("127.0.0.2")
+    address.sin_port = UInt16(7).bigEndian
+    let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    guard fd >= 0 else { return false }
+    defer { Darwin.close(fd) }
+    _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+    let result = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard result != 0, errno == EINPROGRESS else { return false }
+    var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+    return poll(&descriptor, 1, 200) == 0  // at planning time, before any test runs
+}()
+
+/// How many of this process's TCP sockets are connected, or connecting, to `host`:`port` (read
+/// from the kernel's per-descriptor socket info, so other tests' sockets don't count).
+private func tcpSockets(to host: String, port: UInt16) -> Int {
+    let pid = getpid()
+    let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+    guard size > 0 else { return -1 }
+    var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / MemoryLayout<proc_fdinfo>.stride + 64)
+    let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &fds, Int32(fds.count * MemoryLayout<proc_fdinfo>.stride))
+    let wanted = inet_addr(host)
+    var count = 0
+    for fd in fds.prefix(Int(filled) / MemoryLayout<proc_fdinfo>.stride) where fd.proc_fdtype == PROX_FDTYPE_SOCKET {
+        var info = socket_fdinfo()
+        let read = proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDSOCKETINFO, &info, Int32(MemoryLayout<socket_fdinfo>.size))
+        guard read == Int32(MemoryLayout<socket_fdinfo>.size), info.psi.soi_kind == SOCKINFO_TCP else { continue }
+        let endpoints = info.psi.soi_proto.pri_tcp.tcpsi_ini
+        if endpoints.insi_faddr.ina_46.i46a_addr4.s_addr == wanted,
+           UInt16(bigEndian: UInt16(truncatingIfNeeded: endpoints.insi_fport)) == port { count += 1 }
+    }
+    return count
+}
+
+/// A cancelled connect ends at once with `CancellationError`, long before its deadline, and closes
+/// its socket. Cancellation is how a stop, a quit or a sleep cuts short a connect to an unreachable
+/// scanner. (Port 7, which no other test connects to, so the socket count is this test's alone.)
+@Test(.enabled(if: unansweredLoopbackWaits, "127.0.0.2 answers on this Mac (aliased on lo0)"))
+func cancelledConnectsEndAtOnceAndCloseTheirSockets() async throws {
+    let connects = 8
+    let tasks = (0..<connects).map { _ in
+        Task { () -> (any Error)? in
+            do {
+                _ = try await TCPStream.connect(host: "127.0.0.2", port: 7, timeout: .seconds(5))
+                return nil
+            } catch {
+                return error
+            }
+        }
+    }
+    // Every connect is waiting on its socket before the cancel.
+    try await eventually(.seconds(4)) { tcpSockets(to: "127.0.0.2", port: 7) == connects }
+    let cancelled = ContinuousClock.now
+    for task in tasks { task.cancel() }
+    for task in tasks {
+        let error = await task.value
+        #expect(error is CancellationError, "ended with \(String(describing: error))")
+    }
+    let took = ContinuousClock.now - cancelled
+    #expect(took < .seconds(2), "the cancelled connects took \(took) to end (their deadline was 5 s away)")
+    #expect(tcpSockets(to: "127.0.0.2", port: 7) == 0, "sockets left open")
+}
+
+/// A loopback address for `port`, through the resolver (a numeric host: one address, no lookup).
+private func loopback(_ host: String, _ port: UInt16) async throws -> SocketAddress {
+    try #require(await SocketAddress.resolve(host: host, port: port, socketType: SOCK_STREAM, limit: .seconds(2)).first)
+}
+
+/// A refused first address falls back to the next, which connects.
+@Test func aRefusedAddressFallsBackToTheNext() async throws {
+    let listener = try LoopbackListener()
+    defer { listener.close() }
+    let closed = try LoopbackListener()
+    let closedPort = closed.port
+    closed.close()
+    let port = listener.port
+    try await within(.seconds(10)) {
+        let addresses = [try await loopback("127.0.0.1", closedPort), try await loopback("127.0.0.1", port)]
+        let stream = try await TCPStream.connect(to: addresses, deadline: .now + .seconds(2))
+        let server = try await listener.accept()
+        Darwin.close(server)
+        #expect(stream.remoteAddress == "127.0.0.1")
+        await stream.close()
+    }
+}
+
+/// A first address that waits out the deadline leaves no time for the next: it isn't tried.
+@Test(.enabled(if: unansweredLoopbackWaits, "127.0.0.2 answers on this Mac (aliased on lo0)"))
+func anUnansweredAddressThatUsesTheDeadlineLeavesTheNextUntried() async throws {
+    let listener = try LoopbackListener()
+    defer { listener.close() }
+    let port = listener.port
+    try await within(.seconds(10)) {
+        let addresses = [try await loopback("127.0.0.2", 8), try await loopback("127.0.0.1", port)]  // port 8: 7 is the cancel test's
+        await #expect(throws: POSIXSocketError.connectTimedOut) {
+            _ = try await TCPStream.connect(to: addresses, deadline: .now + .milliseconds(300))
+        }
+        await #expect(throws: TimedOut.self) { _ = try await listener.accept(timeout: .milliseconds(300)) }
+    }
+}
+
+/// With the deadline already gone (as when the task resumes late on a busy machine), the first
+/// address is still tried and a connection the kernel makes at once is taken, and a refusal is
+/// reported as one; a second address isn't tried (the loop then reports the deadline, as it always
+/// has). (Round 4's cause 2, which only a load sweep caught before: review N9.)
+@Test func aDeadlineAlreadyPastTriesOnlyTheFirstAddress() async throws {
+    let first = try LoopbackListener()
+    defer { first.close() }
+    let second = try LoopbackListener()
+    defer { second.close() }
+    let closed = try LoopbackListener()
+    let closedPort = closed.port
+    closed.close()
+    let firstPort = first.port, secondPort = second.port
+    try await within(.seconds(10)) {
+        let past = ContinuousClock.now - .seconds(1)
+        let stream = try await TCPStream.connect(
+            to: [try await loopback("127.0.0.1", firstPort), try await loopback("127.0.0.1", secondPort)], deadline: past)
+        Darwin.close(try await first.accept())
+        await stream.close()
+        await #expect(throws: POSIXSocketError.connectFailed(ECONNREFUSED)) {
+            _ = try await TCPStream.connect(to: [try await loopback("127.0.0.1", closedPort)], deadline: past)
+        }
+        await #expect(throws: POSIXSocketError.connectTimedOut) {
+            _ = try await TCPStream.connect(
+                to: [try await loopback("127.0.0.1", closedPort), try await loopback("127.0.0.1", secondPort)], deadline: past)
+        }
+        await #expect(throws: TimedOut.self) { _ = try await second.accept(timeout: .milliseconds(300)) }
     }
 }
 

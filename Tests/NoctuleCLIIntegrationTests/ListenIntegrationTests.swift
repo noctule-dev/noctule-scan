@@ -52,7 +52,7 @@ private struct ListenFixture {
         let directory = FileManager.default.temporaryDirectory.appending(path: "noctule-listen-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return ListenFixture(server: server, sender: sender, rtspPort: port, directory: directory,
-                             controlPort: try deadPort())
+                             controlPort: try silentUDPPort())
     }
 
     func arguments(_ extra: [String], cooldown: String = "0.3") -> [String] {
@@ -83,6 +83,9 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let wav = fixture.directory.appending(path: "out.wav")
         let noctule = try Noctule(fixture.arguments(["--seconds", "2", "--record", wav.path]))
         let exited = await noctule.waitForExit(within: 15)
+        // Seen at or after the exit, and measured from before the launch: only ever longer than
+        // the run itself, so a `listen` that stopped before its 2 s still fails.
+        let ran = Date().timeIntervalSince(noctule.started)
         noctule.kill()
         let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
@@ -103,7 +106,18 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let dataSize = Int(le32(data, at: 40))
         #expect(dataSize == data.count - 44)
         #expect(Int(le32(data, at: 4)) == dataSize + 36)
-        #expect((25_600...38_400).contains(dataSize), "data size \(dataSize)")
+        // The recording holds the packets `listen` received, not a count a fixed window promises:
+        // the fake sender paces 25 packets a second with its own sleeps, and a slow machine sends
+        // fewer within `--seconds` (CI run 44958491347: 22 packets, 14,080 bytes, against a
+        // 25,600-byte floor). Each 320-byte μ-law packet records as 640 bytes, every received
+        // packet is recorded (none is lost or reordered on loopback, and the shutdown drains the
+        // chunks before the WAV is closed), and at least 10 prove a recording, not a stub.
+        #expect(ran >= 2, "listen exited \(ran) s after its launch, before its --seconds 2")
+        let packets = result.stdout.split(separator: "\n").first { $0.hasPrefix("packets ") }
+            .flatMap { $0.split(separator: " ").dropFirst().first }.flatMap { Int($0) }
+        let received = try #require(packets, "no packets line: \(result.stdout)")
+        #expect(received >= 10, "only \(received) packets in 2 s")
+        #expect(dataSize == received * 640, "data size \(dataSize) for \(received) packets")
     }
 
     @Test func listenSigintTearsDown() async throws {

@@ -417,7 +417,7 @@ private func rows(_ table: String) -> [String] {
         let dirs = try Dirs()
         defer { dirs.cleanUp() }
         let add = try await noctule(["station", "add", "--name", "Test Station", "--host", "localhost",
-                                     "--udp-port", String(try deadPort()), "--rtsp-port", String(try deadPort())]
+                                     "--udp-port", String(try silentUDPPort()), "--rtsp-port", String(try silentUDPPort())]
                                     + dirs.settingsFlags)
         #expect(add.exited && add.status == 0, "\(add.stdout) \(add.stderr)")
         let format = ISO8601DateFormatter()

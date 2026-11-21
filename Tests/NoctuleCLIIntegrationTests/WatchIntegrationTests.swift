@@ -96,10 +96,15 @@ private final class FakeScanner: @unchecked Sendable {
     }
 }
 
-/// A loopback UDP port with nothing listening: bind an ephemeral port, then close it.
-func deadPort() throws -> UInt16 {
-    let sock = socket(AF_INET, SOCK_DGRAM, 0)
-    defer { close(sock) }
+/// A loopback UDP port that never answers: a socket bound to it and held, never read, until the
+/// test process exits. Binding a port and closing it again (as this helper used to) left the port
+/// free for a mock starting at the same moment to bind and answer: CI run 44958491347 saw
+/// `StationEditorModelTests.testConnectionNoAnswer` (in another target) get `.ok(SDS200)` from such
+/// a port; here the mock scanners are launched concurrently too. A
+/// datagram to a held port is queued and ignored, so a request times out, as it would at a closed
+/// port (where an ICMP refusal also ends in a timeout).
+func silentUDPPort() throws -> UInt16 {
+    let sock = socket(AF_INET, SOCK_DGRAM, 0)  // held until the process exits: see above
     var addr = sockaddr_in()
     addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     addr.sin_family = sa_family_t(AF_INET)
@@ -168,7 +173,7 @@ private func run(_ arguments: [String], port: UInt16, interruptOnFirstUpdate: Bo
     }
 
     @Test func unreachableScannerExitsNonZeroQuickly() async throws {
-        let port = try deadPort()
+        let port = try silentUDPPort()
         let result = try await run(["watch"], port: port)
         #expect(!result.timedOut)
         #expect(result.status != 0)

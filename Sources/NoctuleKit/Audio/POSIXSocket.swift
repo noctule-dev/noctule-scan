@@ -270,6 +270,13 @@ final class TCPStream: Sendable {
         let addresses = await SocketAddress.resolve(
             host: host, port: port, socketType: SOCK_STREAM, limit: min(timeout, .seconds(2)))
         guard !addresses.isEmpty else { throw POSIXSocketError.resolveFailed(host) }
+        return try await connect(to: addresses, deadline: deadline)
+    }
+
+    /// Connects to each of `addresses` in turn until one succeeds; a `POSIXSocketError` from one
+    /// moves on to the next while the deadline lasts. Internal so the fallback can be tested
+    /// without a resolver (whose order for a name like `localhost` varies).
+    static func connect(to addresses: [SocketAddress], deadline: ContinuousClock.Instant) async throws -> TCPStream {
         var lastError = POSIXSocketError.connectTimedOut
         for (index, address) in addresses.enumerated() {
             // The first address is always tried (its own wait enforces the deadline): a resolve

@@ -187,7 +187,7 @@ import NoctuleStore
     }
 
     @Test func noAnswerOnDeadHost() async throws {
-        let port = try closedUDPPort()
+        let port = try silentUDPPort()
         var setup = Setup()
         setup.udpPort = port
         let outcome = try await withSession(setup) { rig in
