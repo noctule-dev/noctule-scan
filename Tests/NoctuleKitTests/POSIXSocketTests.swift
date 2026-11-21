@@ -177,18 +177,27 @@ private func eventually(_ limit: Duration = .seconds(2),
 /// 192.0.2.1 (TEST-NET-1) is never assigned, so a SYN to it goes unanswered: connect must give up
 /// at its timeout. (Without a route at all it fails at once with ENETUNREACH/EHOSTUNREACH,
 /// which is also bounded.)
+///
+/// Bounded means at its timeout give or take late wakeups (3 s of margin; the CI runner took up to
+/// 2.2 s here against a 1 s bound, LESSONS.md 2026-11-21), not the kernel's own SYN timeout of
+/// about 75 s; and never before the timeout when it times out.
 @Test func tcpConnectToUnansweredAddressIsBoundedByTheTimeout() async throws {
+    let timeout = Duration.milliseconds(300)
     let start = ContinuousClock.now
-    try await within(.seconds(3)) {
+    let timedOut = try await within(.seconds(10)) { () -> Bool in
         do {
-            _ = try await TCPStream.connect(host: "192.0.2.1", port: 9, timeout: .milliseconds(300))
+            _ = try await TCPStream.connect(host: "192.0.2.1", port: 9, timeout: timeout)
             Issue.record("connected to TEST-NET-1")
+            return false
         } catch let error as POSIXSocketError {
             let allowed: [POSIXSocketError] = [.connectTimedOut, .connectFailed(ENETUNREACH), .connectFailed(EHOSTUNREACH)]
             #expect(allowed.contains(error), "\(error)")
+            return error == .connectTimedOut
         }
     }
-    #expect(ContinuousClock.now - start < .seconds(1))
+    let waited = ContinuousClock.now - start
+    #expect(waited < timeout + .seconds(3), "the connect gave up after \(waited)")
+    if timedOut { #expect(waited >= timeout, "the connect timed out after \(waited)") }
 }
 
 @Test func tcpRoundTripAndRemoteAddress() async throws {

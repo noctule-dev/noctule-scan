@@ -596,8 +596,11 @@ private actor KeepAliveLink: ScannerTransport {
 
     /// A request that is never answered holds the slot until it times out; the keep-alive goes
     /// out then, not before.
+    /// The KAL is held to the GSI's own times, not to a fixed window: a window after the trigger
+    /// that a late wakeup can stretch past the timeout failed on the CI runner (LESSONS.md
+    /// 2026-11-21). The "nothing yet" check counts only when it is seen to run before the timeout.
     @Test func keepAliveAfterATimedOutRequest() async throws {
-        let timeout = Duration.milliseconds(300)
+        let timeout = Duration.seconds(1)
         let link = KeepAliveLink()  // The GSI is never answered.
         let trigger = KeepAliveTrigger()
         let client = ScannerClient(transport: link, commandTimeout: timeout, keepAliveSleep: trigger.sleep)
@@ -611,7 +614,10 @@ private actor KeepAliveLink: ScannerTransport {
         trigger.fire()
         #expect(await eventually { trigger.woken == 1 })
         try await Task.sleep(for: .milliseconds(100))
-        #expect(await link.keepAlives == 0, "a KAL went out while the GSI was still waiting")
+        let keepAlivesWhileWaiting = await link.keepAlives
+        if ContinuousClock.now - gsiAt < timeout {  // the GSI was certainly still waiting when read
+            #expect(keepAlivesWhileWaiting == 0, "a KAL went out while the GSI was still waiting")
+        }
         await #expect(throws: ScannerClientError.timeout(command: "GSI")) { try await reading.value }
         #expect(await eventually { await link.keepAlives == 1 })
         let kalAt = try #require(await link.written.first { $0.text == "KAL" }?.at)

@@ -98,14 +98,22 @@ private let base = "rtsp://127.0.0.1/au:scanner.au/"
     }
 }
 
+/// A late wakeup (the CI runner's: LESSONS.md 2026-11-20, 2026-11-21) can only lengthen a timed
+/// wait, so a timeout is held to its own duration from below, and from above only to that duration
+/// plus this margin: enough to tell "gave up at its timeout" from "waited for something else"
+/// (another timeout, or never), not a measure of how promptly this machine wakes.
+private let lateWakeMargin = Duration.seconds(3)
+
 @Test func silentServerTimesOut() async throws {
-    try await withFake(.scannerLike.silence(method: "PLAY"), requestTimeout: .milliseconds(200)) { server, client, _ in
+    let timeout = Duration.milliseconds(200)
+    try await withFake(.scannerLike.silence(method: "PLAY"), requestTimeout: timeout, limit: .seconds(15)) { server, client, _ in
         try await client.connect()
         let (gotBase, _) = try await client.describe()
         _ = try await client.setup(controlURL: gotBase + "trackID=1", clientPort: 50000)
         let start = ContinuousClock.now
         await #expect(throws: RTSPError.timeout(method: "PLAY")) { try await client.play() }
-        #expect(ContinuousClock.now - start < .seconds(1))
+        let waited = ContinuousClock.now - start
+        #expect(waited >= timeout && waited < timeout + lateWakeMargin, "PLAY gave up after \(waited)")
         // A timeout doesn't kill the connection, so the session can still be torn down.
         await client.teardown()
         #expect(await server.receivedMethods == ["OPTIONS", "DESCRIBE", "SETUP", "PLAY", "TEARDOWN"])
@@ -756,20 +764,27 @@ private func connectAndClose(_ client: RTSPClient) async throws {
 }
 
 /// An unanswered SYN (TEST-NET-1 is never assigned) gives up at `requestTimeout`.
+/// Bounded by the request timeout (plus `lateWakeMargin`), not the kernel's own SYN timeout of
+/// about 75 s.
 @Test func unansweredConnectTimesOut() async throws {
-    let client = RTSPClient(host: "192.0.2.1", port: 9, requestTimeout: .milliseconds(300),
+    let timeout = Duration.milliseconds(300)
+    let client = RTSPClient(host: "192.0.2.1", port: 9, requestTimeout: timeout,
                             reconnectCooldown: .zero, cooldownStore: InMemoryRTSPCooldownStore(), closeLinger: .zero)
     let start = ContinuousClock.now
-    try await within(.seconds(3)) {
+    let timedOut = try await within(.seconds(10)) { () -> Bool in
         do {
             try await client.connect()
             Issue.record("connected to TEST-NET-1")
+            return false
         } catch let error as RTSPError {
             // .closed only if this machine has no route at all (ENETUNREACH at once).
             #expect(error == .timeout(method: "CONNECT") || error == .closed, "\(error)")
+            return error == .timeout(method: "CONNECT")
         }
     }
-    #expect(ContinuousClock.now - start < .seconds(1))
+    let waited = ContinuousClock.now - start
+    #expect(waited < timeout + lateWakeMargin, "the connect gave up after \(waited)")
+    if timedOut { #expect(waited >= timeout, "the connect timed out after \(waited)") }
 }
 
 /// Polls `condition` every 10 ms until it holds, or throws `TimedOut` after `limit`.
@@ -796,8 +811,13 @@ private func eventually(_ limit: Duration = .seconds(2),
                 async let first: Void = client.connect()
                 async let second: Void = client.connect()
                 _ = try await (first, second)
+                // The server counts a connection when its accept loop gets to it, which a busy
+                // process can leave for longer than a fixed 50 ms (0 seen under the background
+                // clamp; LESSONS.md 2026-11-21): wait for the first, then give a second a moment.
+                for _ in 0..<500 where await server.acceptedConnections == 0 { try await Task.sleep(for: .milliseconds(10)) }
                 try await Task.sleep(for: .milliseconds(50))
-                #expect(await server.acceptedConnections == 1, "trial \(trial)")
+                let accepted = await server.acceptedConnections
+                #expect(accepted == 1, "trial \(trial)")
                 _ = try await client.describe()  // the shared connection works
             }
         } catch {
