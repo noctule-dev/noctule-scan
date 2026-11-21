@@ -65,6 +65,29 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         func dco(_ base: String, _ head: String = "HEAD") async throws -> (status: Int32, stdout: String, stderr: String) {
             try await run(repositoryFile("scripts/check-dco.sh"), [base, head], currentDirectory: dir)
         }
+        /// Commits a file at each path (making its directories), and returns the new commit.
+        @discardableResult
+        func commitFiles(_ paths: [String], _ subject: String = "files") throws -> String {
+            for path in paths {
+                let url = dir.appending(path: path)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try "\(path) \(UUID())".write(to: url, atomically: true, encoding: .utf8)
+                try git("add", path)
+            }
+            try git("commit", "-q", "-m", subject)
+            return try git("rev-parse", "HEAD")
+        }
+        func ciChanges(_ args: String...) throws -> (status: Int32, stdout: String, stderr: String) {
+            try run(repositoryFile("scripts/ci-changes.sh"), args, currentDirectory: dir)
+        }
+        /// What `ci-changes.sh` says for a commit that adds a file at each of `paths`.
+        func scope(adding paths: [String]) throws -> String {
+            let base = try git("rev-parse", "HEAD")
+            try commitFiles(paths)
+            let r = try ciChanges(base, "HEAD")
+            try #require(r.status == 0, "\(r)")
+            return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 
     @Test func dcoAcceptsSignedCommits() async throws {
@@ -150,6 +173,70 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         #expect(three.status == 2, "\(three)")
     }
 
+    // MARK: ci-changes.sh
+
+    @Test(arguments: [
+        ["README.md"], ["docs/specs/x.md"], ["docs/uniden/README.txt"], ["images/screenshots/a.png"], ["LICENSE"], ["NOTICE"],
+        ["README.md", "docs/a.md", "CONTRIBUTING.md"],
+    ]) func ciChangesCallsDocumentationDocs(paths: [String]) throws {
+        #expect(try Repo().scope(adding: paths) == "docs")
+    }
+
+    @Test(arguments: [
+        ["Sources/X/a.swift"], ["README.md", "Sources/X/a.swift"], ["Sources/X/notes.md"], ["Tests/X/fixture.md"], ["Resources/x.md"],
+        [".github/workflows/ci.yml"], ["scripts/x.sh"], ["packaging/x.sh"], ["Package.swift"], ["docs/a.md", "Package.swift"],
+        ["config/x.env.example"], ["README.txt"],
+        ["sources/X/notes.md"], ["TESTS/x.md"], ["tests/X/fixture.md"], ["Resources/x.md"], ["resources/x.md"], ["SOURCES/X/n.md"],
+        ["Package.swift", "README.md"], [".github/workflows/ci.yml", "CONTRIBUTING.md"],
+    ]) func ciChangesCallsEverythingElseCode(paths: [String]) throws {
+        #expect(try Repo().scope(adding: paths) == "code")
+    }
+
+    @Test func ciChangesCountsAFileMovedIntoDocsAsCode() throws {
+        let repo = try Repo()
+        try repo.commitFiles(["Sources/X/a.md"])
+        let base = try repo.git("rev-parse", "HEAD")
+        try FileManager.default.createDirectory(at: repo.dir.appending(path: "docs"), withIntermediateDirectories: true)
+        try repo.git("mv", "Sources/X/a.md", "docs/a.md")
+        try repo.git("commit", "-q", "-m", "move")
+        let r = try repo.ciChanges(base, "HEAD")
+        #expect(r.status == 0, "\(r)")
+        #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "code", "\(r.stdout)")
+    }
+
+    @Test func ciChangesCallsAnEmptyDiffCode() throws {
+        let repo = try Repo()
+        let r = try repo.ciChanges("HEAD", "HEAD")
+        #expect(r.status == 0, "\(r)")
+        #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "code", "\(r.stdout)")
+    }
+
+    @Test func ciChangesComparesFromTheMergeBase() throws {
+        // As a pull request shows it: what the branch changed, not what main did meanwhile.
+        let repo = try Repo()
+        try repo.git("checkout", "-q", "-b", "side")
+        try repo.commitFiles(["README.md"])
+        try repo.git("checkout", "-q", "main")
+        try repo.commitFiles(["Sources/X/a.swift"])
+        let r = try repo.ciChanges("main", "side")
+        #expect(r.status == 0, "\(r)")
+        #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "docs", "\(r.stdout)")
+    }
+
+    @Test func ciChangesUsageAndUnknownRevisions() throws {
+        let repo = try Repo()
+        let none = try repo.ciChanges()
+        #expect(none.status == 2 && none.stderr.contains("usage:"), "\(none)")
+        let one = try repo.ciChanges("HEAD")
+        #expect(one.status == 2 && one.stderr.contains("usage:"), "\(one)")
+        let three = try repo.ciChanges("a", "b", "c")
+        #expect(three.status == 2 && three.stderr.contains("usage:"), "\(three)")
+        let unknown = try repo.ciChanges("no-such-revision", "HEAD")
+        #expect(unknown.status == 2, "\(unknown)")
+        #expect(unknown.stderr.contains("ci-changes: can't compare no-such-revision and HEAD"), "\(unknown.stderr)")
+        #expect(unknown.stdout.isEmpty, "\(unknown.stdout)")
+    }
+
     // MARK: ci.yml
 
     @Test func ciRunsOnPushesToMainAndPullRequests() throws {
@@ -224,6 +311,64 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
 
     @Test func ciActionsArePinned() throws {
         try expectPinned("ci.yml")
+    }
+
+    // MARK: the documentation fast path
+
+    /// The step starting at the line `      - name: <prefix>…`, through the line before the next step.
+    private func step(_ prefix: String) throws -> [String] {
+        let lines = try workflowText("ci.yml").components(separatedBy: "\n")
+        let start = try #require(lines.firstIndex { $0.hasPrefix("      - name: \(prefix)") }, "no step \(prefix)")
+        let rest = lines[(start + 1)...]
+        let end = rest.firstIndex { $0.hasPrefix("      - ") } ?? lines.endIndex
+        return Array(lines[start..<end])
+    }
+
+    private func stepIndex(_ prefix: String) throws -> Int {
+        try #require(try workflowText("ci.yml").components(separatedBy: "\n").filter { $0.hasPrefix("      - name: ") }
+            .firstIndex { $0.hasPrefix("      - name: \(prefix)") }, "no step \(prefix)")
+    }
+
+    @Test func ciClassifiesPullRequestsAfterTheDCOStep() throws {
+        let s = try step("Classify the change")
+        #expect(s.contains("        id: changes"), "\(s)")
+        #expect(s.contains("        if: github.event_name == 'pull_request'"), "\(s)")
+        // Assign first, then write: under the runner's `bash -e` a failing script stops the step.
+        #expect(s.contains("        run: |"), "\(s)")
+        #expect(s.contains(#"          scope=$(scripts/ci-changes.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"#), "\(s)")
+        #expect(s.contains(#"          echo "scope=$scope" >> "$GITHUB_OUTPUT""#), "\(s)")
+        #expect(s.filter { $0.hasPrefix("          ") }.count == 2, "the run block must be exactly the two lines: \(s)")
+        let dco = try stepIndex("Check the sign-offs"), classify = try stepIndex("Classify the change"), build = try stepIndex("Build the tests")
+        #expect(dco < classify && classify < build, "\(dco) \(classify) \(build)")
+    }
+
+    @Test func ciRunsOnlyTheRepositorySuitesForDocumentation() throws {
+        let s = try step("Test (documentation checks)")
+        #expect(s.contains("        if: steps.changes.outputs.scope == 'docs'"), "\(s)")
+        #expect(s.contains("        timeout-minutes: 10"), "\(s)")
+        #expect(s.contains(#"        run: swift test --skip-build --filter "RepositoryFilesTests|RepositoryHygieneTests|CIWorkflowTests|PrivateWordsTests|RealNamesTests|InfoPlistTests|PlaceholderBackgroundTests""#), "\(s)")
+        let docs = try stepIndex("Test (documentation checks)"), build = try stepIndex("Build the tests")
+        #expect(build < docs)
+    }
+
+    @Test func ciSkipsTheFullStepsForDocumentation() throws {
+        for name in ["Test (parallel)", "Test (timing-sensitive suites, one at a time)", "Build the app", "Check the shared code builds for iOS"] {
+            #expect(try step(name).contains("        if: steps.changes.outputs.scope != 'docs'"), "\(name)")
+        }
+        for name in ["Check out the code", "Check the sign-offs", "Select Xcode", "Build the tests"] {
+            #expect(!(try step(name).contains { $0.contains("steps.changes") }), "\(name) must not depend on the scope")
+        }
+    }
+
+    @Test func ciStaysOneJobNamedBuildWithNoPathFilter() throws {
+        let text = try workflowText("ci.yml")
+        let code = codeLines(text)
+        let at = try #require(code.firstIndex(of: "jobs:"))
+        let jobs = code[(at + 1)...].filter { $0.hasPrefix("  ") && !$0.hasPrefix("   ") }
+        #expect(jobs == ["  build:"], "\(jobs)")
+        for key in ["paths:", "paths-ignore:"] {
+            #expect(!code.contains { $0.trimmingCharacters(in: .whitespaces).hasPrefix(key) }, "ci.yml has \(key)")
+        }
     }
 
     // MARK: every workflow
