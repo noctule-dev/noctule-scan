@@ -251,7 +251,10 @@ private func eventually(_ limit: Duration = .seconds(2),
 
 /// Whether a connect to 127.0.0.2 is left waiting here: that address routes to lo0 but isn't this
 /// Mac's, so its SYN goes unanswered without leaving the machine, unless someone aliased it.
-private let unansweredLoopbackWaits: Bool = {
+/// Looked up once, on a dispatch thread (it waits up to 200 ms), by a task the traits await.
+private let unansweredLoopbackWaits = Task<Bool, Never> { await offThePool(probeUnansweredLoopback) }
+
+@Sendable private func probeUnansweredLoopback() -> Bool {
     var address = sockaddr_in()
     address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
     address.sin_family = sa_family_t(AF_INET)
@@ -266,8 +269,8 @@ private let unansweredLoopbackWaits: Bool = {
     }
     guard result != 0, errno == EINPROGRESS else { return false }
     var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-    return poll(&descriptor, 1, 200) == 0  // at planning time, before any test runs
-}()
+    return poll(&descriptor, 1, 200) == 0
+}
 
 /// How many of this process's TCP sockets are connected, or connecting, to `host`:`port` (read
 /// from the kernel's per-descriptor socket info, so other tests' sockets don't count).
@@ -293,7 +296,7 @@ private func tcpSockets(to host: String, port: UInt16) -> Int {
 /// A cancelled connect ends at once with `CancellationError`, long before its deadline, and closes
 /// its socket. Cancellation is how a stop, a quit or a sleep cuts short a connect to an unreachable
 /// scanner. (Port 7, which no other test connects to, so the socket count is this test's alone.)
-@Test(.enabled(if: unansweredLoopbackWaits, "127.0.0.2 answers on this Mac (aliased on lo0)"))
+@Test(.enabled("127.0.0.2 answers on this Mac (aliased on lo0)") { await unansweredLoopbackWaits.value })
 func cancelledConnectsEndAtOnceAndCloseTheirSockets() async throws {
     let connects = 8
     let tasks = (0..<connects).map { _ in
@@ -343,7 +346,7 @@ private func loopback(_ host: String, _ port: UInt16) async throws -> SocketAddr
 }
 
 /// A first address that waits out the deadline leaves no time for the next: it isn't tried.
-@Test(.enabled(if: unansweredLoopbackWaits, "127.0.0.2 answers on this Mac (aliased on lo0)"))
+@Test(.enabled("127.0.0.2 answers on this Mac (aliased on lo0)") { await unansweredLoopbackWaits.value })
 func anUnansweredAddressThatUsesTheDeadlineLeavesTheNextUntried() async throws {
     let listener = try LoopbackListener()
     defer { listener.close() }

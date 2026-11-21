@@ -81,11 +81,20 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
     @Test func listenSecondsRecordsAndTearsDown() async throws {
         let fixture = try await ListenFixture.make()
         let wav = fixture.directory.appending(path: "out.wav")
-        let noctule = try Noctule(fixture.arguments(["--seconds", "2", "--record", wav.path]))
-        let exited = await noctule.waitForExit(within: 15)
-        // Seen at or after the exit, and measured from before the launch: only ever longer than
-        // the run itself, so a `listen` that stopped before its 2 s still fails.
-        let ran = Date().timeIntervalSince(noctule.started)
+        let noctule = try Noctule(fixture.arguments(["--seconds", "4", "--record", wav.path]))
+        _ = await noctule.waitForStderr(within: 15) { $0.contains("audio: streaming") }
+        let streamingSeen = Date()
+        let exited = await noctule.waitForExit(within: 20)
+        let exitSeen = Date()
+        // `--seconds` runs from when streaming starts. Each time here is seen at or after its
+        // event, so the run measured from before the launch can only be longer than the real
+        // one (a `listen` that stopped early still fails), and the run measured from when
+        // "streaming" was seen can only be shorter, except for the lateness of seeing the exit
+        // (a `listen` that ran on past its seconds still fails). The 2.5 s allows for the
+        // teardown and for late wakeups (up to 1.4 s on the CI runner); a doubled timer is 4 s
+        // over.
+        let ran = exitSeen.timeIntervalSince(noctule.started)
+        let ranSinceStreaming = exitSeen.timeIntervalSince(streamingSeen)
         noctule.kill()
         let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
@@ -108,15 +117,16 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         #expect(Int(le32(data, at: 4)) == dataSize + 36)
         // The recording holds the packets `listen` received, not a count a fixed window promises:
         // the fake sender paces 25 packets a second with its own sleeps, and a slow machine sends
-        // fewer within `--seconds` (CI run 44958491347: 22 packets, 14,080 bytes, against a
+        // fewer within `--seconds` (CI run 44958491347: 22 packets in 2 s, 14,080 bytes, against a
         // 25,600-byte floor). Each 320-byte μ-law packet records as 640 bytes, every received
         // packet is recorded (none is lost or reordered on loopback, and the shutdown drains the
         // chunks before the WAV is closed), and at least 10 prove a recording, not a stub.
-        #expect(ran >= 2, "listen exited \(ran) s after its launch, before its --seconds 2")
+        #expect(ran >= 4, "listen exited \(ran) s after its launch, before its --seconds 4")
+        #expect(ranSinceStreaming < 6.5, "listen exited \(ranSinceStreaming) s after streaming began, well past its --seconds 4")
         let packets = result.stdout.split(separator: "\n").first { $0.hasPrefix("packets ") }
             .flatMap { $0.split(separator: " ").dropFirst().first }.flatMap { Int($0) }
         let received = try #require(packets, "no packets line: \(result.stdout)")
-        #expect(received >= 10, "only \(received) packets in 2 s")
+        #expect(received >= 10, "only \(received) packets in 4 s")
         #expect(dataSize == received * 640, "data size \(dataSize) for \(received) packets")
     }
 
