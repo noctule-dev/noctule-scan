@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sean Foley and the Noctule Scan contributors
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/noctule-dev/noctule-scan/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately, as SECURITY.md describes, not as a public issue.

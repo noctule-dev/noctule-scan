@@ -1,0 +1,13 @@
+{
+  "groups" : [
+    {
+      "layers" : [ { "glass" : true, "image-name" : "01-signal.svg", "name" : "signal" } ],
+      "name" : "signal"
+    },
+    {
+      "layers" : [ { "glass" : false, "image-name" : "00-background.svg", "name" : "background" } ],
+      "name" : "background"
+    }
+  ],
+  "supported-platforms" : { "circles" : [ "watchOS" ], "squares" : "shared" }
+}

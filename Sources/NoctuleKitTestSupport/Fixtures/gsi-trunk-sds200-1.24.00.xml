@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScannerInfo Mode="Trunk Scan" V_Screen="trunk_scan">
+  <MonitorList Name="lakeworks" Index="2" ListType="FL" Q_Key="0" N_Tag="None" DB_Counter="0"/>
+  <System Name="LWPC P25-2" Index="118" Avoid="Off" SystemType="P25 Trunk" Q_Key="0" N_Tag="None" Hold="Off"/>
+  <Department Name="Unknown" Index="4294967295" Avoid="Off" Q_Key="0" Hold="Off"/>
+  <TGID Name="TGID:9" Index="4294967295" Avoid="Off" TGID="TGID:9" SetSlot="Slot Any" RecSlot="Slot None" N_Tag="None" Hold="Off" P_Ch="Off" LVL="0"/>
+  <UnitID Name="UID:7316" U_Id="UID:7316"/>
+  <Site Name="northside" Index="121" Avoid="Off" Q_Key="None" Hold="Off" Mod="NFM"/>
+  <SiteFrequency Freq=" 935.437500MHz" IFX="Off" SAS="NAC Search" SAD="NAC 2B4h"/>
+  <DualWatch PRI="Off" CC="Off" WX="Off"/>
+  <Property F="Off" VOL="2" SQL="1" Sig="5" Att="Off" Rec="Off" KeyLock="Off" P25Status="PT1"
+            Mute="Unmute" Backlight="100" A_Led="Off" Dir="Up" Rssi="-69"/>
+  <ViewDescription></ViewDescription>
+</ScannerInfo>

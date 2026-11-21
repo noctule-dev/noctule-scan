@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sean Foley and the Noctule Scan contributors
+name: Feature request
+description: Suggest something Noctule Scan should do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The need first, then any idea for how to meet it.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like to see?
+  - type: dropdown
+    id: model
+    attributes:
+      label: Scanner model it matters for
+      options:
+        - SDS100
+        - SDS150
+        - SDS200
+        - Other
+        - Not model specific
+  - type: markdown
+    attributes:
+      value: Remove real system names, frequencies, talkgroups and unit IDs from anything you paste or attach.

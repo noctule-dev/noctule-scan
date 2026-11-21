@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sean Foley and the Noctule Scan contributors
+
+# Release from a version tag (Plan 14): test, sign, notarize, and make a draft release.
+# Formatted so the line-based ReleaseWorkflowTests can read it: keep the job's keys at 4 spaces and
+# its steps as `      - ` list items.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: xcode-27
+    environment: release
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.ref_name }}
+      cancel-in-progress: false
+    env:
+      NOCTULE_NO_USB_DETECTION: "1"
+      NOCTULE_CI_RUNNER: "1"
+      NOCTULE_PYTHON: /opt/homebrew/bin/python3
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Everything that needs no Apple secret, before any build or test minutes are spent.
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: packaging/ci/release-from-tag.sh --preflight "$GITHUB_REF_NAME"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+
+      - name: Build the tests
+        timeout-minutes: 15
+        run: swift build --build-tests
+
+      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on the 3-core runner, so
+      # they run alone in the next step, one at a time. Seven known flakes skip themselves on this
+      # runner (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`). The full suite runs locally.
+      - name: Test (parallel)
+        timeout-minutes: 20
+        run: swift test --skip-build --skip MockSDS200Tests --skip MockSerialScannerTests --skip ScannerClientTests --skip KeepAliveOnTheMock --skip PipeLineInSourceTests --skip MockLineOutTests --skip StationRunnerLineInTests --skip StationRunnerClippedAndSilentHitsTests --skip LineInCLIIntegrationTests
+
+      - name: Test (timing-sensitive suites, one at a time)
+        timeout-minutes: 20
+        run: swift test --skip-build --no-parallel --filter "MockSDS200Tests|MockSerialScannerTests|ScannerClientTests|KeepAliveOnTheMock|PipeLineInSourceTests|MockLineOutTests|StationRunnerLineInTests|StationRunnerClippedAndSilentHitsTests|LineInCLIIntegrationTests"
+
+      - name: Prepare the disk image tools
+        run: packaging/dmg/make-dmg.sh --prepare
+
+      - name: Create the signing keychain
+        env:
+          NOCTULE_DEVELOPER_ID_P12: ${{ secrets.NOCTULE_DEVELOPER_ID_P12 }}
+          NOCTULE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.NOCTULE_DEVELOPER_ID_P12_PASSWORD }}
+        run: packaging/ci/signing-keychain.sh create
+
+      # The official art lives in the private design-language repo; the tests above ran on the
+      # placeholder, and only the build step below is told where the art is.
+      - name: Read the branding ref
+        id: branding
+        run: echo "ref=$(cat packaging/branding-ref)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the branding
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: noctule-dev/noctule-design-language
+          ref: ${{ steps.branding.outputs.ref }}
+          ssh-key: ${{ secrets.NOCTULE_BRANDING_DEPLOY_KEY }}
+          path: branding
+          sparse-checkout: builds/noctule-scan
+          persist-credentials: false
+
+      - name: Build, sign, notarize and draft the release
+        env:
+          NOCTULE_BRANDING_DIR: ${{ github.workspace }}/branding/builds/noctule-scan
+          NOCTULE_NOTARY_KEY_P8: ${{ secrets.NOCTULE_NOTARY_KEY_P8 }}
+          NOCTULE_NOTARY_KEY_ID: ${{ secrets.NOCTULE_NOTARY_KEY_ID }}
+          NOCTULE_NOTARY_ISSUER: ${{ secrets.NOCTULE_NOTARY_ISSUER }}
+          GH_TOKEN: ${{ github.token }}
+        run: packaging/ci/release-from-tag.sh "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: packaging/ci/signing-keychain.sh delete

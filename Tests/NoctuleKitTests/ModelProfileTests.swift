@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Sean Foley and the Noctule Scan contributors
+
+import Testing
+@testable import NoctuleKit
+
+@Suite struct ModelProfileTests {
+    @Test func profiles() {
+        let sds200 = ModelProfile.profile(for: .sds200)
+        #expect(sds200.hasNetworkAudio); #expect(sds200.supportsRemoteRestart)
+        #expect(!sds200.supportsChargeStatus); #expect(sds200.usbProductIDs == [])
+
+        let sds150 = ModelProfile.profile(for: .sds150)
+        #expect(!sds150.hasNetworkAudio); #expect(!sds150.supportsRemoteRestart)
+        #expect(sds150.supportsChargeStatus); #expect(sds150.usbProductIDs == [0x001A])
+
+        // The SDS100 shows the SDS150's product ID in serial mode; neither has audio, restart or a battery reading here.
+        let sds100 = ModelProfile.profile(for: .sds100)
+        #expect(!sds100.hasNetworkAudio); #expect(!sds100.supportsRemoteRestart)
+        #expect(!sds100.supportsChargeStatus); #expect(sds100.usbProductIDs == [0x001A])
+
+        for model in [ScannerModel.bcd436hp] {
+            let p = ModelProfile.profile(for: model)
+            #expect(!p.hasNetworkAudio, "\(model)"); #expect(!p.supportsRemoteRestart, "\(model)")
+            #expect(!p.supportsChargeStatus, "\(model)"); #expect(p.usbProductIDs == [], "\(model)")
+        }
+    }
+
+    /// The keep-alive a subscription passes: the model's, over a serial link only, with an
+    /// interval override applied only to a keep-alive the model has.
+    @Test func keepAliveForASubscription() {
+        let kal = PushKeepAlive(command: "KAL", interval: .seconds(60))
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: true) == kal)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150GBT", overSerial: true) == kal)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: true, interval: .milliseconds(400))
+                == PushKeepAlive(command: "KAL", interval: .milliseconds(400)))
+        // The SDS100 renews its own `PSI` instead of sending a command.
+        let renewal = PushKeepAlive(action: .renewSubscription, interval: .seconds(60))
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS100", overSerial: true) == renewal)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS100", overSerial: true, interval: .milliseconds(400))
+                == PushKeepAlive(action: .renewSubscription, interval: .milliseconds(400)))
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS100", overSerial: false) == nil)
+        // Never over the network, and never to a model without one, whatever the override.
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: false) == nil)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: false, interval: .seconds(1)) == nil)
+        for reported in ["SDS200", "BCD436HP", "UBC9999", ""] {
+            #expect(PushKeepAlive.forSubscription(reportedModel: reported, overSerial: true) == nil, "\(reported)")
+            #expect(PushKeepAlive.forSubscription(reportedModel: reported, overSerial: true, interval: .seconds(1)) == nil,
+                    "\(reported)")
+            #expect(PushKeepAlive.forSubscription(reportedModel: reported, overSerial: false) == nil, "\(reported)")
+        }
+    }
+
+    /// The two kinds of keep-alive: a named command (`KAL`), the form every existing call site
+    /// builds, and the renewal of the subscription's own `PSI`.
+    @Test func keepAliveKinds() {
+        #expect(PushKeepAlive(command: "KAL", interval: .seconds(60)).action == .command("KAL"))
+        #expect(PushKeepAlive(command: "KAL", interval: .seconds(60))
+                == PushKeepAlive(action: .command("KAL"), interval: .seconds(60)))
+        #expect(PushKeepAlive(action: .renewSubscription, interval: .seconds(60)).action == .renewSubscription)
+        #expect(PushKeepAlive(action: .renewSubscription, interval: .seconds(60))
+                != PushKeepAlive(command: "PSI", interval: .seconds(60)))
+        #expect("\(PushRenewalRefused())" == "the scanner refused PSI")
+        #expect(PushRenewalRefused() == PushRenewalRefused())
+    }
+
+    /// An override outside 0.05–60 s is ignored: the model's own interval stays.
+    @Test func overrideOutsideTheRangeIsIgnored() {
+        let kal = PushKeepAlive(command: "KAL", interval: .seconds(60))
+        #expect(PushKeepAlive.overrideRange == .milliseconds(50) ... .seconds(60))
+        for ignored in [Duration.milliseconds(1), .milliseconds(49), .zero, .seconds(-1), .seconds(61), .seconds(184)] {
+            #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: true, interval: ignored)?.interval
+                    == .seconds(60), "\(ignored)")
+            #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: true, interval: ignored) == kal)
+        }
+        for taken in [Duration.milliseconds(50), .seconds(60)] {
+            #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: true, interval: taken)?.interval
+                    == taken, "\(taken)")
+        }
+    }
+
+    /// How often a subscription asks for pushes (`PSI,<ms>`): 100 ms on the SDS150 (sustained on
+    /// hardware, 2026-11-13), the SDS200 and the SDS100, 500 ms on the BCD436HP.
+    @Test func pushIntervals() {
+        for model in [ScannerModel.sds150, .sds200, .sds100] {
+            #expect(ModelProfile.profile(for: model).pushInterval == .milliseconds(100), "\(model)")
+        }
+        for model in [ScannerModel.bcd436hp] {
+            #expect(ModelProfile.profile(for: model).pushInterval == .milliseconds(500), "\(model)")
+        }
+    }
+
+    /// The shortest gap between two `STS` reads while the screen changes: 100 ms on the SDS150 and
+    /// the SDS200 and the SDS100 (their push interval, so a scan's every step is read), 1 s on the BCD436HP.
+    @Test func displayRefreshIntervals() {
+        for model in [ScannerModel.sds150, .sds200, .sds100] {
+            #expect(ModelProfile.profile(for: model).displayRefreshInterval == .milliseconds(100), "\(model)")
+        }
+        for model in [ScannerModel.bcd436hp] {
+            #expect(ModelProfile.profile(for: model).displayRefreshInterval == .seconds(1), "\(model)")
+        }
+    }
+
+    @Test func reportedNames() {
+        #expect(ScannerModel(reported: "SDS150") == .sds150)
+        #expect(ScannerModel(reported: "SDS150GBT") == .sds150)
+    }
+}

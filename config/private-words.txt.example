@@ -1,0 +1,6 @@
+# Copy to config/private-words.txt (git-ignored) and list, one per line, words that must never
+# appear in tracked files: internal codenames, private hostnames, personal paths, anything you
+# don't want in a public repository. Blank lines and lines starting with # are ignored.
+# PrivateWordsTests checks every tracked text file against it, and skips when the file is absent.
+example-internal-codename
+example-private-hostname

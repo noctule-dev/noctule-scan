@@ -1,0 +1,75 @@
+{
+  "model": "SDS200",
+  "firmware": "1.26.01",
+  "loop": true,
+  "mode": "trunk",
+  "idle": {
+    "system": "Riverbend County P25",
+    "site": "Riverbend Simulcast",
+    "frequencyMHz": 851.0125,
+    "modulation": "NFM",
+    "rssi": -999
+  },
+  "transmissions": [
+    {
+      "at": 2,
+      "duration": 4,
+      "system": "Riverbend County P25",
+      "department": "Lakeview Fire",
+      "channel": "Lakeview Fire Dispatch",
+      "tgid": "1201",
+      "unitID": "4101",
+      "frequencyMHz": 851.2375,
+      "modulation": "NFM",
+      "toneOrCode": "NAC 2A1h",
+      "rssi": -62,
+      "programmed": true,
+      "toneHz": 440
+    },
+    {
+      "at": 9,
+      "duration": 5,
+      "system": "Riverbend County P25",
+      "department": "Riverbend Sheriff",
+      "channel": "Sheriff Ops 1",
+      "tgid": "2305",
+      "unitID": "7702",
+      "frequencyMHz": 852.5125,
+      "modulation": "NFM",
+      "toneOrCode": "NAC 2A1h",
+      "rssi": -71,
+      "programmed": true,
+      "toneHz": 660
+    },
+    {
+      "at": 17,
+      "duration": 3,
+      "system": "Riverbend County P25",
+      "department": "Unknown",
+      "channel": "TGID:3999",
+      "tgid": "3999",
+      "unitID": "9931",
+      "frequencyMHz": 853.1875,
+      "modulation": "NFM",
+      "toneOrCode": "NAC 2A1h",
+      "rssi": -88,
+      "programmed": false,
+      "toneHz": 880
+    },
+    {
+      "at": 23,
+      "duration": 4,
+      "system": "Riverbend County P25",
+      "department": "Lakeview Fire",
+      "channel": "Lakeview Fire Tac 2",
+      "tgid": "1207",
+      "unitID": "4133",
+      "frequencyMHz": 851.2375,
+      "modulation": "NFM",
+      "toneOrCode": "NAC 2A1h",
+      "rssi": -66,
+      "programmed": true,
+      "toneHz": 1000
+    }
+  ]
+}

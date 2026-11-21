@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScannerInfo Mode="WX Scan" V_Screen="wx_alert">
+  <WxMode Mode="Monitor Weather" />
+  <WxChannel Index="3" CH_No="4" Freq=" 162.550000MHz" Mod="FM" Hold="Off" LVL="0" IFX="Off" />
+  <DualWatch PRI="Off" CC="Off" WX="Off"/>
+  <Property F="Off" VOL="2" SQL="1" Sig="2" Att="Off" Rec="Off" KeyLock="Off" P25Status="None"
+            Mute="Unmute" Backlight="100" A_Led="Off" Dir="Up" Rssi="-80"/>
+  <ViewDescription></ViewDescription>
+</ScannerInfo>

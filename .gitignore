@@ -1,0 +1,33 @@
+# Local configuration (real hosts, addresses, credentials, real names)
+config/*.env
+!config/*.env.example
+config/*.txt
+
+# The maintainer's own agent rules for their units (AGENTS.local.md, read through CLAUDE.local.md)
+AGENTS.local.md
+CLAUDE.local.md
+
+# Brainstorming companion scratch files
+.superpowers/
+
+# Uniden manuals: copyrighted, kept locally only
+docs/uniden/*.pdf
+
+# macOS
+.DS_Store
+
+# Xcode / Swift
+xcuserdata/
+DerivedData/
+.build/
+.swiftpm/
+*.xcuserstate
+
+# The assembled app (scripts/build-app.sh)
+build/
+
+# The release job checks the design-language art out here (release.yml, "Check out the branding")
+/branding/
+
+# Agent worktrees
+.claude/worktrees/

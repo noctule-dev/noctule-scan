@@ -1,0 +1,8 @@
+# Copy to config/real-names.txt (git-ignored) and list, one per line, the real names and
+# values that must never appear in tracked files: system, department, site, and channel names,
+# frequencies, unit IDs, NAC / Sys ID / WACN values from your own scanner. Blank lines and
+# lines starting with # are ignored. RealNamesTests checks tracked text files against it, and
+# skips when the file is absent.
+Example County Sheriff
+Example Gas and Power
+123.4567

@@ -1,0 +1,13 @@
+GSI,<XML>,
+<?xml version="1.0" encoding="utf-8"?>
+<ScannerInfo Mode="Scan Mode" V_Screen="conventional_scan">
+  <MonitorList Name="Lakeview County" Index="0" ListType="FL" Q_Key="5" N_Tag="None" DB_Counter="0" />
+  <System Name="County Roads" Index="115" Avoid="Off" SystemType="Conventional" Q_Key="2" N_Tag="None" Hold="Off" />
+  <Department Name="Road Crews" Index="118" Avoid="Off" Q_Key="0" Hold="Off" />
+  <ConvFrequency Name="Plow Dispatch" Index="120" Avoid="Off" Freq="  155.012500MHz" Mod="NFM" N_Tag="None" Hold="Off" SvcType="Public Works" P_Ch="Off" SAS="All" SAD="None" RecSlot="Slot None" LVL="0" IFX="Off" TGID="TGID None" U_Id="UID None" />
+  <DualWatch PRI="Off" CC="Off" WX="Off" />
+  <Property F="Off" VOL="5" SQL="2" Sig="0" Att="Off" Rec="Off" KeyLock="Off" P25Status="None" Mute="Mute" Backlight="100" A_Led="Off" Dir="Up" Rssi="-999" />
+  <ViewDescription>
+    <OverWrite Text="Scanning..." />
+  </ViewDescription>
+</ScannerInfo>

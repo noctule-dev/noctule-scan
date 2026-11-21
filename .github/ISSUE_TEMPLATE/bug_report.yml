@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sean Foley and the Noctule Scan contributors
+name: Bug report
+description: Something doesn't work as it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you paste logs or attach screenshots, remove real system names, frequencies, talkgroups and unit IDs.
+  - type: dropdown
+    id: model
+    attributes:
+      label: Scanner model
+      options:
+        - SDS100
+        - SDS150
+        - SDS200
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Scanner firmware version
+      placeholder: "1.26.01"
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - Network
+        - USB
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Noctule Scan version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: mock
+    attributes:
+      label: Does it happen on the mock scanner (`noctule-mock-scanner`)?
+      options:
+        - "Yes"
+        - "No"
+        - Haven't tried
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+    validations:
+      required: true

@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sean Foley and the Noctule Scan contributors
+# Build and test every pull request and every push to main, and check the DCO sign-offs on pull
+# requests. It has no secrets, no environment and no write access, so code from a fork can run in it
+# safely; the release workflow is the only one that signs. The app is built on the placeholder art.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 120
+    env:
+      NOCTULE_NO_USB_DETECTION: "1"
+      NOCTULE_CI_RUNNER: "1"
+      NOCTULE_PYTHON: /opt/homebrew/bin/python3
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the sign-offs
+        if: github.event_name == 'pull_request'
+        run: scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+
+      - name: Build the tests
+        timeout-minutes: 15
+        run: swift build --build-tests
+
+      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on the 3-core runner, so
+      # they run alone in the next step, one at a time. Seven known flakes skip themselves on this
+      # runner (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`). The full suite runs locally.
+      - name: Test (parallel)
+        timeout-minutes: 20
+        run: swift test --skip-build --skip MockSDS200Tests --skip MockSerialScannerTests --skip ScannerClientTests --skip KeepAliveOnTheMock --skip PipeLineInSourceTests --skip MockLineOutTests --skip StationRunnerLineInTests --skip StationRunnerClippedAndSilentHitsTests --skip LineInCLIIntegrationTests
+
+      - name: Test (timing-sensitive suites, one at a time)
+        timeout-minutes: 20
+        run: swift test --skip-build --no-parallel --filter "MockSDS200Tests|MockSerialScannerTests|ScannerClientTests|KeepAliveOnTheMock|PipeLineInSourceTests|MockLineOutTests|StationRunnerLineInTests|StationRunnerClippedAndSilentHitsTests|LineInCLIIntegrationTests"
+
+      - name: Build the app
+        timeout-minutes: 20
+        env:
+          NOCTULE_BRANDING_DIR: ""
+        run: scripts/build-app.sh
+
+      - name: Check the shared code builds for iOS
+        timeout-minutes: 20
+        run: xcodebuild -scheme NoctuleAppCore -destination 'generic/platform=iOS' build

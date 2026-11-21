@@ -1,0 +1,27 @@
+{
+  "model": "SDS200",
+  "firmware": "1.26.01",
+  "loop": true,
+  "mode": "weather",
+  "idle": {
+    "system": "WX Scan",
+    "site": "",
+    "frequencyMHz": 162.425,
+    "modulation": "FM",
+    "rssi": -999
+  },
+  "transmissions": [
+    {
+      "at": 0,
+      "duration": 3600,
+      "system": "WX Scan",
+      "department": "",
+      "channel": "Lakeview Weather",
+      "frequencyMHz": 162.425,
+      "modulation": "FM",
+      "rssi": -78,
+      "programmed": true,
+      "toneHz": 700
+    }
+  ]
+}

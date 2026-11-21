@@ -1,0 +1,276 @@
+# Uniden SDS-series remote protocol — working notes
+
+Date: 2026-11-08
+Status: Research notes for Noctule Scan. Not an official Uniden document.
+
+Sources:
+- **[lib]** The open-source `sds200` Python library (sdsctl) v0.32.0, MIT License, © 2026 Steven Boyd — <https://github.com/stevenboyd78/sdsctl>, <https://pypi.org/project/sds200/>. Read for protocol facts only. Noctule Scan is written from scratch in Swift; no code is copied. If any code is ever ported, keep the MIT notice.
+- **[hw]** Read-only probes of the owner's SDS200 (address in git-ignored `config/dev-scanner.env`; firmware **1.24.00**) on 2026-11-08, and later ones dated where they appear. For the SDS150, **[hw]** means read-only probes of the owner's SDS150 over USB serial (firmware **1.01.02**) on 2026-11-11 (`docs/specs/2026-11-11-sds150-usb-design.md` §3) and its hardware session from 2026-11-12 (that design's §8, and §8 item 10 here). For the SDS100, **[hw]** means the owner's SDS100 over USB serial (firmware **1.26.01**) on 2026-11-16, read-only reads and push runs at the owner's go-ahead for each (`docs/specs/2026-11-16-sds100-usb-design.md` §3, and §8 item 11 here). Rows say which model.
+- **[spec]** Uniden's *SDS Series Remote Command Specification* V2.00 (2025-07-07), covering the SDS100, SDS150 and SDS200 (local copy in the git-ignored `docs/uniden/`; `docs/uniden/README.md` says where to get it). Before 2026-11-11 these notes cited the *SDS100 Remote Command Specification* v0.01 (2018-04-13) and an SDS150 specification through [lib] only.
+- **[assumed]** Neither seen on hardware nor stated by [spec]; a reasonable guess until checked.
+
+Probes must stay read-only unless the owner approves otherwise. Safe probe commands: `MDL`, `VER`, `VOL`, `SQL` (no argument), `GSI`, `STS`, `MSI`, RTSP `DESCRIBE`; on the SDS150 also `GCS` (read-only by [spec]; answered on the owner's unit on 2026-11-12, see its row). Never `MSM,1` or `POF` to an SDS150. Never `KAL`, `MSM,1` or `POF` to an SDS100 (`KAL` answers `ERR` there); `GCS` is read-only and the owner lets agents test it on the SDS100 without asking (one, never a loop), but it gave no reading there.
+
+## 1. Transports
+
+| Model | USB serial | UDP control | RTSP audio | Notes |
+|---|---|---|---|---|
+| SDS200 | yes | yes, port 50536 | yes | [lib] hardware-validated on fw 1.26.01; [hw] confirmed on 1.24.00 |
+| SDS100 | yes [hw, SDS100] | no | no | USB CDC ACM: vendor ID 0x1965, **product ID 0x001A, the SDS150's too**, "SDS100 Serial Port", device release 0x0100 (the SDS150's is 0x0200), **no USB serial number** [hw, SDS100]. [lib] hardware-validated |
+| SDS150 | yes, only after Serial Port is chosen on its screen [hw] | no | no [hw] | USB CDC ACM: vendor ID 0x1965, product ID 0x001A, "SDS150 Serial Port", no audio or network interface [hw]. BLE not covered |
+
+Same command set over USB serial and UDP. The SDS150 doesn't appear on USB at all until its on-screen prompt (serial port or mass storage) is answered; mass storage is a different USB personality, not examined. In serial mode macOS's own CDC ACM driver makes `/dev/cu.usbmodem<serial>1`; the USB serial number looks like a placeholder, so it can't tell two units apart [hw]. The SDS100 reports no serial number at all, so its port is named from the USB location (`/dev/cu.usbmodem<location>1`) and changes when the cable moves to another socket or hub [hw, SDS100]. Since the two handhelds share a product ID, only the product name tells them apart before `MDL` (`SerialPortInfo.knownModel` reads it first). Whether the SDS100 also asks for Serial Port or mass storage on its screen was not looked at. **No authentication or encryption.** Keep it on the LAN or VPN only.
+
+## 2. Framing
+
+- Request: ASCII `CMD[,arg...]\r`. One UDP datagram per command, sent to port 50536.
+- Response: `CMD,field,field...` plus `\r`. Acks are `CMD,OK`. Rejections are `CMD,NG`, `CMD,ERR`, or `CMD,ERROR`.
+- XML responses begin `CMD,<XML>,` followed by an XML document (`GSI`, `PSI`, `GLT`, `MSI`, `AST`).
+  - Over UDP, a large XML document can arrive in several datagrams. Each fragment carries a `<Footer No="n" EOT="0|1"/>` (also seen as `<Foot>`). Reassemble by `No`; `EOT="1"` marks the last fragment. [lib]
+  - A continuation datagram may start with bare XML (no `CMD,<XML>,` prefix). [lib]
+  - Reasonable limits: discard incomplete sequences after about 10 s, and cap a document at about 4 MB. [lib]
+  - [hw] A single `GSI` reply fit in one datagram with no footer.
+- Decode as UTF-8, replacing invalid bytes, and strip NULs. `STS` contains non-ASCII glyph bytes (icons). [hw]
+
+### 2a. USB serial (SDS150, 2026-11-11)
+
+- Line settings: 115200 baud, 8-N-1, no flow control worked [hw]. [spec] doesn't state them; a CDC ACM device usually ignores the baud rate [assumed].
+- Request: `NAME[,args]\r`, the same bytes as over UDP [hw].
+- First reply byte within 1–20 ms for `MDL`, `VER`, `VOL`, `SQL`, `GSI`, `STS` [hw].
+- A serial port is a byte stream: nothing marks where a reply ends except its own shape. Replies end with `\r` [hw], except `GCS`, which ends with `\n` [spec].
+- XML replies: `GSI,<XML>,\r`, then the document as lines separated by `\r`, ending `</ScannerInfo>\r`. **No `<Footer>` on `GSI` and `PSI`** [hw] (the SDS200's `GSI` over UDP had none either, §2 above; only its `MSI` does, §5a). So a document ends where its root element closes. `PSI` pushes take the same form [hw, 2026-11-12]; `MSI` is assumed to [assumed]. **`GLT` does have a footer, and pages** [hw, SDS150 fw 1.01.02 and SDS100 fw 1.26.01, 2026-11-19]: every `GLT` document ends with `<Footer No="n" EOT="0|1"/>`, and a long reply is several documents, each with its own `GLT,<XML>,` line (§5b).
+- `SerialResponseAssembler` (`NoctuleKit`) cuts lines at `\r` or `\n`, drops empty lines, collects a `NAME,<XML>,` line's document until its root closes, and keeps the UDP limits (a document open about 10 s or about 4 MB is dropped). A document with a `<Footer>` is a page: since 2026-11-19 the pages of one reply are put together by `No` until `EOT="1"`, as over UDP (`XMLFragmentSequences`, shared by both assemblers; a new `No="1"` replaces an unfinished sequence; a gap in `No`, a sequence open over 10 s, over 4 MB or 256 pages, or a page lost in the assembler (cut off by a new document, too big, unparseable) drops that reply, traced as `serial: dropped <command> pages: <reason>`), so the client gets one document. Before that it stripped the footer and handed on each page as a whole reply. It assumes a push never lands inside another reply's lines [assumed]; §8 item 10 checks it. A push may come between two pages of a reply; sequences are per command, so it leaves them alone.
+- The port is exclusive while open: `SerialTransport` takes `TIOCEXCL` and a non-blocking `flock`. Whether `flock` works on the real `/dev/cu.usbmodem*` node is untried (§8 item 10).
+
+## 3. Commands
+
+### Identification
+| Cmd | Example | Notes |
+|---|---|---|
+| `MDL` | `MDL,SDS200` [hw]; `MDL,SDS150` [hw, SDS150]; `SDS100` [hw, SDS100] | [spec] and [lib] give `SDS150GBT` for the SDS150; the owner's unit says `SDS150`. Accept both as SDS150 (`ScannerModel(reported:)`) |
+| `VER` | `VER,Version 1.24.00` [hw]; `VER,Version 1.01.02` [hw, SDS150]; `1.26.01` [hw, SDS100] | The SDS100's raw line wasn't seen (`noctule info` printed `1.26.01`); the mock answers `VER,Version 1.26.01`, the SDS150's form [assumed] |
+
+### Status
+| Cmd | Purpose |
+|---|---|
+| `GSI` | One-shot `ScannerInfo` XML (§4) |
+| `PSI,<ms>` | Push `ScannerInfo` XML every `<ms>` ms (lib default 500; the app and `noctule log` use `PSI,100` on both the SDS150 and the SDS200 since 2026-11-13 (SDS200 pending H1), and on the SDS100 since Plan 17, `ModelProfile.pushInterval`). `PSI,0` stops it. **This is the basis for live display and hit logging.** On the SDS150 over serial the pushes stop by themselves 183 s after the `PSI`, with the port still open [hw, SDS150] (§8 item 10); the client sends `KAL` during a subscription there (next row). **The SDS100 stops too, about 182–186 s after the `PSI`** (four runs without a renewal, at `PSI,500`, `PSI,100` and `PSI,1000`, two of them with `KAL`), port still open [hw, SDS100]; there `KAL` does nothing, and **the same `PSI,<ms>` written again every 60 s on the open port, with no `PSI,0` between, kept the pushes going** through a 240 s hold, each answered `PSI,OK` and nothing else coming back [hw, SDS100]. The client renews the SDS100's subscription that way (`PushKeepAlive.Action.renewSubscription`, §8 item 11). At `PSI,100` the SDS100 pushed about every 137 ms (median; longest gap 161 ms) [hw, SDS100] |
+| `KAL` | Keep alive [spec]: `KAL\r`, and "Radio does not return a response for Keep Alive command"; no timeout stated. `ScannerClient` sends it every 60 s during a `PSI` subscription on the SDS150 over USB (`ModelProfile.pushKeepAlive`; owner-approved for the SDS150 over USB, 2026-11-12), never to another model and never over the network. On the owner's SDS150 (fw 1.01.02, 2026-11-12) [hw, SDS150]: with `KAL` every 60 s the pushes went on past 183 s, for 240 s (`SDS150HardwareTests/KeepAlive`: 239 pushes, four `KAL`s, longest gap 1.0 s, and nothing came back for any `KAL`: that check reports every line that isn't a push), for 300 s (`noctule watch --serial --interval 1000 --count 300`) and for an hour (`noctule log`, no stall), so pushes go on for as long as `KAL`s come. Not shown: that any other command or interval does. **On the owner's SDS100 (fw 1.26.01, 2026-11-16) `KAL` answers `ERR`, the answer to an unknown command, and the pushes stopped as without it** (three `KAL`s, 60 s apart, in a 240 s hold; last push 181.6 s after the `PSI`) [hw, SDS100]. Never sent to the SDS100 |
+| `STS` | Raw display contents as text lines with highlight masks (§5) |
+| `GST` | Waterfall status (SDS150/SDS200 waterfall) [lib] |
+| `GLT,FL` | List Favorites Lists (XML) [lib]. Read-only. With `GLT,SYS,<FL Index>`, `GLT,DEPT,<SYS Index>` and `GLT,SITE,<SYS Index>` it gives the Favorites tree; answered on all three models [hw, 2026-11-18] (§5b) |
+| `MSI` | The current menu screen as XML (§5a). Read-only; safe to probe [hw]. Outside a menu the SDS100 answers the `TypeError` screen, as the other models do [hw, SDS100]; inside one it hasn't been sent |
+| `DTM` | Date/time |
+| `GCS` | Charge status, SDS150 only [spec][lib]: `GCS,CST=n,VOLT=nnnnmV:nn%,CURR=nnnnmA,TEMP=nn.nnC`, terminated by **`\n`**, not `\r` [spec]. Read-only by [spec]. On the owner's unit (2026-11-12) it answered `CST=8` at 100 % on USB power, every time [hw, SDS150]; 8 is outside the spec's 0–6 and what it means is not known (`noctule info --serial` prints such a code: `battery: 100% (unknown, CST=8)`). `noctule info --serial` sends it once, only to a model whose profile has `supportsChargeStatus`. **On the owner's SDS100 it gave no reading** [hw, SDS100, 2026-11-16]: one `GCS`, through `info` on a throwaway build, printed `warning: no battery status (no answer to GCS)`; `info` waits for a line starting `GCS`, so an `ERR` and silence look the same, and which it was wasn't seen. The SDS100's profile has no `supportsChargeStatus`, so nothing sends it there |
+
+### Settings
+| Cmd | Notes |
+|---|---|
+| `VOL` / `VOL,<n>` | Get/set. Range: SDS200 0–29, SDS100/150 0–15 [lib][spec]. Set acks `VOL,OK` [lib]. SDS150 and SDS100 get: a plain number [hw] |
+| `SQL` / `SQL,<n>` | Get/set. Range: SDS200 0–19, SDS100/150 0–15 [lib][spec]. SDS150 and SDS100 get: a plain number [hw] |
+| `URC` / `URC,<0|1>` | Scanner-side recording status get/set [lib] |
+| `FQK`, `SQK`, `DQK` | Favorites/System/Department quick-key state get/set [lib][spec]. Get is read-only; set changes scanner state. Both work on all three models [hw, 2026-11-18]; the replies differ from the spec (§5b) |
+
+### Control
+| Cmd | Notes |
+|---|---|
+| `KEY,<code>,<mode>` | Front-panel key. Mode `P` = press (the spec leaves modes undefined; `P` is the long-standing Uniden convention) [lib] |
+| `HLD,<target>,<v1>,<v2>` | Hold on a target |
+| `NXT,…` / `PRV,…` | Next/previous within a target |
+| `MSV,,<value>` | Choose a menu item or set an entry's value on the current menu screen (§5a) [hw] |
+| `MNU,…` | Open an indexed menu [lib]; **untried** (keys already do the job) |
+| `MSB` | "Menu back" in Uniden's spec; **untried** |
+| `MSM,1` | **Restart the scanner.** Undocumented; named by the ProScan developer on RadioReference (USB mass-storage mode for 1 s, then reboot). Owner-approved 2026-11-08, and it replied `MSM,OK` on fw 1.26.01. Works only while the UDP control channel still answers. User-confirmed use only (§8.8) |
+| `AST,…` / `APR` | Analysis modes (RF power plot, system status, current activity, LCN monitor) and pause/resume [lib] |
+
+`KEY` codes [lib]:
+
+| Key | Code | Key | Code |
+|---|---|---|---|
+| Menu | `M` | Soft key 1/2/3 | `A` `B` `C` |
+| Func | `F` | Replay | `Y` |
+| Avoid | `L` | Zip | `Z` |
+| 0–9 | `0`–`9` | Service type | `T` |
+| . / No | `.` | Range | `R` |
+| E / Yes | `E` | Volume knob push | `V` |
+| Scroll right / left | `>` `<` | Squelch knob push | `Q` |
+| Scroll push | `^` | | |
+
+Navigation targets for `HLD`/`NXT`/`PRV` [lib]: `SYS`, `DEPT`, `SITE`, `CFREQ`, `TGID`, `STGID`, `WX`, `FTO`, `CCHIT`, `CS_FREQ`, `QS_FREQ`.
+
+Soft-key meaning depends on context. Read the current label from `STS`; don't assume it means Hold. [lib]
+
+## 4. `ScannerInfo` XML (GSI/PSI)
+
+[hw] sample while trunk scanning (whitespace trimmed; names, frequencies, and IDs replaced with fictional values of the same length, structure as captured):
+
+```xml
+<ScannerInfo Mode="Trunk Scan" V_Screen="trunk_scan">
+  <MonitorList Name="lakeworks" Index="2" ListType="FL" Q_Key="0" N_Tag="None" DB_Counter="0"/>
+  <System Name="LWPC P25-2" Index="118" Avoid="Off" SystemType="P25 Trunk" Q_Key="0" N_Tag="None" Hold="Off"/>
+  <Department Name="Unknown" Index="4294967295" Avoid="Off" Q_Key="0" Hold="Off"/>
+  <TGID Name="TGID:9" Index="4294967295" Avoid="Off" TGID="TGID:9" SetSlot="Slot Any" RecSlot="Slot None" N_Tag="None" Hold="Off" P_Ch="Off" LVL="0"/>
+  <UnitID Name="UID:7316" U_Id="UID:7316"/>
+  <Site Name="northside" Index="121" Avoid="Off" Q_Key="None" Hold="Off" Mod="NFM"/>
+  <SiteFrequency Freq=" 935.437500MHz" IFX="Off" SAS="NAC Search" SAD="NAC 2B4h"/>
+  <DualWatch PRI="Off" CC="Off" WX="Off"/>
+  <Property F="Off" VOL="2" SQL="1" Sig="5" Att="Off" Rec="Off" KeyLock="Off" P25Status="PT1"
+            Mute="Unmute" Backlight="100" A_Led="Off" Dir="Up" Rssi="-69"/>
+  <ViewDescription></ViewDescription>
+</ScannerInfo>
+```
+
+Observations:
+- `Mode` and `V_Screen` identify the current screen (e.g. `trunk_scan`). Use them to choose the display template and to detect menus.
+- **`Index="4294967295"` (0xFFFFFFFF) means not programmed.** Here the talkgroup was heard via ID search and isn't in a Favorites List, so its name falls back to `TGID:9` and the department to `Unknown`. This supports "new / not in favorites" detection directly from status, with no Favorites download.
+- Everything the hit log needs is present: system, department, channel/TGID, UID, site, frequency, modulation, NAC (`SAD`), RSSI, signal bars, P25 status.
+- **Conventional channels take the same form on the SDS200 and the SDS150** [hw, SDS200, 2026-11-13; Plan 8 Task 12 Step 3.4]: frequency, modulation and tone are attributes of `ConvFrequency` (`Name`, `Index`, `Avoid`, `Freq`, `Mod`, `N_Tag`, `Hold`, `SvcType`, `P_Ch`, `SAS`, `SAD`, `RecSlot`, `LVL`, `IFX`, `TGID="TGID None"`, `U_Id="UID None"`), with no `Site` or `SiteFrequency`, under `Mode="Scan Mode" V_Screen="conventional_scan"` (one `GSI` while the SDS200 scanned conventional channels; only element and attribute names were kept). The mock sends this form for both models. Still to capture: search, Close Call, and weather samples.
+- [hw] fw 1.26.01, WX Scan (`Mode="WX Scan"`): the channel is `<WxChannel ... Freq=" 162.425000MHz" Mod="FM" .../>`, with no `TGID`/`Site`/`SiteFrequency`. The other attributes weren't recorded. `ScannerInfo` doesn't read `WxChannel` yet, so `channel` and `frequencyMHz` are nil in WX mode; the mock's `weather` scenario emits this shape.
+- Optional `Property/@Battery` on SDS100 (0.0–3.3). [lib][spec] Whether the owner's SDS100 sends it is unchecked: the SDS100 read-only hardware suite prints it (§8 item 11).
+- [hw] SDS100 over serial (fw 1.26.01, 2026-11-16): one `GSI` during a trunked ID search parsed, with system, site, frequency and modulation, no department or channel, and `Sig` 0. Its raw lines weren't looked at, so the serial XML form (`\r`-separated lines, no `<Footer>`) is the SDS150's by assumption [assumed]; the client's serial reader parsed it.
+- [hw] SDS150 over serial (fw 1.01.02): the same structure as the SDS200's (`MonitorList`, `System`, `Department`, `ConvFrequency`, `DualWatch`, `Property`, `ViewDescription`). `Property` carries `VOL`, `SQL`, `Sig`, `Rssi`, `Mute`, `Att`, `Rec`, `P25Status`, plus `Backlight`, `A_Led`, `Dir`, `KeyLock`, `F`. No `<Footer>` (§2a). A conventional channel's frequency, modulation and tone are attributes of `ConvFrequency` itself (`Freq="  155.012500MHz"`, which looks right-aligned in 12 characters, going by this one sample; `Mod`; `SAD`, `None` in the capture), and the document has no `Site` or `SiteFrequency` [hw, SDS150]; `ConvFrequency` also carries `TGID="TGID None"` and `U_Id="UID None"`, placeholders, not IDs (`sds150-gsi-serial.txt`, sanitized). `ScannerInfo` reads `Freq`, `Mod` and `SAD` from `ConvFrequency` when `SiteFrequency`/`Site` don't carry them. While scanning with nothing on air, `noctule status` read `signal: 0`, `muted: yes` and no `Rssi` [hw, SDS150]. During conventional transmissions hits opened and ended (§8 item 10), so `Sig` rises above 0 and falls back, and every hit had an `Rssi`; the raw `Property` during a transmission (`Mute`, `P25Status`) has not been captured. `SAD` with a tone was seen once: `CTCSS`, two spaces, a two-digit tone with one decimal, `Hz` [hw, SDS150].
+
+## 5. `STS` — raw display
+
+[hw] `STS` returns the screen as rendered on the scanner. That includes **the field items the owner has chosen**, because the scanner fills in its own customized layout.
+
+Shape: `STS,<flags>,` then a run of `line text, highlight mask` pairs, then trailing scalar fields. Sample lines from the probe (values sanitized as in §4): date/time, `F0:***3****** P25P2 Slot2`, `S0:-12345*---   VOL: 2 SQL: 1`, system / list / dept / site / channel names, `P25 NAC:2B4h`, `Sys ID: 4D1h  935.437500MHz`, `RFSS ID / Site ID`, `WACN / NOISE`, `UID / RSSI`, then the soft-key labels ` SYSTEM  DEPT  CHANNEL` with mask `********* ********** *********`.
+
+- The first field (`00001010100000000`) appears to be a per-line font/size flag map (unverified).
+- The masks mark highlighted/reverse characters.
+- Colors are **not** in `STS`.
+- Implication: the app can render the user's chosen items live from `STS` (and menus as text, which is cheap), and only needs colors from `profile.cfg` (§7).
+- [hw] SDS150 over serial (fw 1.01.02): one `\r`-terminated line in the same shape. The reply seen had 17 lines of 30 characters, the soft-key line last, with the same three soft-key mask columns as the SDS200. The line count depends on the user's screen, so nothing may assume 17. Some text fields hold bytes that aren't valid UTF-8 (icon glyphs); whether they draw as the SDS200's do is a display question for the app (SDS150 design §7.3).
+- [hw] SDS100 over serial (fw 1.26.01, 2026-11-16): decoded into 13 screen lines and three soft keys on the owner's screen (again the user's screen decides the count). Its icon glyphs are low control bytes: 0x06, 0x07, 0x1A and 0x1B were seen (the SDS150 mock uses 0x80, 0x81, 0x8D). Whether each line's text and mask have the same width was not measured (§8 item 11).
+
+## 5a. Menus (`MSI`, `MSV`; fw 1.26.01, owner-approved probes 2026-11-10)
+
+Full findings and rationale: `docs/specs/2026-11-10-remote-menus-design.md` §4. Samples below are sanitized.
+
+- **Keys.** `KEY,M,P` enters the menu from scan mode and goes up one level (from an entry screen it cancels without saving). `KEY,>,P` / `KEY,<,P` move the highlight and wrap. `KEY,E,P` opens or accepts the row. `KEY,L,P` (Avoid) leaves the menu from any depth.
+- **`GSI`/`PSI` in a menu** has no channel elements: `<ScannerInfo Mode="Menu tree" V_Screen="menu_selection">` with `<MenuSummary name="Set Scan Selection" index="4293063672" />`. `V_Screen` is `menu_selection` on lists and `menu_input` on entry screens.
+- **`STS` in a menu** is ten lines, every size flag `1`: a title line (mask `_` in every column) and nine rows; the highlighted row's mask is `*` throughout. No soft-key line on lists. On/off lists put the state in the row text (`Lakeview Fire             :On `). Entry screens: line 2 holds the value (cursor mask `*` in column 1); line 10 is the soft-key row (icon glyph bytes that aren't valid UTF-8 on a name entry, blank on a number entry).
+- **`MSI`** describes the whole current screen in one datagram (every list item, not only the nine on screen):
+
+```xml
+MSI,<XML>,
+<MSI Name="Select Lists to Monitor" Index="4293063468" MenuType="TypeSelect" Value="Full Database             :Off" Selected="0" >
+  <MenuItem Name="Full Database" Index="0" Value="Off" />
+  <MenuItem Name="Lakeview Fire" Index="2" Value="On" />
+  <Footer No="1" EOT="1"/>
+</MSI>
+```
+
+  - `MenuType`: `TypeSelect`, `TypeInput` (`<MenuInput MaxLength EnableKeys [AddedInformation]>`), `TypeError`; `TypeLocation` is documented but unseen. `Selected` is the highlighted item's `Index`. `MenuItem/@Value` exists only for stateful (On/Off) items.
+  - `TypeError` means no menu the protocol can describe: bare outside a menu, or with `<MenuErrorMsg Text="The scanner is in state that you can&apos;t remote control.&#xD;Please goto scan mode to remote control." ScanButton="1" />` (seen inside Analyze).
+  - **`MSI` omits items it can't remote-control** (main menu "Analyze", Display Options "Customize", Set Your Location "Auto Locate"); the others keep their true indexes. The SDS150 does the same [hw, SDS150 fw 1.01.02, 2026-11-13, `noctule menu --serial` beside `noctule display --serial`]: Manage Full Database's "Review Avoids" (index 0) is on the screen but not in `MSI`, which lists "Stop All Avoiding" (1) and "Information" (2), and its `Selected` was 0, the omitted item (the Mac-style menu then highlights the first listed item). Use `noctule menu` with `noctule display` to find others.
+- **`MSV,,<value>`** (reserved field empty) replies `MSV,OK`. On a list, `<value>` is an item `Index` (submenu opens; a pick-one is set and the scanner returns to the parent; an On/Off item toggles and stays on the list). On an entry, `<value>` is the whole text, saved at once; the scanner returns to the parent, and after a number entry (Set Range) it left the menu and resumed scanning: only a re-read says where an action lands. After an on/off `MSV`, the root `Value` and the radio's own highlight go stale: use `MenuItem/@Value` and `Selected`.
+- Untried: `TypeLocation`, confirm prompts, an `MSV` the scanner rejects, a comma in an input value (the spec says it is sent as a tab; we never send one), `MNU`, `MSB`.
+- **Lost datagrams:** about 1 command in 12 got no reply within 2 s (four read replies and one `KEY` of roughly 60). The unanswered `KEY` had not taken effect. Never resend a state-changing command.
+
+## 5b. Favorites and quick keys (`GLT`, `FQK`, `SQK`, `DQK`; all three models, 2026-11-18)
+
+A spike at the owner's request (design `2026-11-18-quick-keys-design.md` §3 has the details and timings): the whole tree read on the SDS150 (fw 1.01.02), SDS100 (fw 1.26.01) and SDS200 (fw 1.26.01), then one key flipped and restored at each level with the owner's go-ahead. [hw] throughout.
+
+- `GLT,FL` → `<FL Index Name Monitor Q_Key N_Tag>`; `GLT,SYS,<FL Index>` → `<SYS Index Name Type Q_Key Avoid CountyId N_Tag>`; `GLT,DEPT,<SYS Index>` → `<DEPT Index Name Q_Key Avoid TGroupId|CGroupId>`; `GLT,SITE,<SYS Index>` → `<SITE Index Name Q_Key Avoid SiteId>`. The argument is the parent's `Index`, never its quick key. `Q_Key` is a number or `None`. Built-in entries: lists `Full Database` (`4294967295`) and `Search with Scan` (`4261412864`), a department `Unknown` (`4294967295`).
+- Over UDP, `GLT` needs to be among the commands `UDPTransport` expects XML for; with that, every reply assembled.
+- **`GLT` replies come in pages** [hw, 2026-11-19, read-only `noctule quick-keys` with `NOCTULE_TRACE`]. Over USB serial, on the SDS150 (fw 1.01.02) and the SDS100 (fw 1.26.01) alike, every `GLT` document ends with `<Footer No="n" EOT="0|1"/>` (`No="1" EOT="1"` for a one-page reply), and a long reply is split into several documents sent back to back a few ms apart, each its own `GLT,<XML>,` line and `<GLT>…</GLT>`, numbered from 1 with `EOT="1"` on the last only. On one full read 17 of 58 replies on the SDS150 had more than one page, up to 7, `GLT,FL` among them (2 pages); on the SDS100 74 documents answered 57 reads, 17 replies paged, up to `No="7"`. Page sizes varied (6–13 elements), so the radio pages by size, not by count. `PSI` pushes may come between replies. The serial client used to take the first page as the whole reply: the rest were unmatched and dropped, or answered the next `GLT` read, so `noctule quick-keys` printed a silently truncated tree and the app's next list read got another reply's elements. The SDS200 over the network gave the whole tree (60 reads, nothing unmatched, 438 rows against 216 and 213 over USB): `UDPDatagramAssembler` already reassembles its replies; whether its pages are separate datagrams wasn't looked at.
+- **Every `Index` in the Favorites tree is unique across the whole tree** [hw, 2026-11-19, read-only, the owner's SDS200 and SDS150]: 12 lists, 28–29 systems, 141–143 departments and 257 sites, no index repeated, not even between a department and a site, or between a system and one of its children. Only the built-ins repeat (`Full Database`, `Search with Scan`, and each system's `Unknown` department `4294967295`). So an index seen under one parent belongs to that parent, and a reply that puts it under another is a late reply to another read (design §10 "Late replies").
+- **`FQK`, `SQK,<list key>` and `DQK,<list key>,<system key>` reply with the 100 values only** (0 none, 1 off, 2 on). The spec's `SQK`/`DQK` reply shape, with the list and system keys repeated first, is wrong on all three models. `SQK` and `DQK` are addressed by quick-key numbers, so a list or system with no quick key has no addressable states below it.
+- Sets (`FQK,<100>`, `SQK,<fq>,<100>`, `DQK,<fq>,<sq>,<100>`) answer `<CMD>,OK` and change exactly the values that differ. **A 0 in a set leaves that key alone** [spec], checked for `SQK` on all three (one key flipped and restored with every other value 0, the other keys unchanged); `FQK` and `DQK` with zeros not yet tried. `FQK`/`SQK` take 0.75–0.87 s to answer, `DQK` 0.02–0.09 s. `GSI` shows no change after a set.
+- Department and site keys share one numbering (`DQK`); trunked systems usually carry their keys on sites. Keys can be shared (two departments; a department and a site).
+- Unexplained, the same on all three: two systems whose departments have a `Q_Key` in `GLT` but whose `DQK` values are all 0.
+- **`GSI`'s `MonitorList Q_Key` is not the list's `GLT` quick key** (0 or 1 against 9 for the same `Index`). Match the scanning list by `Index`.
+
+## 6. Audio (SDS200 over network)
+
+- RTSP on TCP 554. URL: `rtsp://<host>/au:scanner.au`. [lib][hw]
+- [hw] `DESCRIBE` → `200 OK`, `Server: Scanner Audio Server 0.0.1`, SDP `m=audio 0 RTP/AVP 0`, control `trackID=1`.
+- Payload type 0 = **G.711 µ-law (PCMU), 8 kHz mono**. Standard RTSP `SETUP`/`PLAY`, then RTP over UDP. [lib]
+- [lib] reports a five-minute soak with zero loss on fw 1.26.01.
+- The earlier forum claim that the SDS200 doesn't stream audio over Ethernet does **not** hold on the owner's firmware.
+- Audio carries no metadata. Hit boundaries come from `PSI` (signal/TGID changes) and must be aligned with RTP timestamps.
+- [hw] **2026-11-08, firmware 1.26.01: the request sequence that works.** One reference exchange (controller, Python) and one `AudioHardwareTests` session both succeeded with this exact shape (`<ip>` is an IP literal):
+  ```
+  OPTIONS rtsp://<ip>/au:scanner.au RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: NoctuleScan\r\n\r\n
+  DESCRIBE rtsp://<ip>/au:scanner.au RTSP/1.0\r\nCSeq: 2\r\nUser-Agent: NoctuleScan\r\nAccept: application/sdp\r\n\r\n
+  SETUP rtsp://<ip>/au:scanner.au/trackID=1 RTSP/1.0\r\nCSeq: 3\r\nUser-Agent: NoctuleScan\r\nTransport: RTP/AVP;unicast;client_port=<p>\r\n\r\n
+  PLAY rtsp://<ip>/au:scanner.au/ RTSP/1.0\r\nCSeq: 4\r\nUser-Agent: NoctuleScan\r\nSession: <id>\r\nRange: npt=0.000-\r\n\r\n
+  GET_PARAMETER / TEARDOWN: same URL as PLAY, CSeq, User-Agent, Session.
+  ```
+  - OPTIONS → 200 in about 0.05 s, `Public: DESCRIBE, SETUP, TEARDOWN, PLAY, OPTIONS, GET_PARAMETER` (also Cache-Control, Content-Length, CSeq, Server, Supported).
+  - DESCRIBE, SETUP, and PLAY each take **about 0.5 s** (DESCRIBE 0.25–0.49 s). GET_PARAMETER about 0.03 s, TEARDOWN about 0.17 s. A 3 s request timeout is enough, but don't go much lower.
+  - SETUP reply: `Session: <numeric id>` with **no `;timeout=`**. `Transport: RTP/AVP;unicast;client_port=<p>;source=<scanner ip>;server_port=56002;ssrc=<n>`. PLAY's reply carries `RTP-Info`.
+  - RTP (60 s capture on a NOAA weather channel, so the signal was present throughout, `Sig` = 2):
+    - **25.0 packets/s**, every payload **320 bytes** of PCMU (40 ms), PT 0, marker bit never set.
+    - Timestamp step **320** per packet. One constant, nonzero SSRC, matching the SETUP `ssrc=`. Source address = the scanner IP.
+    - 1505 packets with 0 lost, 0 duplicates, 0 reordered. Inter-arrival median 40.7 ms, p95 41.6 ms, max 43 ms.
+    - First packet 37 ms after the PLAY reply. No digitally silent packets (weather audio).
+  - GET_PARAMETER every 15 s kept the session (5 sent, all 200). TEARDOWN → 200.
+  - **Continuous vs squelch-gated: still undetermined.** Two 60 s captures on the weather channel (`Sig` 1–2 throughout, never 0) found 25 packets in every 1 s window. No quiet window was observed, so the classification is `inconclusive`.
+  - A second capture (17:16, fresh power cycle) matched the first exactly: 1505 packets, 25.0/s, 320 bytes, step 320, no loss, inter-arrival median 40.8 ms (max 46.9 ms). DESCRIBE took 81 ms that time and SETUP/PLAY about 0.5 s; the first packet arrived 5 ms after the PLAY reply.
+- [hw] **Reconnect cooldown: a new TCP connection to 554 soon after the previous one closed hangs the audio server until a power cycle** (fw 1.26.01, 2026-11-08). Evidence:
+  1. Our session 2, opened immediately after session 1's graceful TEARDOWN 200: the TCP connect didn't complete within 3 s.
+  2. The controller's health check (OPTIONS 200, then close), followed about 1 s later by a new session connection, hung the server. Both connections came from the controller's Python client on plain BSD sockets.
+  3. After a power cycle, session A (5 s, graceful close), then a **120 s** wait, then session B: both worked fully. B got a new `server_port` and SSRC.
+  4. **But a 120 s wait was not always enough.** After a power cycle, `AudioHardwareTests` ran session 1: 60 s of streaming, GET_PARAMETER every 15 s, `GSI` polled once a second over UDP, TEARDOWN 200. The test then waited 121 s (`RTSPClient` cooldown plus file store) before session 2, and session 2's TCP connect still didn't complete within 3 s. No request went out, and it wasn't retried. So either the needed gap grows with session length or activity, or that close itself hung the server. The two can't be told apart without the owner checking the scanner.
+  5. Which implementation each item used: items 1 and 4 were Swift on Network.framework (`NWConnection` for RTSP). Item 2 was Python on BSD sockets, so **a quick reconnect hangs the audio server whatever the client's networking implementation**. Item 4's hang, despite a 121 s gap, is the one that followed Network.framework. On BSD sockets (Task 5b), the same `AudioHardwareTests` sequence (60 s session with `GSI` polling, 121 s wait, second session) passed. See the next bullet.
+  - Rule: `RTSPClient` refuses to connect within `reconnectCooldown` (default 120 s) of any recorded close to that IP, and never opens a health-check connection. Treat 120 s as a minimum, not a guarantee. Prefer one long-lived session over reconnecting.
+- [hw] **2026-11-08, fw 1.26.01: Network.framework vs BSD sockets.** The controller's isolation found that a Python client on BSD sockets ran the reference exchange cleanly: two 5 s sessions 2 minutes apart, a 60 s session with keepalives, and a 60 s session with keepalives plus `GSI` every 1 s over UDP. Control answered throughout. Swift runs sending byte-identical requests over `NWConnection` (RTSP) and `NWListener` (RTP) left the whole network service hung: 554 timed out, UDP control was dead, ping worked, and a power cycle was needed. After `RTSPClient` and `RTPReceiver` moved to BSD sockets with the reference close sequence (TEARDOWN reply, 0.5 s, `shutdown(SHUT_WR)`, drain to EOF, `close()`, then close RTP 0.5 s later), one `AudioHardwareTests` run passed:
+  - Session 1: connect 2 ms, OPTIONS 44 ms, DESCRIBE 118 ms, SETUP 500 ms, PLAY 499 ms. 1505 packets in 60 s (25.0/s, 320 bytes, PT 0, step 320, 0 lost), 5 GET_PARAMETER 200s, `GSI` each second, TEARDOWN 200.
+  - 121 s cooldown, then session 2: connect 17 ms, OPTIONS 47 ms, DESCRIBE 49 ms, SETUP 505 ms, PLAY 499 ms, 79 packets in about 3 s, TEARDOWN 200.
+  - `MDL` answered before the run and 10 s after it.
+  - The specific Network.framework behavior that hurts the scanner isn't isolated. Control (`UDPTransport`) is still on `NWConnection` and was fine.
+- [hw] **Firmware 1.24.00, earlier the same day: our previous request shape hung the audio server twice.** That shape had no OPTIONS and put User-Agent last; one attempt used a DNS name in the URL and one an IP literal. Each time DESCRIBE got no reply within 3 s, and port 554 then refused connections until a power cycle. No session was created either time. **Root cause not isolated.** Candidates are the missing OPTIONS, the header order, and the firmware version; the host-name URL is not required to trigger it.
+
+## 7. Files on the SD card (SDS200 FTP)
+
+- [hw] FTP server on TCP 21: `220 FTP Service ready for new user.`
+- [lib] The SDS200 supports separate read-only and writable FTP accounts, configured on the scanner. Plain FTP: LAN/VPN only.
+- `profile.cfg` holds the display customization (colors and items). [lib] imports a copied `profile.cfg`; reading it via FTP is the obvious extension for Noctule Scan.
+- Favorites: `f_list.cfg` plus `.hpd` files. [lib] reads them read-only over FTP.
+- The handhelds (SDS100/150) expose files only in USB Mass Storage mode.
+
+## 8. Open items to verify on hardware
+
+1. `PSI` push rate, behavior over VPN latency, and how long a subscription lasts. Does it need refreshing?
+2. `ScannerInfo` shape for conventional, search, Close Call, weather, tone-out, and menu modes.
+   - 2026-11-10: the menu part is answered (§5a). Still open for the others.
+3. Full meaning of `STS` fields: the leading flag map and the trailing scalars.
+4. `profile.cfg` format and color encoding. Does the owner's scanner have an FTP account set up?
+5. `KEY` modes beyond `P`, e.g. long press (needed for Func-hold-DISP and "hold 4 for 3 s").
+6. Is RTSP audio continuous, or present only while squelch is open? Measure audio latency relative to `PSI`.
+   - 2026-11-08: partly answered. With a signal present the stream is steady: 25 packets/s of 320-byte PCMU, no gaps (§6). Behavior while squelch is closed is still unmeasured, so Task 6 must not treat silence as a stall until it is (`stallTimeout = nil`). Latency relative to `PSI` is not yet measured.
+7. **RTSP session robustness.** The owner reports that, under ProScan, a network glitch leaves the SDS200's audio dead until a power cycle. Find out how many concurrent RTSP sessions the scanner allows and whether a stale session blocks new ones. Does a fresh `SETUP` work after an ungraceful client exit, and does a session time out on its own? Always `TEARDOWN`. [lib] sends `GET_PARAMETER` keepalives every 15 s and `TEARDOWN` on stop.
+   - 2026-11-08: narrowed.
+     - On firmware 1.24.00, a DESCRIBE the server didn't answer took the whole audio server down (554 refused until a power cycle), with no session ever created.
+     - On firmware 1.26.01, sessions have **no advertised timeout**, and GET_PARAMETER every 15 s keeps them alive.
+     - **Reconnecting is the danger** (§6). A new TCP connection soon after the last one closed hangs the server: about 1 s and about 0 s gaps did, and a 120 s gap after a 5 s session didn't. A 121 s gap after a 60 s session did (or that session's close did), but that was Swift on Network.framework; on BSD sockets the same sequence passed (see the isolation bullet below). The safe gap isn't known.
+     - Still open: concurrent and stale sessions, and whether `server_port` and SSRC change per session (they did between A and B).
+   - 2026-11-08, isolation (Task 5b), on fw 1.26.01. There are two separate hazards.
+     - **A quick reconnect hangs the audio server whatever the implementation.** The controller's Python BSD-socket client hung it with a health-check connection followed about 1 s later by a session (§6, cooldown item 2).
+     - **With gaps of at least 120 s, the hangs followed the networking implementation, not the bytes.** The Python BSD-socket client never hung the scanner across short sessions, long sessions, and sessions 2 minutes apart. Swift on Network.framework did, after a 121 s gap, and took the whole network service down.
+     - Swift on BSD sockets with the reference close sequence passed a 60 s session plus a second session 121 s later, with control answering before and after (§6). Still open: which Network.framework behavior is at fault, a long soak, and whether gaps under 120 s are safe on BSD sockets (not tested; the cooldown stays).
+8. **Remote restart command.** Answered 2026-11-08: `MSM,1`, from the ProScan developer on RadioReference (not captured from ProScan traffic). The owner approved sending it once.
+   - On the owner's SDS200 (fw 1.26.01, healthy beforehand): `MSM,1` replied `MSM,OK` within 0.05 s. The scanner then stopped answering UDP, and `MDL` answered again about 10.5 s after the send in the controller's probe. The opt-in `RestartHardwareTests` run polled every 2 s and saw it back 12.7 s after the send (poll granularity); a read-only `GSI` then worked (mode: WX Scan).
+   - It reboots the scanner, so it drops audio and anything else in progress. It only helps while UDP control still answers; a hung network stack still needs a power cycle. Whether it also revives a hung RTSP server (554 dead, control alive) is not tested here, because that would need a wedged scanner.
+   - Rules: send it only after explicit user confirmation, never automatically. `ScannerClient.restartScanner()` sends it (reply `MSM,OK` or silence is success; `NG`/`ERR` throws). `ScannerRestartMonitor.waitUntilBack` polls `MDL` and requires one silent poll first. `ScannerRestart.perform` also clears the RTSP cooldown record, since the reboot resets the audio server (the first RTSP connect after a restart has not been hardware-tested).
+9. **`STS` polling while a `PSI` subscription is active (Plan 4).** The Mac app subscribes (`PSI,500` when this item was written, `PSI,100` since 2026-11-13) and also polls `STS` for the display: at most once per 1 s (since 2026-11-13, once per 100 ms on the SDS150 and the SDS200, `ModelProfile.displayRefreshInterval`; untried on the SDS150 at that rate) and at least once per 5 s while connected, plus 150 ms after a key press's reply and when a push changes mode, screen, system, department, channel, talkgroup, or a hold/avoid flag. `GSI` at 1/s alongside an audio session passed on hardware (§6); **`STS` alongside `PSI` and audio has run on the SDS200 only briefly (the ad-hoc check below); the long run is H2.**
+   - **Ad-hoc check on the SDS200, 2026-11-13** (owner; a throwaway build with `PSI,100` and `STS` up to every 100 ms, tests not run): the app ran on the SDS200 over the network with audio playing, `STS` beside `PSI` and the audio session; the Scanner view kept up with the radio's own screen; the owner quit and relaunched the app, and control and audio both came back. The run's length and the firmware were not recorded (the last recorded firmware is 1.26.01). So `STS` beside `PSI` and audio has now run on the SDS200, briefly. Still pending, in the owner's hardware session (`2026-11-13-sds200-100ms-design.md` §6): H1 (the push rate at `PSI,100`), H2 (an hour in the app with audio) and H3 (quit and relaunch on the built branch).
+   - Mock only (2026-11-09, `noctule-mock-scanner --scenario default`, not hardware): in a 30-minute app run with one audio session and logging on, the mock received one `MDL`, one `VER`, one `PSI,500`, 499 `STS` (gaps: min 1.00 s, median 3.04 s, p95 5.00 s, max 5.00 s), 119 `GET_PARAMETER` keepalives and, at quit, `PSI,0` and TEARDOWN at the same instant. This shows only what the app sends; how the SDS200 copes with that rate is the open question.
+   - The app sends `KEY,<code>,P`, `VOL,<n>` and `SQL,<n>` only in direct response to a user action, and picks the Hold soft key by its `STS` label (trimmed, uppercased `SYSTEM`, `DEPT`, `CHANNEL`; §5). None of these sends has been exercised against the real scanner from the app yet.
+10. **The SDS150 over USB serial (Plan 7; SDS150 design §3.3 and §8).** The hardware session ran on 2026-11-12 (fw 1.01.02): each bullet says whether it was run. `ModelProfile`'s `protocolVerifiedOnHardware` is true for the SDS150: the owner ruled it verified on 2026-11-12, after the session's checks and their own positive and negative tests with the command line. The push stall below was found and fixed that day. Bullets marked not run stay unverified.
+    - `GCS`: run [hw, SDS150]. It answers and parses (`\n` terminator, percent). `CST=8` at 100 % on USB power, a code the spec doesn't list (§3).
+    - `PSI` over serial: run [hw, SDS150]. `PSI` is accepted and pushes come at the rate asked (measured about 0.514 s apart for `PSI,500` and 1.011 s for `PSI,1000`; on 2026-11-13 about 0.116 s apart for `PSI,100`, median of 299 gaps, 113–138 ms, with `PSI,0` taking effect after it). **`PSI,25` is not honoured: the floor is about 40 ms** [hw, SDS150, 2026-11-13]: 1,200 pushes in 49.4 s, a median gap of 41 ms (p5 39, p95 45, max 64), `PSI,0` taking effect (quiet-port check). On the same conventional scan the reported channel changed only about 3.5 times a second, at 100 ms and at 41 ms alike: at 41 ms every channel showed in at least two pushes (172 changes; median dwell about 300 ms, p10 about 200 ms), so 100 ms missed none of what `GSI` reported. Not tried: a fast analog scan, where the radio may step faster than what this scan showed. `PSI,0` stops them, and it reaches the scanner before the port closes, on a normal exit, on Ctrl-C and after a stall: `SDS150HardwareTests/QuietPort` (reopens the port, sends nothing for 2 s, looks for unsolicited `PSI` documents) found none each time. This was with the bounded wait before close in the build (a requested close waits at most about 0.3 s for the output queue to empty, SDS150 design §13 M); a close without it was not tried.
+    - **The pushes stop by themselves after 183 s** [hw, SDS150]. Timed three times with `noctule watch --serial` on 2026-11-12: pushes arrived with no gap of 2 s, then none at all, 183 s after the first, at `PSI,500` (356 pushes, twice) and at `PSI,1000` (181 pushes). A time limit, then, not a push count. The port stayed open (no end of file), the scanner answered `MDL` afterwards, the port was quiet, and a new `PSI` started pushes again at once. [spec] gives no timeout anywhere; it lists `KAL` ("Keep Alive", `KAL\r`, "Radio does not return a response") without saying what it keeps alive or for how long. `KAL` had not been sent to the owner's unit then. **Not known at that point:** whether the 183 s count from the last command of any kind or from the `PSI`, and what resets them (`KAL`, any command such as a read-only `GSI`, or only a new `PSI`). **Fixed the same day with `KAL`** (owner-approved 2026-11-12 for the SDS150 over USB): while a subscription runs, the client writes `KAL` one minute after the `PSI` and then one minute after each `KAL` (three chances inside 183 s), with no reply awaited, and never after that subscription's `PSI,0`; `watch --serial` and `log` on a USB station send it. Run [hw, SDS150] at 09:16–09:20 PST, on the build before the spacing rule just described (it wrote `KAL` on a fixed 60 s grid from the `PSI`; the same timing unless a wake is late): `SDS150HardwareTests/KeepAlive` (`MDL`, `PSI,1000`, `KAL` every 60 s, held 240 s, `PSI,0`) passed with 239 pushes, four `KAL`s, a longest gap of 1.0 s and the last push 239.2 s after the `PSI`, nothing back for any `KAL`, nothing after `PSI,0`, and the quiet-port check after it found no push; then `noctule watch --serial --interval 1000 --count 300` got 300 updates in 301 s, no gap of 3 s, exit 0. So `KAL` at 60 s keeps the pushes going past 183 s. The 240 s hold alone can't tell "each `KAL` restarts the count" from "only the first does something" (183 s after the first `KAL` is 243 s); the longer runs can: an hour of `noctule log` on a USB station (09:26–10:26 PST) ran to its end with no stall warning, hits logged throughout (21 transmissions, the last 48 minutes in; same earlier build), and the quiet-port check after it found no push. Then the merged build, with the spacing rule, at 10:27–10:31 PST: `SDS150HardwareTests/KeepAlive` passed again with 238 pushes, three `KAL`s (the fourth now falls due just after the hold), a longest gap of 1.0 s, the last push 239.0 s after the `PSI`, nothing back and nothing after `PSI,0`; quiet-port check: no push. So pushes go on for as long as `KAL`s come. **Not shown:** whether any other command, or another interval, does it (only `KAL`, at 60 s, was tried), and the exact rule inside the scanner (the count restarting in full at each `KAL` is the simplest reading, not a measurement). The mock's SDS150 stops its pushes 183 s after the `PSI` or the latest `KAL`; its assumptions are that every `KAL` restarts the full count, that nothing else does, that a `KAL` after the pushes stopped starts them again, and that `KAL` with no subscription does nothing (the last three never tried).
+    - Can a push land inside another reply (`GSI` while pushes arrive)? The assembler assumes not (§2a). Run once [hw, SDS150]: `SDS150HardwareTests`' push suite got 20 `GSI` replies and 11 pushes, every one whole, and no push after `PSI,0`. A small sample, not proof that it can't happen.
+    - Closing and reopening the port several times: run [hw, SDS150]. More than ten opens and closes, some seconds apart, and the scanner stayed in serial mode and kept answering. Nothing like the SDS200's reconnect hazard was seen.
+    - Unplug and replug: run once by the owner [hw, SDS150], 2026-11-12, during `noctule log` on the merged build. Pulling the cable printed `log: scanner disconnected. Plug the scanner in and choose Serial Port on its screen.` (the port-gone hint, so the port left the listing; not the still-connected hint) and `log: waiting for the scanner…`; after the replug `log: reconnected SDS150 1.01.02` with no warning between, so the scanner answered `MDL` within the probes of its port's first appearance; a transmission the owner then keyed on a handheld was logged, started and ended 2.6 s later; Ctrl-C ended the run and the quiet-port check afterwards found no push, so `PSI,0` also goes out on a resumed connection. Not learned from that run: which of the reader's three signs of a pulled cable the SDS150 gives, how long the port took to come back, what the scanner's screen asked, and the keep-alive on a resumed connection past 183 s (the run was short; on the mock it is tested). The questions as first written: what the scanner's screen asks; what the Mac sees when the cable is pulled (the reader expects `read` to return 0 or fail with `ENXIO`/`EIO`; a device that only reports a hang-up to `poll` while `read` says "try again" is taken as gone after three such polls, 10 ms apart); whether the scanner answers `MDL` promptly once its port reappears (a waiting USB station probes each appearance at most 3 times); whether it can re-enumerate faster than the 1 s poll.
+    - Exclusive use: run [hw, SDS150]. While one `noctule watch --serial` held the port, a second `noctule watch --serial` was refused at once as in use (which of `TIOCEXCL` and `flock` did it was not told apart). Not run: whether a terminal program that already holds the port without `TIOCEXCL` ends up sharing it with `noctule`.
+    - An hour of `watch`: does the link stay up without `KAL`? Run [hw, SDS150]: no. The pushes stop after 183 s (above); the port and the command link stay up. With `KAL` every 60 s: 240 s and 300 s runs and an hour of `noctule log` passed (above).
+    - `KEY` and `MSI` inside and outside a menu (with the owner's go-ahead; Plan 8): run [hw, SDS150, 2026-11-13] from the app by the owner. The menu shapes match the SDS200's: Menu (`KEY,M,P`), lists read through `MSI` `TypeSelect`, Exit; `MSI` leaves out items as the SDS200's does (§5a: Manage Full Database's Review Avoids). The scanner went on sending `PSI` pushes while in a menu (about 18 minutes of the app, part of it in a menu, and ten more minutes in a menu, with no resubscribe).
+    - `noctule log` through real transmissions: run for conventional channels [hw, SDS150] (later the same day also for an hour, 21 transmissions, and for one the owner keyed on a handheld, logged with its channel). The first try logged nothing: `ScannerInfo` read a frequency only from `SiteFrequency` (§4; fixed the same day). With the fix, a 170 s `noctule log` logged 8 transmissions on a programmed conventional channel, each started and ended, with system, department, channel, frequency, modulation, tone and `Rssi` filled. Not run: a trunked system's talkgroups and unit IDs, an unprogrammed channel, and the raw `Property` during a transmission. The hit log is real traffic: delete it after the session.
+11. **The SDS100 over USB serial (Plan 17; SDS100 design `2026-11-16-sds100-usb-design.md` §3, §7).** Checked on the owner's SDS100 (fw 1.26.01) on 2026-11-16, before anything was built, at the owner's go-ahead for each step, every run naming its port and checked against the USB registry by product name first (the SDS150 beside it never opened). `ModelProfile`'s `protocolVerifiedOnHardware` is false for the SDS100 until the owner rules after its hardware session (design §7), which has not run.
+    - Checked [hw, SDS100]: the USB identity (§1: the SDS150's product ID, its own product name, no serial number, a path that follows the socket); `MDL`, `VER`, `VOL`, `SQL`, `GSI`, `STS` and `MSI` outside a menu through `noctule info`, `status`, `display` and `menu` with existing code (§3, §4, §5); the push lifetime, about 182–186 s after the `PSI`, port still open (§3); `KAL` answered `ERR` and doing nothing; the same `PSI` written again every 60 s keeping the pushes going for a 240 s hold (232 pushes at `PSI,1000`, longest gap 1.1 s, four `PSI`s each answered `PSI,OK`, nothing else back, no push after `PSI,0`); `PSI,100` pushing about every 137 ms; `GCS` giving no reading; and the owner's five-minute run of a throwaway app build at `PSI,100` with the renewal and `STS` at 100 ms (screen, controls and hit tracking good, no warning).
+    - Built on it (Plan 17): the client renews the SDS100's subscription with its own `PSI,<ms>` every 60 s (`PushKeepAlive.Action.renewSubscription`), through `watch --serial`, `log` and the app; a `PSI,NG` once a renewal's write has begun keeps the push and stops its renewals (reported once as a failed keep-alive), one before any renewal ends the push. No hardware has ever rejected a `PSI`.
+    - Open, for the hardware session (design §7): the `STS` line widths, text against mask, with the low-byte glyphs (H1); whether `GSI`'s `Property` carries `Battery` (H1); the quiet-port check (H2); the push suite, pushes beside `GSI` replies (H3); the renewal check on the built code (H4, `SDS100HardwareTests/KeepAlive`); **a long run**, an hour of `noctule log` with no stall or resubscribe (H5: the renewal has run for four and five minutes only, at 60 s only); **menus** (`KEY,M,P`, `MSI` inside a menu; H6) with the app for half an hour, keys, a `VOL` and an `SQL` step and an unplug and replug; both handhelds at once (H7); conventional and trunked hits in the hit log (H8). Also not known: the raw bytes of any SDS100 reply (the serial XML form is assumed to be the SDS150's), whether a repeated `PSI` restarts the full lifetime or a `PSI` after the pushes stopped starts them again on the open port (the mock assumes both; the replace rule doesn't depend on the second), what `GCS` sends back, and whether the SDS100 asks for Serial Port or mass storage on its screen.
