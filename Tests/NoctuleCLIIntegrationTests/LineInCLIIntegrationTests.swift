@@ -31,7 +31,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
             fd = candidate
         } else {
             Darwin.close(candidate)
-            Thread.sleep(forTimeInterval: 0.05)
+            Thread.sleep(forTimeInterval: 0.05)  // off the cooperative pool: a dispatch thread
         }
     }
     guard fd >= 0 else { return [] }
@@ -57,7 +57,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
         let process = try Subprocess(try noctuleBinary(), arguments, environment: environment, currentDirectory: dir)
         let exited = await process.waitForExit(within: 20)
         process.kill()
-        let result = process.finish()
+        let result = await process.finish()
         return (exited, result.status, result.stdout, result.stderr)
     }
 
@@ -220,7 +220,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
                                          currentDirectory: root)
             let exited = await process.waitForExit(within: limit)
             process.kill()
-            let result = process.finish()
+            let result = await process.finish()
             return (exited, result.status, result.stdout, result.stderr)
         }
 
@@ -390,7 +390,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
             let exited = await process.waitForExit(within: 30)
             let exitSeen = ContinuousClock.now
             process.kill()
-            let result = process.finish()
+            let result = await process.finish()
             let listen = (exited: exited, status: result.status, stdout: result.stdout, stderr: result.stderr)
             #expect(listen.exited && listen.status == 0, "\(listen.status) \(listen.stderr)")
             #expect(listen.stderr.contains("\(Self.streamingLine)\n"), "\(listen.stderr)")
@@ -435,7 +435,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
             log.interrupt()
             let logExited = await log.waitForExit(within: 15)
             log.kill()
-            let logResult = log.finish()
+            let logResult = await log.finish()
             #expect(logExited && logResult.status == 130, "\(logResult.status) \(logResult.stderr)")
         } catch {
             Issue.record(error)
@@ -475,7 +475,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
         listen.interrupt()
         let exited = await listen.waitForExit(within: 10)
         listen.kill()
-        let result = listen.finish()
+        let result = await listen.finish()
         if mocks.count == 2 { await mocks[1].shutdown() } else if mocks.count == 1, mocks[0].process.isRunning { await mocks[0].shutdown() }
         #expect(exited && result.status == 130, "\(result.status) \(result.stderr)")
         // No meter line between the second unplug and the input's return: no stale bar.
@@ -572,7 +572,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
             listen.interrupt()
             let exited = await listen.waitForExit(within: 10)
             listen.kill()
-            let result = listen.finish()
+            let result = await listen.finish()
             #expect(exited && result.status == 130, "\(result.status) \(result.stderr)")
             let lowered = result.stderr.lowercased()
             #expect(!lowered.contains("failed") && !lowered.contains("error"), "\(result.stderr)")

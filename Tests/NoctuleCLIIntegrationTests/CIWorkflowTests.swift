@@ -33,119 +33,120 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
     return nil
 }
 
-@Suite(.timeLimit(.minutes(2))) struct CIWorkflowTests {
+// One test at a time: each runs tools (IntegrationSupport.swift, "Waiting in these tests").
+@Suite(.serialized, .timeLimit(.minutes(2))) struct CIWorkflowTests {
     // MARK: check-dco.sh
 
     private struct Repo {
         let dir: URL
-        init() throws {
+        init() async throws {
             dir = try temporaryDirectory()
-            try git("init", "-q", "-b", "main")
-            try git("config", "user.name", "Ada Tester")
-            try git("config", "user.email", "ada@example.test")
-            try git("config", "commit.gpgsign", "false")
-            try commit("base", signOff: true)
+            try await git("init", "-q", "-b", "main")
+            try await git("config", "user.name", "Ada Tester")
+            try await git("config", "user.email", "ada@example.test")
+            try await git("config", "commit.gpgsign", "false")
+            try await commit("base", signOff: true)
         }
         @discardableResult
-        func git(_ args: String...) throws -> String {
-            let r = try run(tool("git"), args, environment: ["GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"], currentDirectory: dir)
+        func git(_ args: String...) async throws -> String {
+            let r = try await run(tool("git"), args, environment: ["GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null"], currentDirectory: dir)
             try #require(r.status == 0, "git \(args) failed: \(r.stderr)")
             return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        func commit(_ subject: String, signOff: Bool, trailer: String? = nil, body: String? = nil, file: String = "f.txt") throws {
+        func commit(_ subject: String, signOff: Bool, trailer: String? = nil, body: String? = nil, file: String = "f.txt") async throws {
             try "\(subject) \(UUID())".write(to: dir.appending(path: file), atomically: true, encoding: .utf8)
-            try git("add", file)
+            try await git("add", file)
             var message = subject
             if let body { message += "\n\n" + body }
             if signOff { message += "\n\nSigned-off-by: Ada Tester <ada@example.test>" }
             if let trailer { message += "\n\n" + trailer }
-            try git("commit", "-q", "-m", message)
+            try await git("commit", "-q", "-m", message)
         }
-        func dco(_ base: String, _ head: String = "HEAD") throws -> (status: Int32, stdout: String, stderr: String) {
-            try run(repositoryFile("scripts/check-dco.sh"), [base, head], currentDirectory: dir)
+        func dco(_ base: String, _ head: String = "HEAD") async throws -> (status: Int32, stdout: String, stderr: String) {
+            try await run(repositoryFile("scripts/check-dco.sh"), [base, head], currentDirectory: dir)
         }
     }
 
-    @Test func dcoAcceptsSignedCommits() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.commit("one", signOff: true)
-        try repo.commit("two", signOff: true)
-        let r = try repo.dco(base)
+    @Test func dcoAcceptsSignedCommits() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.commit("one", signOff: true)
+        try await repo.commit("two", signOff: true)
+        let r = try await repo.dco(base)
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.contains("dco: 2 commits signed off"), "\(r.stdout)")
     }
 
-    @Test func dcoRejectsAMissingSignOff() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.commit("signed", signOff: true)
-        try repo.commit("unsigned change", signOff: false)
-        let r = try repo.dco(base)
+    @Test func dcoRejectsAMissingSignOff() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.commit("signed", signOff: true)
+        try await repo.commit("unsigned change", signOff: false)
+        let r = try await repo.dco(base)
         #expect(r.status == 1, "\(r)")
         #expect(r.stdout.contains("unsigned change: no Signed-off-by for Ada Tester <ada@example.test>"), "\(r.stdout)")
         #expect(!r.stdout.contains("signed off"), "\(r.stdout)")
     }
 
-    @Test func dcoRejectsAMismatchedSignOff() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.commit("other email", signOff: false, trailer: "Signed-off-by: Ada Tester <someone-else@example.test>")
-        let r = try repo.dco(base)
+    @Test func dcoRejectsAMismatchedSignOff() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.commit("other email", signOff: false, trailer: "Signed-off-by: Ada Tester <someone-else@example.test>")
+        let r = try await repo.dco(base)
         #expect(r.status == 1, "\(r)")
         #expect(r.stdout.contains("other email: no Signed-off-by for Ada Tester <ada@example.test>"), "\(r.stdout)")
     }
 
-    @Test func dcoRejectsTheRightEmailUnderAnotherName() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.commit("wrong name", signOff: false, trailer: "Signed-off-by: Someone Else <ada@example.test>")
-        let r = try repo.dco(base)
+    @Test func dcoRejectsTheRightEmailUnderAnotherName() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.commit("wrong name", signOff: false, trailer: "Signed-off-by: Someone Else <ada@example.test>")
+        let r = try await repo.dco(base)
         #expect(r.status == 1, "\(r)")
         #expect(r.stdout.contains("wrong name: no Signed-off-by for Ada Tester <ada@example.test>"), "\(r.stdout)")
     }
 
-    @Test func dcoAcceptsANameWithSpacesAndAPlusInTheEmail() throws {
-        let repo = try Repo()
-        try repo.git("config", "user.name", "Ada Q. Lovelace")
-        try repo.git("config", "user.email", "ada+dev@example.test")
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.commit("plus address", signOff: false, trailer: "Signed-off-by: Ada Q. Lovelace <ada+dev@example.test>")
-        let r = try repo.dco(base)
+    @Test func dcoAcceptsANameWithSpacesAndAPlusInTheEmail() async throws {
+        let repo = try await Repo()
+        try await repo.git("config", "user.name", "Ada Q. Lovelace")
+        try await repo.git("config", "user.email", "ada+dev@example.test")
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.commit("plus address", signOff: false, trailer: "Signed-off-by: Ada Q. Lovelace <ada+dev@example.test>")
+        let r = try await repo.dco(base)
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.contains("dco: 1 commits signed off"), "\(r.stdout)")
     }
 
-    @Test func dcoIgnoresASignOffInTheBodyText() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
+    @Test func dcoIgnoresASignOffInTheBodyText() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
         // A sign-off line that is not in the trailer block (prose around it) doesn't count.
-        try repo.commit("body only", signOff: false, body: "Some prose.\nMore prose.\nSigned-off-by: Ada Tester <ada@example.test>\nand then more prose.\nAnd more.\nAnd more still.")
-        let r = try repo.dco(base)
+        try await repo.commit("body only", signOff: false, body: "Some prose.\nMore prose.\nSigned-off-by: Ada Tester <ada@example.test>\nand then more prose.\nAnd more.\nAnd more still.")
+        let r = try await repo.dco(base)
         #expect(r.status == 1, "\(r)")
     }
 
-    @Test func dcoSkipsMergeCommits() throws {
-        let repo = try Repo()
-        let base = try repo.git("rev-parse", "HEAD")
-        try repo.git("checkout", "-q", "-b", "side")
-        try repo.commit("side work", signOff: true, file: "side.txt")
-        try repo.git("checkout", "-q", "main")
-        try repo.commit("main work", signOff: true)
+    @Test func dcoSkipsMergeCommits() async throws {
+        let repo = try await Repo()
+        let base = try await repo.git("rev-parse", "HEAD")
+        try await repo.git("checkout", "-q", "-b", "side")
+        try await repo.commit("side work", signOff: true, file: "side.txt")
+        try await repo.git("checkout", "-q", "main")
+        try await repo.commit("main work", signOff: true)
         // An unsigned merge commit.
-        try repo.git("merge", "-q", "--no-ff", "-m", "Merge side into main", "side")
-        let r = try repo.dco(base)
+        try await repo.git("merge", "-q", "--no-ff", "-m", "Merge side into main", "side")
+        let r = try await repo.dco(base)
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.contains("dco: 2 commits signed off"), "\(r.stdout)")
     }
 
-    @Test func dcoUsageErrors() throws {
-        let repo = try Repo()
-        let none = try run(repositoryFile("scripts/check-dco.sh"), [], currentDirectory: repo.dir)
+    @Test func dcoUsageErrors() async throws {
+        let repo = try await Repo()
+        let none = try await run(repositoryFile("scripts/check-dco.sh"), [], currentDirectory: repo.dir)
         #expect(none.status == 2, "\(none)")
-        let one = try run(repositoryFile("scripts/check-dco.sh"), ["HEAD"], currentDirectory: repo.dir)
+        let one = try await run(repositoryFile("scripts/check-dco.sh"), ["HEAD"], currentDirectory: repo.dir)
         #expect(one.status == 2, "\(one)")
-        let three = try run(repositoryFile("scripts/check-dco.sh"), ["a", "b", "c"], currentDirectory: repo.dir)
+        let three = try await run(repositoryFile("scripts/check-dco.sh"), ["a", "b", "c"], currentDirectory: repo.dir)
         #expect(three.status == 2, "\(three)")
     }
 

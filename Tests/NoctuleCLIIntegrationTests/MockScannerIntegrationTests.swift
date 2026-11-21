@@ -65,7 +65,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
                 environment: ["NOCTULE_NO_USB_DETECTION": "1"], currentDirectory: directory)
             let exited = await process.waitForExit(within: 20)
             process.kill()
-            let result = process.finish()
+            let result = await process.finish()
             run = (exited, result.status, result.stdout, result.stderr)
         } catch {
             Issue.record(error)
@@ -172,7 +172,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             listen.send(signal)
             let exited = await listen.waitForExit(within: 15)
             listen.kill()
-            let result = listen.finish()
+            let result = await listen.finish()
             #expect(exited)
             #expect(result.status == expectedStatus, "\(result.status) \(result.stderr)")
             #expect(result.stdout.contains("packets "), "\(result.stdout)")
@@ -208,7 +208,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let result = third.finish()
+            let result = await third.finish()
             #expect(waiting, "\(result.stderr)")
             #expect(exited && result.status == 130, "\(result.status) \(result.stderr)")
         } catch {
@@ -263,12 +263,12 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             try process.run()
             // Nobody reads stderr: the first state line hits a broken pipe.
             try errPipe.fileHandleForReading.close()
-            let deadline = Date().addingTimeInterval(15)
-            while process.isRunning, Date() < deadline { try? await Task.sleep(for: .milliseconds(50)) }
-            let exited = !process.isRunning
+            let exited = await waitFor(15) { !process.isRunning }
             if !exited { Darwin.kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            // Never `waitUntilExit()`: it blocks a cooperative thread (IntegrationSupport.swift).
+            let gone = await waitFor(10) { !process.isRunning }
             #expect(exited)
+            try #require(gone, "process \(process.processIdentifier) still running after SIGKILL")
             #expect(process.terminationReason == .exit && process.terminationStatus == 0,
                     "reason \(process.terminationReason.rawValue), status \(process.terminationStatus)")
         } catch {
@@ -289,7 +289,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             watch.send(SIGTERM)
             let exited = await watch.waitForExit(within: 10)
             watch.kill()
-            let result = watch.finish()
+            let result = await watch.finish()
             #expect(exited)
             #expect(result.status == 143, "\(result.status) \(result.stderr)")
         } catch {

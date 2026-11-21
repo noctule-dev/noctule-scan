@@ -236,7 +236,7 @@ private func rows(_ table: String) -> [String] {
             log.send(SIGINT)
             let exited = await log.waitForExit(within: 20)
             log.kill()
-            let result = log.finish()
+            let result = await log.finish()
             #expect(exited)
             #expect(result.status == 143, "\(result.status) \(result.stderr)")
             #expect(result.stderr.contains("log: still closing the scanner session…"), "\(result.stderr)")
@@ -280,7 +280,7 @@ private func rows(_ table: String) -> [String] {
             first.interrupt()
             let exited = await first.waitForExit(within: 20)
             first.kill()
-            let firstResult = first.finish()
+            let firstResult = await first.finish()
             #expect(exited && firstResult.status == 130, "\(firstResult.status) \(firstResult.stderr)")
         } catch {
             Issue.record(error)
@@ -315,7 +315,7 @@ private func rows(_ table: String) -> [String] {
                 try? await Task.sleep(for: .milliseconds(10))
             }
             first.kill()
-            let firstResult = first.finish()
+            let firstResult = await first.finish()
             #expect(firstResult.status == 0, "\(firstResult.stderr)")
             let teardown = try #require(tornDownAt, "\(mock.process.stderr)")
 
@@ -329,7 +329,7 @@ private func rows(_ table: String) -> [String] {
                 try? await Task.sleep(for: .milliseconds(10))
             }
             second.kill()
-            let secondResult = second.finish()
+            let secondResult = await second.finish()
             #expect(secondResult.status == 0, "\(secondResult.stderr)")
             #expect(secondResult.stderr.contains("audio: waiting "), "\(secondResult.stderr)")
             #expect(secondResult.stderr.contains(" s before reconnecting (scanner cooldown)"), "\(secondResult.stderr)")
@@ -347,7 +347,7 @@ private func rows(_ table: String) -> [String] {
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let thirdResult = third.finish()
+            let thirdResult = await third.finish()
             #expect(exited)
             #expect(thirdResult.status == 130, "\(thirdResult.status) \(thirdResult.stderr)")
             try? await Task.sleep(for: .milliseconds(200))
@@ -398,7 +398,7 @@ private func rows(_ table: String) -> [String] {
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let thirdResult = third.finish()
+            let thirdResult = await third.finish()
             #expect(waiting, "\(thirdResult.stderr)")
             #expect(exited && thirdResult.status == 130, "\(thirdResult.status) \(thirdResult.stderr)")
         } catch {
@@ -432,7 +432,7 @@ private func rows(_ table: String) -> [String] {
         run.interrupt()
         let exited = await run.waitForExit(within: 10)
         run.kill()
-        let result = run.finish()
+        let result = await run.finish()
         #expect(waiting, "\(result.stderr)")
         #expect(exited)
         #expect(result.status == 130, "\(result.status) \(result.stderr)")

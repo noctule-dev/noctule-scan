@@ -101,7 +101,7 @@ private func serialNoctule(_ arguments: [String], _ dirs: SerialDirs, limit: Dou
                              environment: dirs.environment.merging(extra) { _, new in new })
     let exited = await process.waitForExit(within: limit)
     process.kill()
-    let result = process.finish()
+    let result = await process.finish()
     return (exited, result.status, result.stdout, result.stderr)
 }
 
@@ -129,7 +129,7 @@ private func stop(_ process: Subprocess, with signal: Int32, limit: Double = 10)
     process.send(signal)
     let exited = await process.waitForExit(within: limit)
     process.kill()
-    let result = process.finish()
+    let result = await process.finish()
     return (exited, result.status, result.stdout, result.stderr)
 }
 
@@ -160,7 +160,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         let pwd = try launch(URL(fileURLWithPath: "/bin/pwd"), ["-P"], dirs)
         let exited = await pwd.waitForExit(within: 10)
         pwd.kill()
-        let result = pwd.finish()
+        let result = await pwd.finish()
         // `/bin/pwd -P` prints the physical path (`/private/var/…`), as `realpath` gives it.
         let expected = try #require(realpath(dirs.root.path, nil).map { pointer in
             defer { free(pointer) }
@@ -822,7 +822,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
             #expect(hitAfter, "\(log.stdout)")
             let exited = await log.waitForExit(within: 15)
             log.kill()
-            let result = log.finish()
+            let result = await log.finish()
             #expect(exited && result.status == 0, "\(result.status) \(result.stderr)")
             #expect(result.stderr.contains("log: scanner disconnected. \(hint)\nlog: waiting for the scanner…\n"),
                     "\(result.stderr)")
