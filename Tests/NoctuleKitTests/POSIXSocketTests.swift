@@ -58,8 +58,17 @@ private enum ReadOutcome: Equatable {
 }
 
 /// One bounded read on a blocking test socket (poll, then read), off the cooperative pool.
+/// Runs a blocking `body` on a dispatch thread, never a cooperative one: a `Task.detached` that
+/// blocks in `poll` holds one of the pool's few threads (three on the CI runner) for the whole
+/// wait (LESSONS.md 2026-11-21).
+private func offThePool<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async { continuation.resume(returning: body()) }
+    }
+}
+
 private func readOnce(_ fd: Int32, timeout: Duration = .seconds(2)) async -> ReadOutcome {
-    await Task.detached {
+    await offThePool {
         var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
         let ready = poll(&descriptor, 1, milliseconds(timeout))
         if ready == 0 { return .timeout }
@@ -69,7 +78,7 @@ private func readOnce(_ fd: Int32, timeout: Duration = .seconds(2)) async -> Rea
         if count > 0 { return .data(Data(buffer[0..<count])) }
         if count == 0 { return .eof }
         return .error(errno)
-    }.value
+    }
 }
 
 /// Reads until the stream ends (or `timeout` passes with nothing arriving); returns the data
@@ -117,7 +126,7 @@ private final class LoopbackListener: Sendable {
     /// Accepts one connection, or throws `TimedOut`.
     func accept(timeout: Duration = .seconds(2)) async throws -> Int32 {
         let fd = self.fd
-        let accepted: Int32 = await Task.detached {
+        let accepted: Int32 = await offThePool {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             guard poll(&descriptor, 1, milliseconds(timeout)) == 1 else { return -1 }
             let client = Darwin.accept(fd, nil, nil)
@@ -126,7 +135,7 @@ private final class LoopbackListener: Sendable {
                 setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
             }
             return client
-        }.value
+        }
         guard accepted >= 0 else { throw TimedOut() }
         return accepted
     }
@@ -198,6 +207,44 @@ private func eventually(_ limit: Duration = .seconds(2),
     let waited = ContinuousClock.now - start
     #expect(waited < timeout + .seconds(3), "the connect gave up after \(waited)")
     if timedOut { #expect(waited >= timeout, "the connect timed out after \(waited)") }
+}
+
+/// A connect waiting for its handshake doesn't hold a cooperative thread. More connects at once
+/// than the pool has threads (one per core), each to 127.0.0.2 for 5 s: that address routes to the
+/// loopback interface but isn't this Mac's, so the SYN goes unanswered without leaving the machine.
+/// Meanwhile this test's 50 ms sleep must end on time. A connect that waited by blocking in
+/// `poll` held every pool thread for the 5 s, and on the 3-core CI runner starved the loopback RTSP
+/// tests' own connects into `.timeout(method: "CONNECT")` (LESSONS.md 2026-11-21).
+@Test func unansweredConnectsLeaveThePoolFree() async throws {
+    let connects = ProcessInfo.processInfo.activeProcessorCount + 1
+    let timeout = Duration.seconds(5)
+    try await within(.seconds(120)) {
+        try await withThrowingTaskGroup(of: POSIXSocketError?.self) { group in
+            for _ in 0..<connects {
+                group.addTask {
+                    do {
+                        _ = try await TCPStream.connect(host: "127.0.0.2", port: 9, timeout: timeout)
+                        return nil
+                    } catch let error as POSIXSocketError {
+                        return error
+                    }
+                }
+            }
+            let asleep = ContinuousClock.now
+            try await Task.sleep(for: .milliseconds(50))
+            let late = ContinuousClock.now - asleep - .milliseconds(50)
+            print("unansweredConnectsLeaveThePoolFree: a 50 ms sleep ended \(late) late while \(connects) connects waited")
+            var outcomes: [POSIXSocketError?] = []
+            for try await outcome in group { outcomes.append(outcome) }
+            // Only a connect left waiting tests anything; where 127.0.0.2 answers (an alias on lo0)
+            // the connects end at once and there is nothing to measure.
+            if outcomes.allSatisfy({ $0 == .connectTimedOut }) {
+                #expect(late < .seconds(3), "a 50 ms sleep ended \(late) late while \(connects) connects waited (\(connects - 1) cores)")
+            } else {
+                #expect(!outcomes.contains(nil), "connected to 127.0.0.2: \(outcomes)")
+            }
+        }
+    }
 }
 
 @Test func tcpRoundTripAndRemoteAddress() async throws {
