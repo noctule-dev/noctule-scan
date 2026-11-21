@@ -186,7 +186,7 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         ["Sources/X/a.swift"], ["README.md", "Sources/X/a.swift"], ["Sources/X/notes.md"], ["Tests/X/fixture.md"], ["Resources/x.md"],
         [".github/workflows/ci.yml"], ["scripts/x.sh"], ["packaging/x.sh"], ["Package.swift"], ["docs/a.md", "Package.swift"],
         ["config/x.env.example"], ["README.txt"],
-        ["sources/X/notes.md"], ["TESTS/x.md"], ["tests/X/fixture.md"], ["Resources/x.md"], ["resources/x.md"], ["SOURCES/X/n.md"],
+        ["sources/X/notes.md"], ["TESTS/x.md"], ["tests/X/fixture.md"], ["RESOURCES/x.md"], ["resources/x.md"], ["SOURCES/X/n.md"],
         ["Package.swift", "README.md"], [".github/workflows/ci.yml", "CONTRIBUTING.md"],
     ]) func ciChangesCallsEverythingElseCode(paths: [String]) throws {
         #expect(try Repo().scope(adding: paths) == "code")
