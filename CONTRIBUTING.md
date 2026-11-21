@@ -5,7 +5,7 @@ Thanks for helping. Noctule Scan controls, listens to and logs Uniden SDS-series
 ## Before you start
 
 - **Open an issue first for anything large** (a new feature, a new scanner model, a change to how the app talks to the scanner, a new dependency), so we can agree on the approach before you spend time on it. Small fixes can go straight to a pull request.
-- Bugs and feature requests go through the issue templates. Security problems go through private vulnerability reporting ([`SECURITY.md`](SECURITY.md)), never a public issue.
+- Bugs and feature requests go through the issue templates. Questions, ideas that aren't yet a concrete request, and what you've built go to [Discussions](https://github.com/noctule-dev/noctule-scan/discussions). Security problems go through private vulnerability reporting ([`SECURITY.md`](SECURITY.md)), never a public issue.
 - Everyone who takes part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build and test
