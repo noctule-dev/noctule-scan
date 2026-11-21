@@ -54,6 +54,12 @@ private func repositoryText(_ path: String) throws -> String {
         let config = try repositoryText(".github/ISSUE_TEMPLATE/config.yml")
         #expect(config.contains("blank_issues_enabled: false"))
         #expect(config.contains("SECURITY.md"))
+        // Questions and ideas go to Discussions, not issues.
+        for category in ["discussions/categories/q-a", "discussions/categories/ideas"] {
+            #expect(config.contains("https://github.com/noctule-dev/noctule-scan/\(category)"), "config.yml lacks \(category)")
+        }
+        let contributing = try repositoryText("CONTRIBUTING.md")
+        #expect(contributing.contains("https://github.com/noctule-dev/noctule-scan/discussions"), "CONTRIBUTING.md doesn't point at Discussions")
     }
 
     @Test func readmeHasTheBadgesAndPointers() throws {
