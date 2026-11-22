@@ -166,4 +166,14 @@ Plan 22 (`2026-11-22-plan-22-update-check.md`) built §§5–7 as designed. `Upd
 
 The final review's fixes changed five things. The launch check starts 5 s after launch finishes, because a window ordered front before SwiftUI's launch routing opened the station window ended up behind it (and the network gets time after a login). `SuspendingClock` runs during a dark wake (Power Nap), so the app cancels the timer at `NSWorkspace.willSleepNotification` (`handleSleep()`); after a full wake `handleWake()` sets it again and runs an overdue check no sooner than 10 s after the wake, and the fetch waits for connectivity within its 15 s limit, so a check right after a wake doesn't fail for want of Wi-Fi and then wait a day. No scheduled check starts within 60 s of the last one, on the monotonic clock, whatever the wall clock does (the launch check and manual checks aren't held back). And an automatic result's window refuses to become key until it is clicked (or a manual check shows it), so closing another window can't hand it the focus.
 
-The hand checks on the mocks are the plan's Task 9 Step 3 list; their results are recorded here when they are run. The one end-to-end check against GitHub waits for 1.0.0 to be published (§7).
+The hand checks on the mocks are the plan's Task 9 Step 3 list. Run on 2026-11-22 by driving a debug build (placeholder icon) on the serial mock with a `file://` feed and `NOCTULE_TEST_APP_VERSION=0.9.0`:
+
+- A normal (active) launch: the launch check logged `update check: Noctule Scan 1.0.1 is available` 5 s after launch; the window was in front of the station window and not key, and a mapped key pressed then reached the mock (`KEY,8,P`). One click in the window made it key with Download… the default.
+- Check for Updates… sits under About; a manual check brought the window forward and made it key. Later closed it and the station window took the keys again.
+- Skip This Version saved `skippedUpdateVersion`; the next launch logged `update check: skipped 1.0.0` and showed nothing.
+- Settings › General: the Updates section fits in the taller tab without scrolling; the switch wrote `checkForUpdates` to `app.json`, keeping the other keys; "Last checked: today at …" and Check Now worked.
+- Quit with the window open exited within 2 s; the mock's last command was `PSI,0`, `active-subscriptions=0`, no `MSM` or `POF`.
+- Not checked by an agent: Return pressing Download… (it opens the browser) and Esc acting as Later (the computer-use tool's Esc reaches no key monitor, LESSONS.md 2026-11-18); both are the owner's to press.
+- **Open:** closing another window (Settings) while the automatic window is up leaves *no* window key: the update window refuses, as designed, but AppKit doesn't hand the key to the station window, so a key press goes nowhere until the user clicks a window.
+
+The one end-to-end check against GitHub waits for 1.0.0 to be published (§7).
