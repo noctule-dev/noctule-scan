@@ -63,6 +63,22 @@ enum RealNames {
         }
     }
 
+    /// The deny-list entries in each of `files` that holds any, worked out on a dispatch thread: reading
+    /// and searching every tracked file takes seconds of CPU, which on a cooperative thread stalled the
+    /// other tests in the process (a one-thread pool timed out a dozen mock tests; local sweep).
+    static func hits(in files: [URL], list: [String]) async -> [(file: URL, hits: [String])] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let found = files.compactMap { file -> (file: URL, hits: [String])? in
+                    guard let data = try? Data(contentsOf: file) else { return nil }
+                    let hits = Self.hits(in: String(decoding: data, as: UTF8.self), list: list)
+                    return hits.isEmpty ? nil : (file, hits)
+                }
+                continuation.resume(returning: found)
+            }
+        }
+    }
+
     private static func blockingTrackedTextFiles(root: URL) -> [URL] {
         if let listed = gitTrackedFiles(root: root) {
             return listed.filter { url in
@@ -116,10 +132,8 @@ enum RealNames {
         let root = try #require(RealNames.repositoryRoot)
         let files = await RealNames.trackedTextFiles(root: root)
         #expect(files.count > 50, "found only \(files.count) files under \(root.path)")
-        for file in files {
-            guard let data = try? Data(contentsOf: file) else { continue }
-            let hits = RealNames.hits(in: String(decoding: data, as: UTF8.self), list: list)
-            #expect(hits.isEmpty, "\(file.path.dropFirst(root.path.count + 1)) contains \(hits)")
+        for (file, hits) in await RealNames.hits(in: files, list: list) {
+            Issue.record("\(file.path.dropFirst(root.path.count + 1)) contains \(hits)")
         }
     }
 
