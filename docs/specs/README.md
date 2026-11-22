@@ -70,4 +70,4 @@ Each plan was the step-by-step implementation plan for one piece of work. They s
 - [`2026-11-17-plan-18-line-in-audio.md`](2026-11-17-plan-18-line-in-audio.md): Plan 18, line-in audio for USB scanners (core and app).
 - [`2026-11-17-plan-19-line-in-cli.md`](2026-11-17-plan-19-line-in-cli.md): Plan 19, line-in audio on the command line.
 - [`2026-11-18-plan-20-quick-keys.md`](2026-11-18-plan-20-quick-keys.md): Plan 20, Favorites quick keys.
-- [`2026-11-20-plan-21-open-source-prep.md`](2026-11-20-plan-21-open-source-prep.md): Plan 21, taking Noctule Scan public.
+- [`2026-11-20-plan-21-open-source-prep.md`](2026-11-20-plan-21-open-source-prep.md): Plan 21, taking Noctule Scan public (done 2026-11-22; Results at the end).
