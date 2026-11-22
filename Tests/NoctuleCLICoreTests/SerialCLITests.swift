@@ -25,7 +25,7 @@ private func port(_ path: String, product: String? = "Test Scanner", productID: 
                    serialNumber: nil)
 }
 
-@Suite struct SerialArgumentsTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialArgumentsTests {
     @Test func serialFlag() throws {
         #expect(try CLIArguments.parse(["info", "--serial"]).serial == .auto)
         #expect(try CLIArguments.parse(["info", "--serial", "/dev/ttys004"]).serial == .path("/dev/ttys004"))
@@ -90,7 +90,7 @@ private func port(_ path: String, product: String? = "Test Scanner", productID: 
     }
 }
 
-@Suite struct SerialConfigTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialConfigTests {
     @Test func serialPathConfig() throws {
         try withConfig("SCANNER_HOST=h\n") { dir in
             let url = dir.appending(path: "config/dev-scanner.env")
@@ -175,7 +175,7 @@ private func port(_ path: String, product: String? = "Test Scanner", productID: 
     }
 }
 
-@Suite struct ResolveSerialTests {
+@Suite(.timeLimit(.minutes(3))) struct ResolveSerialTests {
     private let listed = port("/dev/cu.listed")
     private func resolve(_ invocation: CLIInvocation, in dir: URL, ports: [SerialPortInfo],
                          exists: @escaping (String) -> Bool = { _ in true }) -> SerialPortResolution {
@@ -268,7 +268,7 @@ private final class FakeListing: SerialPortListing {
     }
 }
 
-@Suite struct USBDetectionTests {
+@Suite(.timeLimit(.minutes(3))) struct USBDetectionTests {
     private let key = USBDetection.disableKey
 
     /// Unset or empty: detection on. Any other value, "0" included: off.
@@ -325,7 +325,7 @@ private final class FakeListing: SerialPortListing {
     }
 }
 
-@Suite struct SerialShellFormatTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialShellFormatTests {
     @Test func serialOpenFailures() {
         let busy = CLIFormat.serialOpenFailure(SerialTransportError.busy("/tmp/p"))
         #expect(busy?.line == "/tmp/p is in use by another program.")

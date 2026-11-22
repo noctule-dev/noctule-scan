@@ -4,7 +4,7 @@
 import Testing
 @testable import NoctuleAudioPlayback
 
-@Suite struct JitterBufferTests {
+@Suite(.timeLimit(.minutes(3))) struct JitterBufferTests {
     private func ramp(_ range: Range<Int>) -> [Int16] { range.map { Int16($0) } }
 
     @Test func silenceUntilPrimed() {

@@ -43,8 +43,9 @@ private struct ListenFixture {
     let directory: URL
     let controlPort: UInt16
 
-    static func make(running: Bool = true, script: FakeRTSPServer.Script = .scannerLike) async throws -> ListenFixture {
-        let server = FakeRTSPServer(script: script)
+    static func make(running: Bool = true, script: FakeRTSPServer.Script = .scannerLike,
+                     behavior: FakeRTSPServer.Behavior = .init()) async throws -> ListenFixture {
+        let server = FakeRTSPServer(script: script, behavior: behavior)
         let sender = FakeRTPSender()
         await server.attach(sender)
         let port = try await server.start()
@@ -153,13 +154,18 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         #expect(result.stdout.contains("packets "))
     }
 
+    /// The second signal must come while the close is under way. A fixed 150 ms after the first came
+    /// too late under a one-thread pool, where the test's own sleep woke after the close had ended
+    /// (sweep, 2026-11-22). The fake server now sends it the moment the TEARDOWN arrives, from its own
+    /// queue, and holds the TEARDOWN's reply a second, so the close is certainly still under way.
     @Test func secondSigintKeepsClosing() async throws {
-        let fixture = try await ListenFixture.make()
+        let fixture = try await ListenFixture.make(behavior: .init(replyDelays: ["TEARDOWN": .seconds(1)]))
         let noctule = try Noctule(fixture.arguments([]))
+        await fixture.server.setEventHandler { event in
+            if event == .request(method: "TEARDOWN") { noctule.interrupt() }
+        }
         let streaming = await noctule.waitForStderr(within: 15) { $0.contains("audio: streaming") }
         #expect(streaming)
-        noctule.interrupt()
-        try await Task.sleep(for: .milliseconds(150))
         noctule.interrupt()
         let exited = await noctule.waitForExit(within: 10)
         noctule.kill()

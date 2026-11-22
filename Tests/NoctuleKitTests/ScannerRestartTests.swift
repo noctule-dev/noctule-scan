@@ -59,10 +59,10 @@ private func client(_ scanner: ScriptedReboot, timeout: Duration = .milliseconds
 // MARK: ScannerRestartMonitor
 
 private func wait(_ scanner: ScriptedReboot, timeout: Duration = .seconds(3),
-                  grace: Duration = .seconds(1)) async -> Bool {
+                  grace: Duration = .seconds(1), pollTimeout: Duration = .milliseconds(60)) async -> Bool {
     await ScannerRestartMonitor.waitUntilBack(
         host: "192.0.2.10", port: 50536, timeout: timeout, pollInterval: fastPoll,
-        silenceGrace: grace, pollTimeout: .milliseconds(60), makeTransport: { scanner.makeTransport() })
+        silenceGrace: grace, pollTimeout: pollTimeout, makeTransport: { scanner.makeTransport() })
 }
 
 @Test func monitorReturnsTrueWhenMDLReappearsAfterSilence() async throws {
@@ -89,7 +89,10 @@ private func wait(_ scanner: ScriptedReboot, timeout: Duration = .seconds(3),
     // period the monitor accepts the first answer.
     let scanner = ScriptedReboot(silentPolls: 0)
     let started = ContinuousClock.now
-    #expect(await wait(scanner, grace: .milliseconds(150)))
+    // A poll timeout long enough that an answering scanner never looks silent: at 60 ms, a busy test
+    // process took an answer for silence and accepted the next one at 126 ms, before the grace (a
+    // full local swift test, 2026-11-22).
+    #expect(await wait(scanner, grace: .milliseconds(150), pollTimeout: .seconds(2)))
     #expect(ContinuousClock.now - started >= .milliseconds(150))
 }
 

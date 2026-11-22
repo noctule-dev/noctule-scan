@@ -122,7 +122,12 @@ private let sharedDMGVenv: URL = {
 func run(_ executable: URL, _ arguments: [String], environment: [String: String] = [:],
          currentDirectory: URL? = nil, limit: Double = 120, input: String? = nil) async throws -> (status: Int32, stdout: String, stderr: String) {
     let process = try Subprocess(executable, arguments, environment: environment, currentDirectory: currentDirectory, input: input)
-    if !(await process.waitForExit(within: limit)) { process.kill() }
+    if !(await process.waitForExit(within: limit)) {
+        // Named, so a run that stalls says where (a release test failed on the runner with only its first
+        // stderr line to show; flake hunt hunt/flaky-1).
+        Issue.record("\(executable.lastPathComponent) \(arguments.joined(separator: " ")) still running after \(limit) s; killed. stderr so far: \(process.stderr)")
+        process.kill()
+    }
     return await process.finish()
 }
 
@@ -142,9 +147,23 @@ func tool(_ name: String) -> URL { URL(fileURLWithPath: "/usr/bin/\(name)") }
 
 /// Mounts `dmg` read-only and out of the Finder's sight, runs `body` with the mount point, and
 /// always detaches it.
+///
+/// The attach is tried up to three times, two seconds apart: on a runner VM one failed with status 1
+/// and nothing but hdiutil's deprecation warning on stderr, right after `release.sh` had attached and
+/// force-detached the same image (flake hunt run 44979282952); a failed attempt is printed with its
+/// whole output and what `hdiutil info` showed attached, and the last one's goes in the failure.
 private func withMountedImage(_ dmg: URL, _ body: (URL) async throws -> Void) async throws {
-    let attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
-    try #require(attach.status == 0, "hdiutil attach failed: \(attach.stderr)")
+    var attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+    var attempts = 1
+    while attach.status != 0, attempts < 3 {
+        let attached = try? await run(tool("hdiutil"), ["info"], limit: 20)
+        print("withMountedImage: hdiutil attach \(dmg.lastPathComponent) attempt \(attempts) exited \(attach.status); stderr: \(attach.stderr) stdout: \(attach.stdout) attached: \(attached?.stdout ?? "?")")
+        try await Task.sleep(for: .seconds(2))
+        attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+        attempts += 1
+    }
+    try #require(attach.status == 0,
+                 "hdiutil attach failed \(attempts) times, last with status \(attach.status): stderr: \(attach.stderr) stdout: \(attach.stdout)")
     let plist = try PropertyListSerialization.propertyList(from: Data(attach.stdout.utf8), format: nil) as? [String: Any]
     let entities = (plist?["system-entities"] as? [[String: Any]]) ?? []
     let mountPoint = try #require(entities.compactMap { $0["mount-point"] as? String }.first)
@@ -1215,8 +1234,12 @@ extension DiskImageTests {
         }
 
         /// Whether `hdiutil info` lists an image under `directory`.
+        /// Whether an image from this test's own directory is attached. The whole path, not its last
+        /// component, which every test's directory shares ("with space"): one image a killed run left
+        /// attached failed four tests at once (local sweep).
         private func attachedImages(under directory: URL) async throws -> Bool {
-            try await run(tool("hdiutil"), ["info"]).stdout.contains(directory.lastPathComponent)
+            let info = try await run(tool("hdiutil"), ["info"]).stdout
+            return [directory.path, directory.resolvingSymlinksInPath().path].contains { info.contains($0 + "/") }
         }
 
         @Test func releaseChecksTheAppInsideTheDMG() async throws {
@@ -1315,17 +1338,18 @@ extension DiskImageTests {
             #expect(try await porcelain(repo).isEmpty)
         }
 
-        @Test func gatekeeperOutputCarriesNoIdentity() async throws {
-        let stubs = try StubTools()
-        let repo = try await fakeRepository(in: stubs.directory)
-        try await tagHead(repo, "v0.1.0")
-        for extra in [[:], ["STUB_SPCTL_STATUS": "3"]] {
+        /// One release per case, each with its own time limit: the two in one test came within the
+        /// suite's minute on a loaded machine (two whole release builds; LESSONS.md 2026-11-22).
+        @Test(arguments: [[:], ["STUB_SPCTL_STATUS": "3"]] as [[String: String]])
+        func gatekeeperOutputCarriesNoIdentity(_ extra: [String: String]) async throws {
+            let stubs = try StubTools()
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
             let result = try await release(["0.1.0"], stubs, repo, extra)
             let output = result.stdout + result.stderr
             #expect(output.contains("source=Notarized Developer ID"), "\(extra)")
             #expect(!output.contains("Test Person") && !output.contains("TEAM123456"), "\(extra): \(output)")
         }
-    }
 
     @Test func failedGatekeeperCheckFailsTheRun() async throws {
             let stubs = try StubTools()

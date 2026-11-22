@@ -50,7 +50,10 @@ enum SDS150HardwareGate {
 
 /// The SDS150 over USB serial (design §8): the opt-in hardware suites, and the same checks on the
 /// mock. One serialized suite, so no two hardware suites ever hold the port at once.
-@Suite(.serialized) struct SDS150HardwareTests {
+// Ten minutes: the opt-in keep-alive checks hold 240 s on a real radio (plus the port, the
+// quiet-port check and PSI,0), and Swift Testing applies the shortest limit on the way down, so a
+// three-minute limit here would cancel them at 180 s. The mock sub-suites carry three minutes.
+@Suite(.serialized, .timeLimit(.minutes(10))) struct SDS150HardwareTests {
     /// The owner's SDS150, read-only. Opt-in: `NOCTULE_SDS150_HARDWARE_TESTS=1` (never with
     /// `NOCTULE_NO_USB_DETECTION` set). Sends `MDL` (an SDS150, else nothing more), then `VER`,
     /// `VOL`, `SQL`, `GSI`, `STS`, one each; never `GCS`, `PSI`, `KEY`, `MSV`, `MSM` or `POF`.
@@ -112,7 +115,7 @@ enum SDS150HardwareGate {
 
 extension SDS150HardwareTests {
     /// The checks on the mock: exactly what each sends, and `PSI,0` on every path.
-    @Suite struct OnTheMock {
+    @Suite(.timeLimit(.minutes(3))) struct OnTheMock {
         @Test func readOnlySendsExactlyTheSixReads() async throws {
             let mock = try await withMockHandheld { path in
                 let report = try await HandheldHardwareChecks.readOnly(path: path, commandTimeout: .milliseconds(700))
@@ -399,7 +402,7 @@ extension SDS150HardwareTests {
 
 extension SDS150HardwareTests {
     /// The gates are decided from the environment alone, before any port is resolved or opened.
-    @Suite struct Gates {
+    @Suite(.timeLimit(.minutes(3))) struct Gates {
         @Test func offByDefault() {
             #expect(!SDS150HardwareGate.readOnlyEnabled([:]))
             #expect(!SDS150HardwareGate.pushEnabled([:]))
@@ -465,11 +468,15 @@ private func expectNothingForbidden(_ commands: [String], sourceLocation: Source
 extension SDS150HardwareTests {
     /// The keep-alive check on the mock (real clock, short durations): exactly `MDL`, `PSI`, the
     /// `KAL`s and `PSI,0`.
-    @Suite struct KeepAliveOnTheMock {
-        @Test(.skippedOnCIRunner("real-clock 50 ms pushes and 150 ms KALs; the CI runner delivered about half, three runs of three"))
+    @Suite(.timeLimit(.minutes(3))) struct KeepAliveOnTheMock {
+        // Unskipped 2026-11-22: the mock's strict push timer (2026-11-20) delivers every push, and
+        // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
+        @Test
         func passesWhenKALRestartsTheLifetime() async throws {
+            let sent = Mutex(-1)
             let mock = try await withMockHandheld(personality: keepAliveMock(), clock: .real()) { path in
                 let report = try await shortKeepAliveCheck(path)
+                sent.withLock { $0 = report.keepAlives }
                 #expect(report.pushes > 10)
                 // At most one per 150 ms over 1.2 s, and not many fewer.
                 #expect(report.keepAlives >= 5 && report.keepAlives <= 8, "\(report.summary)")
@@ -482,7 +489,9 @@ extension SDS150HardwareTests {
             #expect(Array(commands.prefix(2)) == ["MDL", "PSI,50"], "\(commands)")
             #expect(commands.last == "PSI,0", "\(commands)")
             #expect(commands.dropFirst(2).dropLast().allSatisfy { $0 == "KAL" }, "\(commands)")
-            #expect(commands.filter { $0 == "KAL" }.count >= 7, "\(commands)")
+            // Every KAL the check wrote reached the mock. Not a fixed number: how many a 150 ms timer
+            // fits in 1.2 s depends on how late it wakes (six under background priority; local sweep).
+            #expect(commands.filter { $0 == "KAL" }.count == sent.withLock { $0 }, "\(commands)")
             expectNothingForbidden(commands)
             #expect(await mock.activeSubscribers == 0)
         }

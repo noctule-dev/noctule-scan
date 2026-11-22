@@ -10,7 +10,7 @@ private func info(_ attrs: String = "", inner: String = "") throws -> ScannerInf
     try ScannerInfo(xml: XMLNode.parse(Data("<ScannerInfo \(attrs)>\(inner)</ScannerInfo>".utf8)))
 }
 
-@Suite struct DisplayRefreshPolicyTests {
+@Suite(.timeLimit(.minutes(3))) struct DisplayRefreshPolicyTests {
     let policy = DisplayRefreshPolicy()
     let t0 = ContinuousClock.now
 

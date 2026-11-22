@@ -157,7 +157,7 @@ private final class RawPort: Sendable {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let left = ContinuousClock.now.duration(to: deadline)
             let ms = max(1, Int(left / .milliseconds(1)))
-            guard poll(&descriptor, 1, Int32(ms)) > 0 else { continue }
+            guard poll(&descriptor, 1, Int32(ms)) > 0 else { continue }  // off the cooperative pool: run through offThePool
             let count = Darwin.read(fd, &buffer, buffer.count)
             if count > 0 { data.append(contentsOf: buffer[0..<count]) } else if count == 0 { break }
             if let until, String(decoding: data, as: UTF8.self).contains(until) { break }
@@ -173,7 +173,7 @@ private final class RawPort: Sendable {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
             let left = ContinuousClock.now.duration(to: deadline)
             let ms = max(1, Int(left / .milliseconds(1)))
-            guard poll(&descriptor, 1, Int32(ms)) > 0 else { continue }
+            guard poll(&descriptor, 1, Int32(ms)) > 0 else { continue }  // off the cooperative pool: run through offThePool
             let count = Darwin.read(fd, &buffer, buffer.count)
             if count > 0 { data.append(contentsOf: buffer[0..<count]) } else if count == 0 { break }
             if data.last == 0x0D { break }
@@ -444,6 +444,7 @@ private final class RawPort: Sendable {
             defer { port.close() }
             port.write("MDL\r")
             port.write("PSI,0\r")
+            port.write("psi,0\r")  // a stop in any case isn't a subscription (review N16)
             // Well past 0.3 s from `start()` (a late wake only lengthens this): still plugged in.
             try await Task.sleep(for: .milliseconds(900))
             #expect(await rig.mock.isPluggedIn, "unplugged before any subscribing PSI")

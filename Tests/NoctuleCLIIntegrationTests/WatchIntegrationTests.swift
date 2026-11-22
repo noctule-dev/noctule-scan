@@ -68,7 +68,7 @@ private final class FakeScanner: @unchecked Sendable {
             var peerLen = socklen_t(MemoryLayout<sockaddr_in>.size)
             let n = withUnsafeMutablePointer(to: &peer) {
                 $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    recvfrom(fd, &buffer, buffer.count, 0, $0, &peerLen)
+                    recvfrom(fd, &buffer, buffer.count, 0, $0, &peerLen)  // off the cooperative pool: its own thread
                 }
             }
             guard n > 0 else { continue }

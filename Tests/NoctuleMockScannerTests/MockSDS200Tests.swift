@@ -102,6 +102,15 @@ private final class ChunkLog: Sendable {
     }
 
     var count: Int { chunks.withLock { $0.count } }
+    /// The first chunk from `start` on whose loudest sample is above `level` (or, `quiet`, at most it).
+    func first(from start: Int, quiet: Bool = false, level: Int = 8) -> Int? {
+        chunks.withLock { chunks in
+            chunks.indices.dropFirst(start).first { index in
+                let peak = chunks[index].samples.map { abs(Int($0)) }.max() ?? 0
+                return quiet ? peak <= level : peak > level
+            }
+        }
+    }
     func samples(from start: Int) -> [Int16] { chunks.withLock { $0.dropFirst(start).flatMap(\.samples) } }
     func cancel() { task.withLock { $0?.cancel() } }
 }
@@ -130,11 +139,11 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             defer { raw.close() }
             let url = "rtsp://127.0.0.1:\(rig.rtspPort)/au:scanner.au"
 
-            let options = try #require(raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: NoctuleScan\r\n\r\n"))
+            let options = try #require(await raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: NoctuleScan\r\n\r\n"))
             #expect(options.hasPrefix("RTSP/1.0 200 OK\r\n"))
             #expect(header("Public", in: options)?.contains("GET_PARAMETER") == true)
 
-            let describe = try #require(raw.exchange(
+            let describe = try #require(await raw.exchange(
                 "DESCRIBE \(url) RTSP/1.0\r\nCSeq: 2\r\nUser-Agent: NoctuleScan\r\nAccept: application/sdp\r\n\r\n"))
             #expect(headerNames(describe) == ["Cache-Control", "CSeq", "Server", "Content-Base", "Content-Length", "Content-Type"])
             #expect(header("Server", in: describe) == "Scanner Audio Server 0.0.1")
@@ -144,7 +153,7 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             #expect(body.contains("m=audio 0 RTP/AVP 0"))
             let base = try #require(header("Content-Base", in: describe))
 
-            let setup = try #require(raw.exchange(
+            let setup = try #require(await raw.exchange(
                 "SETUP \(base)trackID=1 RTSP/1.0\r\nCSeq: 3\r\nUser-Agent: NoctuleScan\r\nTransport: RTP/AVP;unicast;client_port=\(rtpPort)\r\n\r\n"))
             let session = try #require(header("Session", in: setup))
             #expect(!session.contains("timeout"))
@@ -153,19 +162,19 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             #expect(transport.hasPrefix("RTP/AVP;unicast;client_port=\(rtpPort);source=127.0.0.1;server_port="))
             #expect(transport.contains(";ssrc="))
 
-            let play = try #require(raw.exchange(
+            let play = try #require(await raw.exchange(
                 "PLAY \(base) RTSP/1.0\r\nCSeq: 4\r\nUser-Agent: NoctuleScan\r\nSession: \(session)\r\nRange: npt=0.000-\r\n\r\n"))
             #expect(play.hasPrefix("RTSP/1.0 200 OK"))
             #expect(header("RTP-Info", in: play) != nil)
 
-            let keepalive = try #require(raw.exchange(
+            let keepalive = try #require(await raw.exchange(
                 "GET_PARAMETER \(base) RTSP/1.0\r\nCSeq: 5\r\nUser-Agent: NoctuleScan\r\nSession: \(session)\r\n\r\n"))
             #expect(keepalive.hasPrefix("RTSP/1.0 200 OK"))
-            let teardown = try #require(raw.exchange(
+            let teardown = try #require(await raw.exchange(
                 "TEARDOWN \(base) RTSP/1.0\r\nCSeq: 6\r\nUser-Agent: NoctuleScan\r\nSession: \(session)\r\n\r\n"))
             #expect(teardown.hasPrefix("RTSP/1.0 200 OK"))
             // A session the server doesn't know gets 454.
-            let unknown = try #require(raw.exchange(
+            let unknown = try #require(await raw.exchange(
                 "GET_PARAMETER \(base) RTSP/1.0\r\nCSeq: 7\r\nUser-Agent: NoctuleScan\r\nSession: \(session)\r\n\r\n"))
             #expect(unknown.hasPrefix("RTSP/1.0 454"))
             await receiver.close()
@@ -182,13 +191,13 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
                 let rtpPort = try await receiver.bind()
                 let raw = try RawRTSP(port: rig.rtspPort)
                 let url = "rtsp://127.0.0.1:\(rig.rtspPort)/au:scanner.au/"
-                _ = raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
-                let setup = try #require(raw.exchange(
+                _ = await raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+                let setup = try #require(await raw.exchange(
                     "SETUP \(url)trackID=1 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=\(rtpPort)\r\n\r\n"))
                 let session = try #require(header("Session", in: setup))
                 let transport = try #require(header("Transport", in: setup))
                 let advertised = try #require(transport.components(separatedBy: "ssrc=").last.flatMap { UInt32($0) })
-                _ = raw.exchange("PLAY \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: \(session)\r\nRange: npt=0.000-\r\n\r\n")
+                _ = await raw.exchange("PLAY \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: \(session)\r\nRange: npt=0.000-\r\n\r\n")
 
                 let packets = receiver.packets
                 let collected = try await within(.seconds(3)) { () -> [RTPPacket] in
@@ -200,7 +209,7 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
                     }
                     return out
                 }
-                _ = raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 4\r\nSession: \(session)\r\n\r\n")
+                _ = await raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 4\r\nSession: \(session)\r\n\r\n")
                 raw.close()
                 await receiver.close()
 
@@ -232,17 +241,21 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             #expect(abs(hz - second.toneHz) <= second.toneHz * 0.05, "measured \(hz) Hz, want \(second.toneHz)")
 
             // Between transmissions: still 25 packets/s (continuous), but silent.
+            // Measured from the first chunk that shows the change, plus one (a chunk may straddle it):
+            // a fixed three chunks after the clock moved still held the tone under load (local sweep).
             rig.clock.set(second.end + 0.5)
-            let mark = chunks.count + 3
-            try await eventually { chunks.count >= mark + 10 }
+            let silenceFrom = chunks.count
+            try await eventually { chunks.first(from: silenceFrom, quiet: true).map { chunks.count >= $0 + 11 } ?? false }
+            let mark = try #require(chunks.first(from: silenceFrom, quiet: true)) + 1
             let quiet = chunks.samples(from: mark)
             #expect(quiet.allSatisfy { abs(Int($0)) <= 8 }, "max \(quiet.map { abs(Int($0)) }.max() ?? 0)")
 
             // Another transmission: its own tone.
             let third = MockScenario.default.transmissions[2]
             rig.clock.set(third.at + 0.5)
-            let next = chunks.count + 3
-            try await eventually { chunks.count >= next + 15 }
+            let toneFrom = chunks.count
+            try await eventually { chunks.first(from: toneFrom).map { chunks.count >= $0 + 16 } ?? false }
+            let next = try #require(chunks.first(from: toneFrom)) + 1
             let thirdHz = zeroCrossingHz(chunks.samples(from: next))
             #expect(abs(thirdHz - third.toneHz) <= third.toneHz * 0.05, "measured \(thirdHz) Hz, want \(third.toneHz)")
             await session.stop()
@@ -503,8 +516,8 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
         let leaked = try await withMock { rig in
             let raw = try RawRTSP(port: rig.rtspPort)
             let url = "rtsp://127.0.0.1:\(rig.rtspPort)/au:scanner.au/"
-            _ = raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
-            let setup = try #require(raw.exchange(
+            _ = await raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+            let setup = try #require(await raw.exchange(
                 "SETUP \(url)trackID=1 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=9\r\n\r\n"))
             #expect(header("Session", in: setup) != nil)
             raw.close()  // no TEARDOWN
@@ -549,18 +562,18 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
     }
 
     /// OPTIONS, SETUP and (if `tearDown`) TEARDOWN over a raw socket; returns the replies' status lines.
-    private static func rawSession(port: UInt16, tearDown: Bool) throws -> [String] {
+    private static func rawSession(port: UInt16, tearDown: Bool) async throws -> [String] {
         let raw = try RawRTSP(port: port)
         defer { raw.close() }
         let url = "rtsp://127.0.0.1:\(port)/au:scanner.au/"
         var statuses: [String] = []
-        let options = raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+        let options = await raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n")
         statuses.append(options.map(statusLine) ?? "none")
-        let setup = raw.exchange(
+        let setup = await raw.exchange(
             "SETUP \(url)trackID=1 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=9\r\n\r\n")
         statuses.append(setup.map(statusLine) ?? "none")
         if tearDown, let session = setup.flatMap({ header("Session", in: $0) }) {
-            let teardown = raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: \(session)\r\n\r\n")
+            let teardown = await raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: \(session)\r\n\r\n")
             statuses.append(teardown.map(statusLine) ?? "none")
         }
         return statuses
@@ -571,9 +584,9 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
     @Test func cooldownAfterUncleanServesAReconnectAfterACleanClose() async throws {
         let leaked = try await withMock(cooldown: .seconds(5), cooldownAfter: .unclean) { rig in
             let allOK = ["RTSP/1.0 200 OK", "RTSP/1.0 200 OK", "RTSP/1.0 200 OK"]
-            #expect(try Self.rawSession(port: rig.rtspPort, tearDown: true) == allOK)
+            #expect(try await Self.rawSession(port: rig.rtspPort, tearDown: true) == allOK)
             try await eventually { await rig.mock.rtsp.connectionEnds.count == 1 }
-            #expect(try Self.rawSession(port: rig.rtspPort, tearDown: true) == allOK)
+            #expect(try await Self.rawSession(port: rig.rtspPort, tearDown: true) == allOK)
             #expect(await rig.mock.wedgeCount == 0)
             #expect(await !rig.mock.isAudioWedged)
         }
@@ -583,7 +596,7 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
     /// With `.unclean`, a close without a TEARDOWN still arms the hazard.
     @Test func cooldownAfterUncleanStillWedgesAfterAnUncleanClose() async throws {
         try await withMock(cooldown: .seconds(5), cooldownAfter: .unclean) { rig in
-            _ = try Self.rawSession(port: rig.rtspPort, tearDown: false)
+            _ = try await Self.rawSession(port: rig.rtspPort, tearDown: false)
             try await eventually { await rig.mock.rtsp.connectionEnds.count == 1 }
             let careless = try RawRTSP(port: rig.rtspPort)
             defer { careless.close() }
@@ -599,13 +612,13 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             let url = "rtsp://127.0.0.1:\(rig.rtspPort)/au:scanner.au/"
             let clean = try RawRTSP(port: rig.rtspPort)
             let unclean = try RawRTSP(port: rig.rtspPort)
-            #expect(unclean.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n") != nil)
+            #expect(await unclean.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n") != nil)
             unclean.close()  // no session, no TEARDOWN
             try await eventually { await rig.mock.rtsp.connectionEnds.count == 1 }
-            let setup = try #require(clean.exchange(
+            let setup = try #require(await clean.exchange(
                 "SETUP \(url)trackID=1 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP;unicast;client_port=9\r\n\r\n"))
             let session = try #require(header("Session", in: setup))
-            let teardown = clean.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 2\r\nSession: \(session)\r\n\r\n")
+            let teardown = await clean.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 2\r\nSession: \(session)\r\n\r\n")
             #expect(teardown?.hasPrefix("RTSP/1.0 200") == true)
             clean.close()
             try await eventually { await rig.mock.rtsp.connectionEnds.count == 2 }
@@ -625,15 +638,15 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             let url = "rtsp://127.0.0.1:\(rig.rtspPort)/au:scanner.au/"
             if flaw == "wrongCSeq" { await rig.mock.rtsp.replaceScript(.scannerLike.wrongCSeq(method: "OPTIONS", once: true)) }
             let raw = try RawRTSP(port: rig.rtspPort)
-            #expect(raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n") != nil)
-            let setup = try #require(raw.exchange(
+            #expect(await raw.exchange("OPTIONS \(url) RTSP/1.0\r\nCSeq: 1\r\n\r\n") != nil)
+            let setup = try #require(await raw.exchange(
                 "SETUP \(url)trackID=1 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP;unicast;client_port=9\r\n\r\n"))
             let session = try #require(header("Session", in: setup))
             if flaw == "teardown454" {
-                let rejected = raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: 99999999\r\n\r\n")
+                let rejected = await raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 3\r\nSession: 99999999\r\n\r\n")
                 #expect(rejected?.hasPrefix("RTSP/1.0 454") == true)
             }
-            let teardown = raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 4\r\nSession: \(session)\r\n\r\n")
+            let teardown = await raw.exchange("TEARDOWN \(url) RTSP/1.0\r\nCSeq: 4\r\nSession: \(session)\r\n\r\n")
             #expect(teardown?.hasPrefix("RTSP/1.0 200") == true)
             if flaw == "pending" {
                 await rig.mock.rtsp.replaceScript(.scannerLike.silence(method: "DESCRIBE"))
@@ -653,7 +666,7 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
     /// clean close.
     @Test func cooldownAfterAnyWedgesAfterACleanClose() async throws {
         try await withMock(cooldown: .seconds(5)) { rig in
-            _ = try Self.rawSession(port: rig.rtspPort, tearDown: true)
+            _ = try await Self.rawSession(port: rig.rtspPort, tearDown: true)
             try await eventually { await rig.mock.rtsp.connectionEnds.count == 1 }
             let next = try RawRTSP(port: rig.rtspPort)
             defer { next.close() }

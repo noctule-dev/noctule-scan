@@ -76,7 +76,7 @@ import NoctuleMockScanner
         func accept(within limit: Duration) async -> Int32? {
             let deadline = ContinuousClock.now + limit
             while ContinuousClock.now < deadline {
-                let client = Darwin.accept(fd, nil, nil)
+                let client = Darwin.accept(fd, nil, nil)  // off the cooperative pool: a non-blocking socket
                 if client >= 0 {
                     var size: Int32 = 256 * 1024
                     setsockopt(client, SOL_SOCKET, SO_SNDBUF, &size, socklen_t(MemoryLayout<Int32>.size))
@@ -186,26 +186,35 @@ import NoctuleMockScanner
 
     // MARK: - Tests
 
-    @Test(.skippedOnCIRunner("wall-clock spacing of chunks over about 1 s; a loaded 3-core runner stretches it past the 25 ms tolerance"))
-    func streamsChunksFromTheMock() async throws {
+    /// Held to what load can't change: the stream is never fast, never has a gap, and its chunk
+    /// times never run ahead of 40 ms a chunk. How many chunks a fixed second brings, and how far a
+    /// late read pushes the times on, are the machine's (a loaded 3-core runner failed the fixed
+    /// window it had; LESSONS.md 2026-11-22).
+    @Test func streamsChunksFromTheMock() async throws {
         try await Self.withSource { source, streams in
             #expect(await Self.wait { streams.states.items.contains(.streaming(deviceName: Self.name)) })
             #expect(await Self.wait { streams.chunks.items.count >= 20 })
             let count = streams.chunks.items.count
-            try await Task.sleep(for: .seconds(1))
-            let inASecond = streams.chunks.items.count - count
-            // 25 chunks of 40 ms a second; load can only make the stream late, never fast.
-            #expect(inASecond >= 20, "\(inASecond) chunks in 1 s")
-            #expect(inASecond <= 30, "\(inASecond) chunks in 1 s")
+            let from = ContinuousClock.now
+            #expect(await Self.wait { streams.chunks.items.count >= count + 25 })
+            let seen = streams.chunks.items.count - count
+            // 25 chunks of 40 ms a second: never faster than real time (two chunks of slack for
+            // the reads in flight at either end); slower is the machine's.
+            let took = (ContinuousClock.now - from) / .milliseconds(1)
+            #expect(Double(seen) <= took / 40 + 2, "\(seen) chunks in \(took) ms")
             let chunks = streams.chunks.items
             #expect(chunks.allSatisfy { $0.samples.count == 320 })
             #expect(chunks.allSatisfy { !$0.discontinuity && $0.lostBefore == 0 }, "a gap in a steady stream")
-            // The sequence steps by one, and the times follow the chunks: 40 ms each, to within the
-            // 20 ms the pipeline allows before it counts again from the read clock.
+            // The sequence steps by one, and the times follow the chunks: 40 ms from one to the
+            // next, except where a late read made the pipeline count again from the read clock (it
+            // allows 20 ms of drift first). So the times only rise, and most steps are exactly 40 ms:
+            // the median, which a few such re-counts on a loaded machine don't move (a check on the
+            // whole span did, by 36 ms, under the background clamp).
             for (before, after) in zip(chunks, chunks.dropFirst()) { #expect(after.sequence == before.sequence &+ 1) }
-            let span = try #require(chunks.last).receivedAt - chunks[0].receivedAt
-            let expected = Duration.milliseconds(40 * (chunks.count - 1))
-            #expect(abs((span - expected) / .milliseconds(1)) < 25, "\(chunks.count) chunks over \(span)")
+            let steps = zip(chunks, chunks.dropFirst()).map { ($1.receivedAt - $0.receivedAt) / .milliseconds(1) }.sorted()
+            #expect(steps.allSatisfy { $0 > 0 }, "chunk times went back: \(steps.prefix(3))")
+            let median = steps[steps.count / 2]
+            #expect(abs(median - 40) < 1, "median step \(median) ms over \(chunks.count) chunks")
             #expect(!streams.levels.items.isEmpty)
             // The states so far: starting, then streaming, and nothing else.
             #expect(streams.states.items == [.starting, .streaming(deviceName: Self.name)])

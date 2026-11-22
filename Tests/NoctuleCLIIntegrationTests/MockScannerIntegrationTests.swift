@@ -43,7 +43,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
     var buffer = [UInt8](repeating: 0, count: 65_536)
     let deadline = ContinuousClock.now + .milliseconds(Int(limit * 1000))
     while arrivals.count < count, ContinuousClock.now < deadline {
-        let received = recv(fd, &buffer, buffer.count, 0)
+        let received = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: called on a dispatch queue
         guard received > 0 else { continue }
         let text = String(decoding: buffer[0..<received], as: UTF8.self)
         if text.hasPrefix("PSI,"), !text.hasPrefix("PSI,OK") { arrivals.append(.now) }

@@ -44,7 +44,7 @@ private func station(_ name: String, host: String? = "127.0.0.1") -> Station {
     return s
 }
 
-@Suite struct StationEditorModelTests {
+@Suite(.timeLimit(.minutes(3))) struct StationEditorModelTests {
     /// R18: saving an existing station applies only the editor's fields, so a view choice,
     /// saved filter or counts reset made in another window meanwhile survives.
     @MainActor @Test func saveKeepsFieldsTheEditorDoesNotOwn() async throws {

@@ -12,7 +12,7 @@ private final class Counter: Sendable {
     var count: Int { value.withLock { $0 } }
 }
 
-@Suite struct WatchLoopTests {
+@Suite(.timeLimit(.minutes(3))) struct WatchLoopTests {
     @Test func deadlineIsAtLeastFiveSecondsOrThreeIntervals() {
         #expect(WatchLoop.deadline(forInterval: .milliseconds(500)) == .seconds(5))
         #expect(WatchLoop.deadline(forInterval: .milliseconds(1)) == .seconds(5))

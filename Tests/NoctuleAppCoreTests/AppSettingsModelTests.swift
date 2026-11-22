@@ -6,7 +6,7 @@ import Testing
 import NoctuleStore
 @testable import NoctuleAppCore
 
-@Suite struct AppSettingsModelTests {
+@Suite(.timeLimit(.minutes(3))) struct AppSettingsModelTests {
     @MainActor @Test func iCloudListedDisabled() {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("noctule-appsettings-\(UUID().uuidString)")
         let model = AppSettingsModel(settings: LocalSettingsStore(directory: dir))

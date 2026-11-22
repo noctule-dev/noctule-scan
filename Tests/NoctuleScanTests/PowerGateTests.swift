@@ -8,7 +8,7 @@ import Testing
 
 /// The sleep hold (Review Focus 1): the Mac sleeps only after sessions have suspended, or at
 /// the deadline. Driven directly, without IOKit.
-@MainActor @Suite struct PowerGateTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct PowerGateTests {
     /// What happened, in order.
     @MainActor final class Log {
         var events: [String] = []
@@ -19,8 +19,10 @@ import Testing
         var value = false
     }
 
-    /// Polls for at most `seconds`.
-    private func eventually(_ seconds: Double = 2, _ condition: () -> Bool) async -> Bool {
+    /// Polls for at most `seconds`. Ten by default, not two: every step here runs on the main actor,
+    /// which this process's other `@MainActor` suites share, and on a runner VM a wake's resume took
+    /// longer than two seconds to be seen (run 45019776194). A condition that holds ends it at once.
+    private func eventually(_ seconds: Double = 10, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if condition() { return true }

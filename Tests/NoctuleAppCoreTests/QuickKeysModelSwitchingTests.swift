@@ -235,6 +235,15 @@ private func count(_ command: String, in commands: [String]) -> Int {
     commands.filter { $0 == command }.count
 }
 
+/// Waits for a poll to end (its last read, `last`, logged once more), so a fault armed right after is
+/// in place before the next poll's first read: these tests poll every second. Armed at a random
+/// moment between 150 ms polls, the fault came too late on a runner VM, the read it was meant to lose
+/// was answered and the poll went on (run 45019776194).
+private func waitForAPollToEnd(_ rig: QKSwitchRig, last: String) async throws {
+    let before = count(last, in: await rig.commands())
+    try await waitUntil("a poll to end (\(rig.label))") { await count(last, in: rig.commands()) > before }
+}
+
 private func child(_ index: UInt32, in favorites: MockFavorites) -> MockFavorites.ChildRow? {
     favorites.children.first { $0.index == index }
 }
@@ -762,13 +771,16 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// The click must come while the poll's lost `SQK` still holds it. With 300 ms timeouts a loaded
+    /// machine's click came after that poll had ended, during the next one (local sweep, bgload);
+    /// two-second timeouts hold the poll that long.
     @Test func aClickWaitsForThePollUnderWay() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             model.showList(1)
             try await waitAllFresh(model, rig.label)
-            try await waitUntil("a poll of list 1 (\(rig.label))") { await count("DQK,7,1", in: rig.commands()) >= 2 }
+            try await waitForAPollToEnd(rig, last: "DQK,7,1")
             let mark = await rig.commands().count
             // The next poll's SQK,7 goes unanswered, so the poll is under way for a command timeout.
             await rig.setFaults(MockFaults(dropNextRequest: "SQK"))
@@ -788,11 +800,19 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// The click waits behind a poll held up by two unanswered `FQK`s; the close must come while it
+    /// is still queued, which is all this pins: a click still queued at the close sends nothing. (One
+    /// already past `perform`'s last check, waiting for the client's request slot, can still send its
+    /// set after the close; that gap is the product's, open in its own pull request.) With 300 ms
+    /// timeouts the window was 600 ms, which a slow runner overran: the poll had ended, the click had
+    /// sent its set while the pop-over was open, and only then did the close come (flake hunt on
+    /// hunt/flaky-1). Two-second timeouts keep the click queued for about four seconds.
     @Test func aClickStillWaitingWhenThePopoverClosesSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             try await waitAllFresh(model, rig.label)
+            try await waitForAPollToEnd(rig, last: "FQK")
             let mark = await rig.commands().count
             // The next poll's FQK goes unanswered twice: the poll is under way for two command timeouts.
             await rig.setFaults(MockFaults(dropNextRequest: "FQK", dropCount: 2))
@@ -814,11 +834,15 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// As above: two-second timeouts keep the click queued while the menu arrives, so this pins that a
+    /// click still queued when the scanner enters a menu sends nothing. A click already past its last
+    /// check can still send after the menu (QA's I2; its own pull request), which this doesn't reach.
     @Test func aClickWaitingWhenTheScannerEntersAMenuSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             try await waitAllFresh(model, rig.label)
+            try await waitForAPollToEnd(rig, last: "FQK")
             let mark = await rig.commands().count
             await rig.setFaults(MockFaults(dropNextRequest: "FQK", dropCount: 2))
             try await waitUntil("the poll's lost FQK (\(rig.label))") {
@@ -827,9 +851,14 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
             let click = Task { await model.toggle(.list(4)) }
             try await waitUntil("the click waiting (\(rig.label))") { model.switchState(for: .list(4)) == .busy }
             // When its turn comes the row is checked again: in a menu, nothing is sent.
+            let beforeMenu = sets(Array(await rig.commands().dropFirst(mark))).count
             model.statusArrived(try inMenu())
             await click.value
-            #expect(sets(Array(await rig.commands().dropFirst(mark))).isEmpty, "\(rig.label)")
+            // Which side of the menu a set fell on tells a broken premise (the click had already
+            // sent while it looked busy) from a set sent after the menu came (a click past its last
+            // check, waiting for the request slot: the product gap its own pull request closes).
+            let all = sets(Array(await rig.commands().dropFirst(mark))).count
+            #expect(all == 0, "\(rig.label): \(beforeMenu) set(s) before the menu came, \(all - beforeMenu) after it")
             #expect(model.switchState(for: .list(4)) == .inMenu, "\(rig.label)")
             await shutDown(model)
         }

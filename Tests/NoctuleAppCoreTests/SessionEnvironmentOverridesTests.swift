@@ -10,7 +10,7 @@ import Testing
 @testable import NoctuleAppCore
 
 /// The app's test-only environment overrides (`NOCTULE_SETTINGS_DIR` and friends).
-@Suite struct SessionEnvironmentOverridesTests {
+@Suite(.timeLimit(.minutes(3))) struct SessionEnvironmentOverridesTests {
     private let base = SessionEnvironment(
         settings: LocalSettingsStore(directory: URL(fileURLWithPath: "/base/settings")),
         settingsDirectory: URL(fileURLWithPath: "/base/settings"),

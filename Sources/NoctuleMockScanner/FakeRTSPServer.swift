@@ -205,7 +205,12 @@ public actor FakeRTSPServer {
     /// Per served connection: what decides whether its close was clean (`Behavior.cooldownAfter`).
     private var exchanges: [Int: Exchange] = [:]
     private var nextConnectionID = 0
-    private let queue = DispatchQueue(label: "NoctuleMockScanner.FakeRTSPServer")
+    /// The actor's executor, and the queue its listener and connections call back on: the server runs
+    /// here, never on the cooperative pool, so a test process whose pool is busy (a slow CI runner's)
+    /// still answers at once. With the pool's three hops per request, an OPTIONS reply came after
+    /// `noctule listen`'s 3 s request timeout there (flake hunt run 44979282952).
+    private let queue = DispatchSerialQueue(label: "NoctuleMockScanner.FakeRTSPServer")
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     /// `sdp` is the DESCRIBE body (default `describeSDP`, payload type 0).
     public init(script: Script = .scannerLike, uniqueSessionIDs: Bool = false, sdp: String = FakeRTSPServer.describeSDP,
@@ -316,7 +321,8 @@ public actor FakeRTSPServer {
         }
         listener.newConnectionHandler = { [weak self] connection in
             guard let self else { connection.cancel(); return }
-            Task { await self.accept(connection) }
+            // Called on `queue`, the actor's own executor: taken there, with no hop.
+            self.assumeIsolated { $0.accept(connection) }
         }
         listener.start(queue: queue)
 
@@ -406,32 +412,52 @@ public actor FakeRTSPServer {
         connections[id] = connection
         exchanges[id] = Exchange()
         connection.start(queue: queue)
-        Task { await self.serve(connection, id: id) }
+        receiveNext(on: connection, id: id, buffer: Data())
     }
 
-    private func serve(_ connection: NWConnection, id: Int) async {
-        var buffer = Data()
-        while connections[id] != nil {
-            let (data, isComplete, error) = await Self.receive(on: connection)
-            if let data { buffer.append(data) }
-            while let request = Self.takeRequest(from: &buffer) {
-                if !handle(request, id: id, on: connection) {
-                    if connections[id] != nil { connectionEnds.append((.closedByServer, .now)) }
-                    drop(connection, id: id)
-                    return
-                }
-            }
-            if let error {
-                if connections[id] != nil { connectionEnds.append((.failed(String(describing: error)), .now)) }
-                break
-            }
-            if isComplete {
-                if connections[id] != nil { connectionEnds.append((.fin, .now)) }
-                drop(connection, id: id, byClient: true)
+    /// Serves `connection` from its receive callbacks, which come on `queue`, the actor's executor: no
+    /// task and no await on the way from a request to its reply.
+    private func receiveNext(on connection: NWConnection, id: Int, buffer: Data) {
+        guard connections[id] != nil else {
+            drop(connection, id: id)
+            return
+        }
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self else { connection.cancel(); return }
+            self.assumeIsolated { $0.received(data, isComplete: isComplete, error: error, on: connection, id: id, buffer: buffer) }
+        }
+    }
+
+    private func received(_ data: Data?, isComplete: Bool, error: NWError?, on connection: NWConnection, id: Int,
+                          buffer: Data) {
+        var buffer = buffer
+        if let data { buffer.append(data) }
+        while let request = Self.takeRequest(from: &buffer) {
+            if !handle(request, id: id, on: connection) {
+                if connections[id] != nil { connectionEnds.append((.closedByServer, .now)) }
+                drop(connection, id: id)
                 return
             }
         }
-        drop(connection, id: id)
+        if let error {
+            if connections[id] != nil { connectionEnds.append((.failed(String(describing: error)), .now)) }
+            drop(connection, id: id)
+            return
+        }
+        if isComplete {
+            if connections[id] != nil { connectionEnds.append((.fin, .now)) }
+            drop(connection, id: id, byClient: true)
+            return
+        }
+        receiveNext(on: connection, id: id, buffer: buffer)
+    }
+
+    /// Runs `body` on the actor after `wait`, from `queue`'s timer (not a task's sleep on the pool).
+    private func after(_ wait: Duration, _ body: @escaping @Sendable (isolated FakeRTSPServer) -> Void) {
+        let nanoseconds = Int(wait.components.seconds) * 1_000_000_000 + Int(wait.components.attoseconds / 1_000_000_000)
+        queue.asyncAfter(deadline: .now() + .nanoseconds(nanoseconds)) { [weak self] in
+            self?.assumeIsolated { body($0) }
+        }
     }
 
     /// Forgets `connection`. Its close starts the hazard window unless `cooldownAfter` is
@@ -515,10 +541,7 @@ public actor FakeRTSPServer {
         case .delay(let wait):
             let reply = normalResponse(to: request, cseq: request.cseq)
             let method = request.method
-            Task {
-                try? await Task.sleep(for: wait)
-                self.sendDelayed(reply, method: method, id: id, on: connection)
-            }
+            after(wait) { $0.sendDelayed(reply, method: method, id: id, on: connection) }
         case nil:
             if behavior.scannerSessions, ["PLAY", "GET_PARAMETER", "TEARDOWN"].contains(request.method),
                !(request.headers["session"].map(liveSessions.contains) ?? false) {
@@ -529,10 +552,7 @@ public actor FakeRTSPServer {
             }
             let reply = normalResponse(to: request, cseq: request.cseq)
             if let wait = behavior.replyDelays[request.method], wait > .zero {
-                Task {
-                    try? await Task.sleep(for: wait)
-                    self.sendNormal(reply, for: request, id: id, on: connection)
-                }
+                after(wait) { $0.sendNormal(reply, for: request, id: id, on: connection) }
             } else {
                 sendNormal(reply, for: request, id: id, on: connection)
             }
@@ -671,13 +691,5 @@ public actor FakeRTSPServer {
 
     private func send(_ text: String, on connection: NWConnection) {
         connection.send(content: Data(text.utf8), completion: .contentProcessed { _ in })
-    }
-
-    private static func receive(on connection: NWConnection) async -> (Data?, Bool, NWError?) {
-        await withCheckedContinuation { continuation in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
-                continuation.resume(returning: (data, isComplete, error))
-            }
-        }
     }
 }

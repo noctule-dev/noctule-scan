@@ -10,7 +10,7 @@ import NoctuleStore
 /// Fictional hits only. Seeds a temp HitLog with two trunk talkgroups over two days and one
 /// conventional channel.
 @MainActor
-@Suite struct HitLogModelTests {
+@Suite(.timeLimit(.minutes(3))) struct HitLogModelTests {
     final class Trashed: @unchecked Sendable {
         private let lock = NSLock()
         private var _urls: [URL] = []

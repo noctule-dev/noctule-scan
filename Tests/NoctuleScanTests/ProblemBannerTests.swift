@@ -11,7 +11,7 @@ import Testing
 
 /// Task 12 QA minors: the problem banner after a failed restart and for a station in use, and a
 /// disabled knob.
-@MainActor @Suite struct ProblemBannerTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct ProblemBannerTests {
     // MARK: Problem banner (Task 12 QA minors 1 and 2)
 
     private func banner(phase: SessionPhase = .connected(model: "SDS200", firmware: "1.26.01"),

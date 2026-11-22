@@ -20,7 +20,7 @@ private func sds150GSI() throws -> ScannerInfo {
     return try ScannerInfo(xml: XMLNode.parse(Data(document.utf8)))
 }
 
-@Suite struct CLIFormatTests {
+@Suite(.timeLimit(.minutes(3))) struct CLIFormatTests {
     @Test func infoLines() {
         #expect(CLIFormat.info(model: "SDS200", firmware: "1.24.00", volume: 2, squelch: 1)
             == ["model: SDS200", "firmware: 1.24.00", "volume: 2", "squelch: 1"])

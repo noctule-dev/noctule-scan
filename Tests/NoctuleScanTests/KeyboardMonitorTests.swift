@@ -14,7 +14,7 @@ import Testing
 /// (local monitors run there) goes through `KeyRouting` to `press`; `handle` says whether it was
 /// consumed. Other windows' events, text fields, and a view out of its window are left alone.
 /// The window claims to be key (a test process can't become active).
-@MainActor @Suite(.serialized) struct KeyboardMonitorTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(3))) struct KeyboardMonitorTests {
     final class KeyWindow: NSWindow {
         override var isKeyWindow: Bool { true }
         override var canBecomeKey: Bool { true }

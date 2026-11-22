@@ -8,7 +8,7 @@ import Testing
 import NoctuleAudioCapture
 
 /// The line-in pipeline on synthetic buffers: nothing here opens an audio device.
-@Suite struct LineInPipelineTests {
+@Suite(.timeLimit(.minutes(3))) struct LineInPipelineTests {
     /// Feeds `seconds` of audio to `pipeline` in buffers of `frames`, each timed at its first sample
     /// from `start`, with `sample(channel, index)` the value of that channel at that device sample.
     @discardableResult
@@ -70,12 +70,17 @@ import NoctuleAudioCapture
         #expect(out.levels.count == 30)
     }
 
-    @Test func fortyFourOneHasNoDrift() {
+    /// A minute of audio, seconds of CPU on the runner: fed on a dispatch thread, as the ten-minute
+    /// check is, so it holds no cooperative thread the line-in source's tests need.
+    @Test func fortyFourOneHasNoDrift() async {
         let fmt = format(44_100, channels: 2)
         let pipeline = LineInPipeline(inputFormat: fmt, channel: .both, ssrc: 1)
         let start = ContinuousClock.now
         let t = tone(440, amplitude: 0.5, rate: 44_100)
-        let out = feed(pipeline, format: fmt, seconds: 60, frames: 512, start: start) { _, i in t(i) }
+        nonisolated(unsafe) let work = { feed(pipeline, format: fmt, seconds: 60, frames: 512, start: start) { _, i in t(i) } }
+        let out = await withCheckedContinuation { (continuation: CheckedContinuation<(chunks: [AudioChunk], levels: [LineInLevel]), Never>) in
+            DispatchQueue.global().async { continuation.resume(returning: work()) }
+        }
         let total = out.chunks.reduce(0) { $0 + $1.samples.count }
         #expect(abs(total - 480_000) <= 320, "got \(total) samples")
         #expect(out.chunks.allSatisfy { $0.samples.count == 320 })
@@ -222,7 +227,11 @@ import NoctuleAudioCapture
         #expect(peak(out.chunks) > 10_000)
     }
 
-    @Test func chunkTimesFollowAFastDeviceClock() {
+    /// Ten minutes of audio is seconds of CPU in a debug build (33 s under background priority and
+    /// load): on a cooperative thread it held every other test in this process, and under a
+    /// one-thread pool `EngineLineInSourceTests` timed out waiting (local sweep). It runs on a
+    /// dispatch thread.
+    @Test func chunkTimesFollowAFastDeviceClock() async {
         // A device clock 100 ppm fast: its n-th sample is captured at n / (rate × 1.0001) host seconds.
         let rate = 48_000.0
         let fmt = format(rate, channels: 2)
@@ -231,14 +240,21 @@ import NoctuleAudioCapture
         let block = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 512)!
         block.frameLength = 512
         for c in 0..<2 { for i in 0..<512 { block.floatChannelData![c][i] = 0.1 * Float(sin(Double(i) * 0.3)) } }
-        var last: AudioChunk?
-        var lastCount = 0
-        let blocks = 56_250   // ten minutes
-        for n in 0..<blocks {
-            let at = start + .seconds(Double(n * 512) / (rate * 1.0001))
-            let out = pipeline.process(block, firstSampleAt: at)
-            if let chunk = out.chunks.last { last = chunk }
-            lastCount += out.chunks.count
+        nonisolated(unsafe) let work = (pipeline, block)
+        let (last, lastCount) = await withCheckedContinuation { (continuation: CheckedContinuation<(AudioChunk?, Int), Never>) in
+            DispatchQueue.global().async {
+                let (pipeline, block) = work
+                var last: AudioChunk?
+                var lastCount = 0
+                let blocks = 56_250   // ten minutes
+                for n in 0..<blocks {
+                    let at = start + .seconds(Double(n * 512) / (rate * 1.0001))
+                    let out = pipeline.process(block, firstSampleAt: at)
+                    if let chunk = out.chunks.last { last = chunk }
+                    lastCount += out.chunks.count
+                }
+                continuation.resume(returning: (last, lastCount))
+            }
         }
         let chunk = try! #require(last)
         // Chunk k starts at input sample k × 1920.

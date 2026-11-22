@@ -154,7 +154,7 @@ private func pick(_ list: [Hit], _ i: Int, sourceLocation: SourceLocation = #_so
     return Hit(id: UUID(), key: HitKey(system: nil, talkgroupID: nil, frequencyMHz: nil), startedAt: .distantPast, startInstant: .now)
 }
 
-@Suite struct HitDetectorTests {
+@Suite(.timeLimit(.minutes(3))) struct HitDetectorTests {
     @Test func startsUpdatesEnds() {
         var h = Harness()
         let s = h.push(info(tg: "101", sig: 4, uid: "5001", rssi: -70), at: 0)

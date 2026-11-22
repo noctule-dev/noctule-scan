@@ -259,7 +259,8 @@ public struct MockScannerArguments: Sendable, Equatable {
         if serial {
             if let networkPort { throw misuse("--serial serves no network ports: drop \(networkPort)") }
             if faults.replugAfter != nil, serialLink == nil {
-                throw misuse("--fault unplug=N:M (replug) needs --serial-link")  // also unplug-after-psi
+                let form = faults.unplugCountsFromFirstPSI ? "unplug-after-psi" : "unplug"
+                throw misuse("--fault \(form)=N:M (replug) needs --serial-link")
             }
             if pushLifetime != nil, model == .sds200 {
                 throw misuse("--push-lifetime needs --model sds150 or sds100 (the SDS200 has no push lifetime)")

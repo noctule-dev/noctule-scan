@@ -12,7 +12,7 @@ import Testing
 /// The app's line-in UI as pure logic (line-in design §5.3, §6): the meter's scale, the status-bar
 /// indicator, which Mac controls show, the notices under them, the editor's meter, and the hit-log
 /// inspector's `Clipped`. Nothing here opens an audio input.
-@Suite struct LineInUITests {
+@Suite(.timeLimit(.minutes(3))) struct LineInUITests {
     private static func reading(_ peak: Double, clipped: Bool = false, at: ContinuousClock.Instant) -> LineInLevel {
         LineInLevel(peakDBFS: peak, rmsDBFS: peak - 6, clipped: clipped, at: at)
     }

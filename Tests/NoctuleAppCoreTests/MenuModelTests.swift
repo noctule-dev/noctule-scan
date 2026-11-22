@@ -187,7 +187,7 @@ private func menuActionHeldAtTheSlot(
 }
 
 @MainActor
-@Suite(.serialized) struct MenuModelTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct MenuModelTests {
     // MARK: Lists, entries, keys
 
     @Test func enterShowsTheTopList() async throws {

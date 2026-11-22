@@ -37,7 +37,7 @@ private func station(_ name: String) -> Station {
     return s
 }
 
-@Suite struct StationSettingsModelTests {
+@Suite(.timeLimit(.minutes(3))) struct StationSettingsModelTests {
     @MainActor @Test func eachSetterChangesOnlyItsFieldAndReportsTheStations() async throws {
         let first = station("Test Station")
         let other = station("Other Station")

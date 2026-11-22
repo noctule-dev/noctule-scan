@@ -42,7 +42,7 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
     return await condition()
 }
 
-@Suite struct ScannerClientTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerClientTests {
     @Test func readsIdentity() async throws {
         let c = ScannerClient(transport: SimulatedScannerTransport.sds200()); try await c.connect()
         let m = try await c.modelInfo(); #expect(m.model == .sds200)
@@ -473,13 +473,17 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         #expect(await t.sentCommands.map(\.name) == ["MDL"])
     }
 
-    @Test(.skippedOnCIRunner("70–130 ms window; too tight on the 3-core CI runner"))
-    func pushUpdatesAreStampedOnArrival() async throws {
+    /// The stamps are taken when a push arrives, not when the consumer reads it: each is at or after
+    /// its own emit, in order, and before the late read began. (No window on the gap between them:
+    /// a 70–130 ms one was too tight on the 3-core CI runner; LESSONS.md 2026-11-22.)
+    @Test func pushUpdatesAreStampedOnArrival() async throws {
         let t = SimulatedScannerTransport.sds200(); let c = ScannerClient(transport: t); try await c.connect()
         let pushes = try await c.startPushUpdates(interval: .milliseconds(100))
         #expect(await t.sentCommands == [try ScannerCommand("PSI", "100")])
+        let firstEmitted = ContinuousClock.now
         await t.emit(.xml(command: "PSI", root: XMLNode(name: "ScannerInfo", attributes: ["Mode": "One"])))
         try await Task.sleep(for: .milliseconds(100))
+        let secondEmitted = ContinuousClock.now
         await t.emit(.xml(command: "PSI", root: XMLNode(name: "ScannerInfo", attributes: ["Mode": "Two"])))
         // Consume late: the stamps must reflect arrival, not when the consumer read them.
         try await Task.sleep(for: .milliseconds(150))
@@ -487,9 +491,9 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         guard case .value(let first) = await next(pushes) else { Issue.record("no first push"); return }
         guard case .value(let second) = await next(pushes) else { Issue.record("no second push"); return }
         #expect(first.info.mode == "One"); #expect(second.info.mode == "Two")
-        let gap = second.receivedAt - first.receivedAt
-        #expect(gap >= .milliseconds(70) && gap <= .milliseconds(130), "gap \(gap)")
-        #expect(consumedAt - second.receivedAt >= .milliseconds(100))
+        #expect(first.receivedAt >= firstEmitted && second.receivedAt >= secondEmitted)
+        #expect(first.receivedAt < second.receivedAt)
+        #expect(second.receivedAt < consumedAt, "stamped \(second.receivedAt - consumedAt) after the read began")
         await c.disconnect()
         #expect(await t.sentCommands.filter { $0.name == "PSI" }.map(\.arguments) == [["100"], ["0"]])
     }

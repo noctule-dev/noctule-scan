@@ -45,7 +45,7 @@ private func addOptions(_ args: [String]) throws -> StationAddOptions {
     return options
 }
 
-@Suite struct StationCLIParsingTests {
+@Suite(.timeLimit(.minutes(3))) struct StationCLIParsingTests {
     @Test func stationAddAllFlags() throws {
         let a = try CLIArguments.parse([
             "station", "add", "--name", "Test Station", "--host", "192.0.2.10", "--udp-port", "50000",
@@ -234,7 +234,7 @@ private func addOptions(_ args: [String]) throws -> StationAddOptions {
     }
 }
 
-@Suite struct StationCLIStationTests {
+@Suite(.timeLimit(.minutes(3))) struct StationCLIStationTests {
     @Test func defaultPaths() {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         #expect(StationCLI.defaultSettingsDirectory.path == home + "/Library/Application Support/NoctuleScan")
@@ -338,7 +338,7 @@ private func addOptions(_ args: [String]) throws -> StationAddOptions {
     }
 }
 
-@Suite struct StationCLIFormatTests {
+@Suite(.timeLimit(.minutes(3))) struct StationCLIFormatTests {
     @Test func sourceLabels() {
         #expect(StationCLI.sourceLabel(key: HitKey(system: "S", talkgroupID: "9", frequencyMHz: 851.0), channel: "Lakeview Fire")
             == "TG9 Lakeview Fire")
@@ -489,7 +489,7 @@ private func fictionalInput(_ uid: String, _ name: String = "Fictional Interface
     AudioInputDevice(uid: uid, name: name, channelCount: 2)
 }
 
-@Suite struct StationCLILineInTests {
+@Suite(.timeLimit(.minutes(3))) struct StationCLILineInTests {
     // MARK: Resolution
 
     @Test func resolveAudioInputByUID() {

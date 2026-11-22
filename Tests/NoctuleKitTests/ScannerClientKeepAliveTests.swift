@@ -189,7 +189,7 @@ private actor KeepAliveLink: ScannerTransport {
     var texts: [String] { written.map(\.text) }
 }
 
-@Suite struct ScannerClientKeepAliveTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerClientKeepAliveTests {
     @Test func profileKeepAlive() {
         #expect(ModelProfile.profile(for: .sds150).pushKeepAlive == PushKeepAlive(command: "KAL", interval: .seconds(60)))
         #expect(ModelProfile.profile(for: .sds100).pushKeepAlive == PushKeepAlive(action: .renewSubscription, interval: .seconds(60)))

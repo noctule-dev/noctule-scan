@@ -35,27 +35,102 @@ enum RealNames {
     /// must not touch another letter (so "LCH" doesn't match "squelchPush"); digits match as
     /// substrings (so "123.4567" still matches " 123.456700MHz").
     static func hits(in text: String, list: [String]) -> [String] {
-        let haystack = text.lowercased()
+        // Searched as bytes (ASCII lower-cased) with memmem: the String search took seconds of CPU
+        // per scan, which starved the rest of the test process under background priority (local
+        // sweep). An entry with non-ASCII letters keeps the String search, for its case folding.
+        let bytes = Array(text.utf8)
+        let lowered = bytes.map(Self.asciiLower)
         return list.filter { entry in
-            let needle = entry.lowercased()
-            var searchRange = haystack.startIndex..<haystack.endIndex
-            while let found = haystack.range(of: needle, range: searchRange) {
-                let before = found.lowerBound == haystack.startIndex ? nil : haystack[haystack.index(before: found.lowerBound)]
-                let after = found.upperBound == haystack.endIndex ? nil : haystack[found.upperBound]
-                let joins: (Character?, Character?) -> Bool = { neighbor, edge in
-                    (neighbor?.isLetter ?? false) && (edge?.isLetter ?? false)
+            guard entry.utf8.allSatisfy({ $0 < 0x80 }) else { return stringHit(entry, in: text) }
+            let needle = Array(entry.utf8).map(Self.asciiLower)
+            guard !needle.isEmpty else { return false }
+            var from = 0
+            while let found = Self.find(needle, in: lowered, from: from) {
+                let before = Self.scalar(endingBefore: found, in: bytes)
+                let after = Self.scalar(startingAt: found + needle.count, in: bytes)
+                let joins: (Unicode.Scalar?, UInt8) -> Bool = { neighbor, edge in
+                    (neighbor?.properties.isAlphabetic ?? false) && Unicode.Scalar(edge).properties.isAlphabetic
                 }
-                if !joins(before, needle.first), !joins(after, needle.last) { return true }
-                searchRange = found.upperBound..<haystack.endIndex
+                if !joins(before, needle[0]), !joins(after, needle[needle.count - 1]) { return true }
+                from = found + 1
             }
             return false
         }
     }
 
+    private static func asciiLower(_ byte: UInt8) -> UInt8 { (0x41...0x5A).contains(byte) ? byte + 0x20 : byte }
+
+    private static func find(_ needle: [UInt8], in haystack: [UInt8], from: Int) -> Int? {
+        guard from < haystack.count, needle.count <= haystack.count - from else { return nil }
+        return haystack.withUnsafeBufferPointer { hay in
+            needle.withUnsafeBufferPointer { pin in
+                guard let hit = memmem(hay.baseAddress! + from, hay.count - from, pin.baseAddress!, pin.count) else { return nil }
+                return hay.baseAddress!.distance(to: hit.assumingMemoryBound(to: UInt8.self))
+            }
+        }
+    }
+
+    /// The scalar whose UTF-8 ends just before `index`, or nil at the start.
+    private static func scalar(endingBefore index: Int, in bytes: [UInt8]) -> Unicode.Scalar? {
+        guard index > 0 else { return nil }
+        var start = index - 1
+        while start > 0, bytes[start] & 0xC0 == 0x80 { start -= 1 }
+        return String(decoding: bytes[start..<index], as: UTF8.self).unicodeScalars.first
+    }
+
+    /// The scalar whose UTF-8 starts at `index`, or nil at the end.
+    private static func scalar(startingAt index: Int, in bytes: [UInt8]) -> Unicode.Scalar? {
+        guard index < bytes.count else { return nil }
+        var end = index + 1
+        while end < bytes.count, bytes[end] & 0xC0 == 0x80 { end += 1 }
+        return String(decoding: bytes[index..<end], as: UTF8.self).unicodeScalars.first
+    }
+
+    /// The original search, for an entry with non-ASCII letters.
+    private static func stringHit(_ entry: String, in text: String) -> Bool {
+        let haystack = text.lowercased()
+        let needle = entry.lowercased()
+        var searchRange = haystack.startIndex..<haystack.endIndex
+        while let found = haystack.range(of: needle, range: searchRange) {
+            let before = found.lowerBound == haystack.startIndex ? nil : haystack[haystack.index(before: found.lowerBound)]
+            let after = found.upperBound == haystack.endIndex ? nil : haystack[found.upperBound]
+            let joins: (Character?, Character?) -> Bool = { neighbor, edge in
+                (neighbor?.isLetter ?? false) && (edge?.isLetter ?? false)
+            }
+            if !joins(before, needle.first), !joins(after, needle.last) { return true }
+            searchRange = found.upperBound..<haystack.endIndex
+        }
+        return false
+    }
+
     /// Every file `git ls-files` lists that decodes as UTF-8 (so `.github/`, `packaging/`, the root
     /// files and the screenshots' text too). `config/` holds the deny-lists themselves and only its
     /// tracked templates are listed. Falls back to walking the usual directories if git fails.
-    static func trackedTextFiles(root: URL) -> [URL] {
+    /// The listing waits for `git` on a dispatch thread, never a cooperative one (LESSONS.md
+    /// 2026-11-22).
+    static func trackedTextFiles(root: URL) async -> [URL] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: blockingTrackedTextFiles(root: root)) }
+        }
+    }
+
+    /// The deny-list entries in each of `files` that holds any, worked out on a dispatch thread: reading
+    /// and searching every tracked file takes seconds of CPU, which on a cooperative thread stalled the
+    /// other tests in the process (a one-thread pool timed out a dozen mock tests; local sweep).
+    static func hits(in files: [URL], list: [String]) async -> [(file: URL, hits: [String])] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                let found = files.compactMap { file -> (file: URL, hits: [String])? in
+                    guard let data = try? Data(contentsOf: file) else { return nil }
+                    let hits = Self.hits(in: String(decoding: data, as: UTF8.self), list: list)
+                    return hits.isEmpty ? nil : (file, hits)
+                }
+                continuation.resume(returning: found)
+            }
+        }
+    }
+
+    private static func blockingTrackedTextFiles(root: URL) -> [URL] {
         if let listed = gitTrackedFiles(root: root) {
             return listed.filter { url in
                 guard let data = try? Data(contentsOf: url) else { return false }
@@ -72,9 +147,11 @@ enum RealNames {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()  // off the cooperative pool: a dispatch thread
+        // Not `waitUntilExit()`, which can hang after the child has gone (LESSONS.md 2026-11-12).
+        for _ in 0..<1000 where process.isRunning { usleep(10_000) }  // off the cooperative pool: a dispatch thread
         guard process.terminationStatus == 0 else { return nil }
         let paths = String(decoding: data, as: UTF8.self).split(separator: "\0").map(String.init)
         guard !paths.isEmpty else { return nil }
@@ -101,22 +178,20 @@ enum RealNames {
 
 @Suite(.timeLimit(.minutes(1))) struct RealNamesTests {
     @Test(.enabled(if: RealNames.list != nil, "config/real-names.txt is absent"))
-    func noRealNamesInTrackedFiles() throws {
+    func noRealNamesInTrackedFiles() async throws {
         let list = try #require(RealNames.list)
         let root = try #require(RealNames.repositoryRoot)
-        let files = RealNames.trackedTextFiles(root: root)
+        let files = await RealNames.trackedTextFiles(root: root)
         #expect(files.count > 50, "found only \(files.count) files under \(root.path)")
-        for file in files {
-            guard let data = try? Data(contentsOf: file) else { continue }
-            let hits = RealNames.hits(in: String(decoding: data, as: UTF8.self), list: list)
-            #expect(hits.isEmpty, "\(file.path.dropFirst(root.path.count + 1)) contains \(hits)")
+        for (file, hits) in await RealNames.hits(in: files, list: list) {
+            Issue.record("\(file.path.dropFirst(root.path.count + 1)) contains \(hits)")
         }
     }
 
     /// The scan covers the app bundle's files and the build script too (final review M2).
-    @Test func scanCoversScriptsAndResources() throws {
+    @Test func scanCoversScriptsAndResources() async throws {
         let root = try #require(RealNames.repositoryRoot)
-        let files = Set(RealNames.trackedTextFiles(root: root).map { $0.standardizedFileURL.path })
+        let files = Set(await RealNames.trackedTextFiles(root: root).map { $0.standardizedFileURL.path })
         for path in ["scripts/build-app.sh", "Resources/Info.plist", "ACKNOWLEDGMENTS.md", "docs/uniden/README.md",
                      "Resources/Placeholder/AppIcon.icon/icon.json", "Resources/Placeholder/AppIcon.icon/Assets/01-signal.svg",
                      "scripts/compile-app-icon.sh"] {
@@ -132,5 +207,13 @@ enum RealNames {
         #expect(RealNames.hits(in: "Example Countywide", list: list).isEmpty)
         #expect(RealNames.hits(in: "Freq=\" 123.456700MHz\"", list: list) == ["123.4567"])
         #expect(RealNames.hits(in: "UID:9876\"", list: list) == ["9876"])
+        // Neighbours beyond ASCII: an em dash doesn't join, an accented letter does; a non-ASCII
+        // entry folds case.
+        #expect(RealNames.hits(in: "—LCH—", list: list) == ["LCH"])
+        #expect(RealNames.hits(in: "éLCH", list: list).isEmpty)
+        #expect(RealNames.hits(in: "lch", list: list) == ["LCH"])
+        #expect(RealNames.hits(in: "the ÜBER site", list: ["über"]) == ["über"])
+        #expect(RealNames.hits(in: "lch lchx", list: ["LCH"]) == ["LCH"])
+        #expect(RealNames.hits(in: "xlch lchx", list: ["LCH"]).isEmpty)
     }
 }
