@@ -175,7 +175,7 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
 
     @Test func ciRunsOnTheReleaseRunner() throws {
         let code = codeLines(try workflowText("ci.yml"))
-        for line in ["    runs-on: xcode-27", "    timeout-minutes: 120", "      NOCTULE_NO_USB_DETECTION: \"1\"",
+        for line in ["    runs-on: xcode-27-xlarge", "    timeout-minutes: 120", "      NOCTULE_NO_USB_DETECTION: \"1\"",
                      "      NOCTULE_CI_RUNNER: \"1\"", "      NOCTULE_PYTHON: /opt/homebrew/bin/python3"] {
             #expect(code.contains(line), "missing \(line)")
         }
@@ -185,6 +185,16 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         let build = try #require(runCommand(in: try workflowText("ci.yml"), stepNamed: "Build the app"))
         #expect(build == "scripts/build-app.sh")
         #expect(code.contains("          NOCTULE_BRANDING_DIR: \"\""), "the app build must name the placeholder art")
+    }
+
+    @Test func ciAndReleaseUseTheSameRunner() throws {
+        func runner(_ name: String) throws -> String {
+            let line = try #require(codeLines(try workflowText(name)).first { $0.hasPrefix("    runs-on:") }, "\(name) has no runs-on")
+            return line.trimmingCharacters(in: .whitespaces)
+        }
+        let ci = try runner("ci.yml"), release = try runner("release.yml")
+        #expect(ci == "runs-on: xcode-27-xlarge", "\(ci)")
+        #expect(release == ci, "ci.yml and release.yml must use the same runner")
     }
 
     @Test func ciTestsAsTheReleaseJobDoes() throws {

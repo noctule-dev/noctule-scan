@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: xcode-27
+    runs-on: xcode-27-xlarge
     timeout-minutes: 120
     env:
       NOCTULE_NO_USB_DETECTION: "1"
@@ -45,7 +45,7 @@ jobs:
         timeout-minutes: 15
         run: swift build --build-tests
 
-      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on the 3-core runner, so
+      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on a busy runner, so
       # they run alone in the next step, one at a time. Seven known flakes skip themselves on this
       # runner (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`). The full suite runs locally.
       - name: Test (parallel)

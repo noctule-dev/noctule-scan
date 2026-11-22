@@ -91,4 +91,4 @@ git push --force-with-lease
 
 ## Pull requests
 
-Fill in the pull request template: the tests you ran, the mock first, the iOS build for shared code, signed-off commits, no real traffic, and a spec or lessons entry where the change needs one. CI builds and tests every pull request; changes under `.github/`, `packaging/` and `scripts/` also wait for the maintainer's review.
+Fill in the pull request template: the tests you ran, the mock first, the iOS build for shared code, signed-off commits, no real traffic, and a spec or lessons entry where the change needs one. CI builds and tests every pull request on a larger paid runner (`xcode-27-xlarge`), so a pull request from an outside contributor waits for the maintainer's approval before CI runs; changes under `.github/`, `packaging/` and `scripts/` also wait for the maintainer's review.
