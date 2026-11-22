@@ -69,8 +69,16 @@ struct UpdateTextTests {
     }
 
     @Test func notesDropLinks() {
-        let text = UpdateText.notes("See [the page](https://example.com) and <https://example.com>")
-        #expect(text.runs.allSatisfy { $0.link == nil })
+        let sources = [
+            "See [the page](https://example.com) and <https://example.com>",
+            "See [x][1]\n\n[1]: https://example.com",
+            "An image ![a](https://example.com/a.png) here",
+        ]
+        for source in sources {
+            let text = UpdateText.notes(source)
+            #expect(text.runs.allSatisfy { $0.link == nil && $0.imageURL == nil })
+        }
+        let text = UpdateText.notes(sources[0])
         #expect(String(text.characters).contains("the page"))
     }
 
@@ -93,14 +101,26 @@ struct UpdateTextTests {
         let today = UpdateText.lastChecked(now, now: now, locale: en, timeZone: zone)
         #expect(today.hasPrefix("Last checked: "))
         #expect(today.contains("today"))
-        #expect(
-            UpdateText.lastChecked(
-                now.addingTimeInterval(-86_400), now: now, locale: en, timeZone: zone
-            ).contains("yesterday"))
+        // Newer ICU versions put a narrow no-break space before AM/PM.
+        func plain(_ text: String) -> String {
+            text.replacingOccurrences(of: "\u{202F}", with: " ")
+        }
+        let yesterday = UpdateText.lastChecked(
+            now.addingTimeInterval(-86_400), now: now, locale: en, timeZone: zone)
+        #expect(plain(yesterday) == "Last checked: yesterday at 8:00 AM")
+        #expect(plain(today) == "Last checked: today at 8:00 AM")
         let old = UpdateText.lastChecked(
             now.addingTimeInterval(-86_400 * 40), now: now, locale: en, timeZone: zone)
-        #expect(old.hasPrefix("Last checked: "))
-        #expect(!old.contains("today"))
+        #expect(plain(old) == "Last checked: Dec 6, 2026 at 8:00 AM")
+    }
+
+    @Test func lastCheckedAcrossMidnight() {
+        let en = Locale(identifier: "en_US")
+        let zone = TimeZone(identifier: "UTC")!
+        let now = Date(timeIntervalSince1970: 1_800_000_000 - 8 * 3600 + 600)  // 00:10 UTC, Jan 15 2027
+        let evening = now.addingTimeInterval(-(40 * 60))  // 23:30 the evening before
+        let text = UpdateText.lastChecked(evening, now: now, locale: en, timeZone: zone)
+        #expect(text.replacingOccurrences(of: "\u{202F}", with: " ") == "Last checked: yesterday at 11:30 PM")
     }
 
     @Test func fixedCopy() {

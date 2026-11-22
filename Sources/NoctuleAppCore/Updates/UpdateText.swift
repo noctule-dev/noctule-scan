@@ -75,8 +75,9 @@ public enum UpdateText {
         } catch {
             return AttributedString(body)
         }
-        for run in text.runs where run.link != nil {
-            text[run.range].link = nil
+        for run in text.runs {
+            if run.link != nil { text[run.range].link = nil }
+            if run.imageURL != nil { text[run.range].imageURL = nil }
         }
         return text
     }
@@ -108,7 +109,6 @@ public enum UpdateText {
             both.dateStyle = .medium
             both.timeStyle = .short
             text = both.string(from: date)
-            if let first = text.first { text = first.lowercased() + text.dropFirst() }
         }
         return "Last checked: " + text
     }
