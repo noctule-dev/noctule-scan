@@ -7,7 +7,7 @@ import Foundation
 public struct UpdatePreferences: Equatable, Sendable {
     /// "Check for updates automatically" (`app.json` key `checkForUpdates`). On by default.
     public var checkAutomatically: Bool = true
-    /// When the last check ended (`lastUpdateCheck`), nil if none has.
+    /// When the last successful check ended (`lastUpdateCheck`), nil if none has.
     public var lastChecked: Date? = nil
     /// The version the person chose to skip (`skippedUpdateVersion`), nil if none.
     public var skippedVersion: String? = nil

@@ -52,9 +52,10 @@ public actor LocalSettingsStore: SettingsStore, UpdatePreferencesStore {
             version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
             lastStationID = try c.decodeIfPresent(UUID.self, forKey: .lastStationID)
             storageLocation = try c.decodeIfPresent(StorageLocation.self, forKey: .storageLocation) ?? .local
-            checkForUpdates = try c.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
-            lastUpdateCheck = try c.decodeIfPresent(Date.self, forKey: .lastUpdateCheck)
-            skippedUpdateVersion = try c.decodeIfPresent(String.self, forKey: .skippedUpdateVersion)
+            // A wrongly typed update key reads as its default rather than moving the whole file aside.
+            checkForUpdates = (try? c.decodeIfPresent(Bool.self, forKey: .checkForUpdates)) ?? true
+            lastUpdateCheck = try? c.decodeIfPresent(Date.self, forKey: .lastUpdateCheck)
+            skippedUpdateVersion = try? c.decodeIfPresent(String.self, forKey: .skippedUpdateVersion)
         }
     }
 

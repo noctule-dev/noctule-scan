@@ -69,6 +69,24 @@ struct UpdatePreferencesTests {
         #expect(await store.lastStationID() == id)
     }
 
+    /// A wrongly typed update key reads as its default; the rest of app.json is kept, not moved aside.
+    @Test func wronglyTypedUpdateKeysReadDefaults() async throws {
+        let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let id = UUID()
+        let json = """
+            {"version":1,"lastStationID":"\(id.uuidString)","storageLocation":"iCloud",\
+            "checkForUpdates":"yes","lastUpdateCheck":"garbage","skippedUpdateVersion":7}
+            """
+        try Data(json.utf8).write(to: dir.appendingPathComponent("app.json"))
+        let store = LocalSettingsStore(directory: dir)
+        #expect(await store.updatePreferences() == UpdatePreferences())
+        #expect(await store.lastStationID() == id)
+        #expect(await store.appSettings().storageLocation == .iCloud)
+        let names = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(names == ["app.json"], "\(names)")
+    }
+
     @Test func garbageFileReadsDefaults() async throws {
         let dir = tempDir(); defer { try? FileManager.default.removeItem(at: dir) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
