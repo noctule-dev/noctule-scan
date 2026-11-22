@@ -37,7 +37,8 @@ import Testing
                 s.waitingOn = s.gate
                 return s.gate
             }
-            gate?.wait()  // off the cooperative pool: a held listing, by design (one test, about 100 ms)
+            // Bounded: a test that fails before its release mustn't leave the source's task blocked for good.
+            _ = gate?.wait(timeout: .now() + 10)  // off the cooperative pool: a held listing, by design (one test, about 100 ms)
             return state.withLock { $0.devices }
         }
 

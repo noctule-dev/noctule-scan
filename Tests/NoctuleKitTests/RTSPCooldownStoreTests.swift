@@ -43,6 +43,9 @@ private func removeStoreDirectory(_ url: URL) {
 private func exitedPID() async throws -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
     try process.run()
     // Suspends between looks: `waitUntilExit()` blocked a cooperative thread (LESSONS.md 2026-11-22).
     for _ in 0..<1000 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
@@ -56,6 +59,10 @@ private final class LiveChild: @unchecked Sendable {
     init() throws {
         process.executableURL = URL(fileURLWithPath: "/bin/sleep")
         process.arguments = ["30"]
+        // Not the test process's stdio: a child left running would hold `swift test`'s pipe open.
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
         try process.run()
     }
     var pid: Int32 { process.processIdentifier }

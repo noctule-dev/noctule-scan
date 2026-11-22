@@ -788,8 +788,12 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// The click waits behind a poll held up by two unanswered `FQK`s; the close must come while it
+    /// still waits. With 300 ms timeouts that window was 600 ms, which a slow runner overran: the poll
+    /// had ended, the click had (rightly) sent its set, and only then did the close come
+    /// (flake hunt on hunt/flaky-1). Two-second timeouts hold the click for about four seconds.
     @Test func aClickStillWaitingWhenThePopoverClosesSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
             let model = makeModel(rig)
             model.open()
             try await waitAllFresh(model, rig.label)
@@ -814,8 +818,9 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// As above: two-second timeouts keep the click waiting while the menu arrives.
     @Test func aClickWaitingWhenTheScannerEntersAMenuSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
             let model = makeModel(rig)
             model.open()
             try await waitAllFresh(model, rig.label)

@@ -80,6 +80,7 @@ enum RealNames {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()  // off the cooperative pool: a dispatch thread
         // Not `waitUntilExit()`, which can hang after the child has gone (LESSONS.md 2026-11-12).

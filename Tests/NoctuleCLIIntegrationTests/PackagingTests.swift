@@ -122,7 +122,12 @@ private let sharedDMGVenv: URL = {
 func run(_ executable: URL, _ arguments: [String], environment: [String: String] = [:],
          currentDirectory: URL? = nil, limit: Double = 120, input: String? = nil) async throws -> (status: Int32, stdout: String, stderr: String) {
     let process = try Subprocess(executable, arguments, environment: environment, currentDirectory: currentDirectory, input: input)
-    if !(await process.waitForExit(within: limit)) { process.kill() }
+    if !(await process.waitForExit(within: limit)) {
+        // Named, so a run that stalls says where (a release test failed on the runner with only its first
+        // stderr line to show; flake hunt hunt/flaky-1).
+        Issue.record("\(executable.lastPathComponent) \(arguments.joined(separator: " ")) still running after \(limit) s; killed. stderr so far: \(process.stderr)")
+        process.kill()
+    }
     return await process.finish()
 }
 

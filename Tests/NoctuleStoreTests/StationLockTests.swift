@@ -74,6 +74,8 @@ private final class Output: Sendable {
         ]
         let pipe = Pipe()
         child.standardOutput = pipe
+        child.standardInput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice  // a child left running mustn't hold `swift test`'s pipe
         try child.run()
         defer { if child.isRunning { kill(child.processIdentifier, SIGKILL) } }
 
