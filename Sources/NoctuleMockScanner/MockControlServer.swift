@@ -245,7 +245,7 @@ final class ControlCore: @unchecked Sendable {
     func receive(_ command: String, from peer: ControlPeer) {
         log.append(command)
         commandObserver?(command)
-        if let subscribed = nextSubscription, command.uppercased().hasPrefix("PSI,"), command != "PSI,0" {
+        if let subscribed = nextSubscription, command.uppercased().hasPrefix("PSI,"), command.uppercased() != "PSI,0" {
             nextSubscription = nil
             subscribed()
         }

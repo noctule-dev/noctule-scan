@@ -164,6 +164,8 @@ import NoctuleKit
             (["--model", "sds150", "--udp-port", "50536"], .usage("the SDS150 has no network port: add --serial")),
             (["--model", "sds150", "--serial", "--fault", "unplug=5:3"],
              .usage("--fault unplug=N:M (replug) needs --serial-link")),
+            (["--model", "sds150", "--serial", "--fault", "unplug-after-psi=5:3"],
+             .usage("--fault unplug-after-psi=N:M (replug) needs --serial-link")),
             (["--fault", "unplug=5"], .usage("--fault unplug needs --serial")),
             (["--fault", "split-writes"], .usage("--fault split-writes needs --serial")),
             (["--serial-link", "/tmp/x"], .usage("--serial-link needs --serial")),
