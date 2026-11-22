@@ -116,6 +116,13 @@ private func withSerialMock(
 
 /// A raw descriptor on a pty the mock created, for writing bytes a `ScannerClient` never would
 /// (half a command, several at once) and reading replies byte for byte.
+/// Runs a blocking `body` on a dispatch thread and waits for it without holding a cooperative one.
+private func offThePool<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global().async { continuation.resume(returning: body()) }
+    }
+}
+
 private final class RawPort: Sendable {
     let fd: Int32
 
@@ -129,8 +136,20 @@ private final class RawPort: Sendable {
         #expect(Darwin.write(fd, bytes, bytes.count) == bytes.count)
     }
 
-    /// Everything that arrives within `limit`, or as soon as it contains `until`.
-    func read(for limit: Duration, until: String? = nil) -> String {
+    /// Everything that arrives within `limit`, or as soon as it contains `until`. The waiting
+    /// `poll` runs on a dispatch thread, never a cooperative one: the in-process mock answering
+    /// this port needs the pool, which a blocking wait here starved (one thread under
+    /// `LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, three on the CI runner; LESSONS.md 2026-11-21).
+    func read(for limit: Duration, until: String? = nil) async -> String {
+        await offThePool { self.blockingRead(for: limit, until: until) }
+    }
+
+    /// The bytes that arrive within `limit`, or as soon as a `\r` ends a reply (off the pool).
+    func readBytes(for limit: Duration) async -> [UInt8] {
+        await offThePool { self.blockingReadBytes(for: limit) }
+    }
+
+    private func blockingRead(for limit: Duration, until: String?) -> String {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 4096)
         let deadline = ContinuousClock.now + limit
@@ -146,8 +165,7 @@ private final class RawPort: Sendable {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// The bytes that arrive within `limit`, or as soon as a `\r` ends a reply.
-    func readBytes(for limit: Duration) -> [UInt8] {
+    private func blockingReadBytes(for limit: Duration) -> [UInt8] {
         var data = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 4096)
         let deadline = ContinuousClock.now + limit
@@ -216,7 +234,8 @@ private final class RawPort: Sendable {
                 let port = try RawPort(rig.path)
                 defer { port.close() }
                 port.write("STS\r")
-                bytes.withLock { $0 = port.readBytes(for: .seconds(2)) }
+                let read = await port.readBytes(for: .seconds(2))
+                bytes.withLock { $0 = read }
             }
             return bytes.withLock { $0 }
         }
@@ -451,7 +470,7 @@ private final class RawPort: Sendable {
             _ = try await rig.mock.replug()
             let after = try RawPort(rig.path)
             defer { after.close() }
-            let text = after.read(for: .milliseconds(800))
+            let text = await after.read(for: .milliseconds(800))
             #expect(!text.contains("KEY,OK"), "a reply held back before the unplug reached the new port: \(text)")
         }
     }
@@ -564,9 +583,9 @@ private final class RawPort: Sendable {
             port.write("KAL\r")
             try await eventually { await rig.mock.receivedCommands == ["KAL"] }
             port.write("MDL\r")
-            let text = port.read(for: .seconds(2), until: "MDL,SDS150\r")
+            let text = await port.read(for: .seconds(2), until: "MDL,SDS150\r")
             #expect(text == "MDL,SDS150\r")
-            #expect(port.read(for: .milliseconds(200)) == "")
+            #expect(await port.read(for: .milliseconds(200)) == "")
             #expect(await rig.mock.receivedCommands == ["KAL", "MDL"])
         }
     }
@@ -602,24 +621,24 @@ private final class RawPort: Sendable {
             let port = try RawPort(rig.path)
             defer { port.close() }
             /// Reads (and drops) what the pushes put on the port for `time`, so it never fills.
-            func drain(_ time: Duration) { _ = port.read(for: time) }
+            func drain(_ time: Duration) async { _ = await port.read(for: time) }
             port.write("PSI,100\r")
             try await eventually { await rig.mock.pushesSent >= 2 }
             rig.clock.set(1.5)  // past the lifetime: the pushes stop
-            drain(.milliseconds(300))
+            await drain(.milliseconds(300))
             let stopped = await rig.mock.pushesSent
-            drain(.milliseconds(300))
+            await drain(.milliseconds(300))
             #expect(await rig.mock.pushesSent == stopped)
 
             port.write("KAL\r")
             try await eventually { await rig.mock.receivedCommands.last == "KAL" }
-            drain(.milliseconds(400))
+            await drain(.milliseconds(400))
             if revives {
                 #expect(await rig.mock.pushesSent > stopped)
             } else {
                 #expect(await rig.mock.pushesSent == stopped)
                 rig.clock.advance(by: 2)
-                drain(.milliseconds(400))
+                await drain(.milliseconds(400))
                 #expect(await rig.mock.pushesSent == stopped)
                 port.write("PSI,500\r")
                 try await eventually { await rig.mock.pushesSent > stopped }
@@ -639,7 +658,7 @@ private final class RawPort: Sendable {
             port.write("L\rVER\r\nVO")
             try await Task.sleep(for: .milliseconds(50))
             port.write("L\n\r \r")
-            let text = port.read(for: .seconds(2), until: "VOL,2\r")
+            let text = await port.read(for: .seconds(2), until: "VOL,2\r")
             #expect(text == "MDL,SDS150\rVER,Version 1.01.02\rVOL,2\r")
             #expect(await rig.mock.receivedCommands == ["MDL", "VER", "VOL"])
         }
