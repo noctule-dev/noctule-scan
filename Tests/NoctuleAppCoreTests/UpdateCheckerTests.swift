@@ -176,6 +176,13 @@ private final class TestNow: Sendable {
     func advance(_ seconds: TimeInterval) { value.withLock { $0 = $0.addingTimeInterval(seconds) } }
 }
 
+/// The monotonic clock the checker's floor reads; it moves only when a test moves it.
+private final class TestUptime: Sendable {
+    private let value = Mutex(ContinuousClock.now)
+    var instant: ContinuousClock.Instant { value.withLock { $0 } }
+    func advance(_ seconds: TimeInterval) { value.withLock { $0 = $0.advanced(by: .seconds(seconds)) } }
+}
+
 private final class LogLines: Sendable {
     private let lines = Mutex<[String]>([])
     func append(_ line: String) { lines.withLock { $0.append(line) } }
@@ -204,6 +211,7 @@ private let hour: TimeInterval = 3_600
     let fetcher: FakeFetcher
     let sleeper = TestSleeper()
     let clock = TestNow(start)
+    let uptime = TestUptime()
     let store: InMemoryUpdatePreferences
     let shelf = Shelf()
     let logs = LogLines()
@@ -212,7 +220,7 @@ private let hour: TimeInterval = 3_600
     init(running: String = "1.0.0", feed: URL? = feedURL, reply: FakeFetcher.Reply = .latest("1.0.0"),
          preferences: UpdatePreferences = .init(), store: InMemoryUpdatePreferences? = nil) {
         let fetcher = FakeFetcher(reply)
-        let sleeper = sleeper, clock = clock, shelf = shelf, logs = logs
+        let sleeper = sleeper, clock = clock, uptime = uptime, shelf = shelf, logs = logs
         let store = store ?? InMemoryUpdatePreferences(preferences)
         self.fetcher = fetcher
         self.store = store
@@ -221,12 +229,19 @@ private let hour: TimeInterval = 3_600
                                                     feed: feed),
             preferences: store, fetcher: fetcher,
             now: { clock.date },
+            uptime: { uptime.instant },
             sleep: { try await sleeper.sleep($0) },
             present: { shelf.shown.append(Shown($0, $1)) },
             log: { logs.append($0) })
     }
 
     var shown: [Shown] { shelf.shown }
+
+    /// Time passes on both clocks, as it does while the Mac sleeps.
+    func advance(_ seconds: TimeInterval) {
+        clock.advance(seconds)
+        uptime.advance(seconds)
+    }
     var saved: UpdatePreferences { get async { await store.updatePreferences() } }
 
     /// Lets queued main-actor work run, so a test can see that nothing more happens.
@@ -461,22 +476,97 @@ private func preferences(on: Bool = true, lastChecked: Date? = nil, skipped: Str
         await h.checker.waitUntilIdle()
         await h.sleeper.waitForRequests(1)
 
-        h.clock.advance(2 * day)
+        // Overdue at the wake: the check waits 10 s for the network to come back, then runs once.
+        h.advance(2 * day)
         h.checker.handleWake()
+        await h.sleeper.waitForCancellations(1)
+        await h.sleeper.waitForRequests(2)
+        await h.yield()
+        #expect(await h.sleeper.requests == [UpdateChecker.interval, UpdateChecker.wakeDelay])
+        #expect(await h.fetcher.calls == 1)
+        await h.sleeper.resume()
         await h.fetcher.waitForCalls(2)
         await h.checker.waitUntilIdle()
-        await h.sleeper.waitForRequests(2)
-        #expect(await h.sleeper.requests == [UpdateChecker.interval, UpdateChecker.interval])
+        await h.sleeper.waitForRequests(3)
+        #expect(await h.sleeper.requests == [UpdateChecker.interval, .seconds(10), UpdateChecker.interval])
         #expect(await h.fetcher.calls == 2)
 
         // A wake that isn't overdue only restarts the timer.
-        h.clock.advance(hour)
+        h.advance(hour)
         h.checker.handleWake()
-        await h.sleeper.waitForRequests(3)
+        await h.sleeper.waitForRequests(4)
         await h.yield()
         #expect(await h.fetcher.calls == 2)
         #expect(await h.sleeper.requests.last == .seconds(23 * hour))
         h.checker.stop()
+    }
+
+    @Test func sleepCancelsTheTimerAndWakeSetsItAgain() async {
+        let h = Harness(reply: .latest("1.0.0"))
+        await h.checker.start()
+        await h.checker.waitUntilIdle()
+        await h.sleeper.waitForRequests(1)
+
+        // A dark wake can't fire it: the timer is gone until the full wake.
+        h.checker.handleSleep()
+        await h.sleeper.waitForCancellations(1)
+        await h.yield()
+        #expect(await h.sleeper.requests.count == 1)
+        #expect(await h.fetcher.calls == 1)
+
+        h.advance(hour)
+        h.checker.handleWake()
+        await h.sleeper.waitForRequests(2)
+        await h.yield()
+        #expect(await h.sleeper.requests.last == .seconds(23 * hour))
+        #expect(await h.fetcher.calls == 1)
+        h.checker.stop()
+    }
+
+    /// The wall clock jumps more than a day just after a check: the next automatic check still
+    /// waits out the minute since that attempt, measured on the monotonic clock.
+    @Test func noAutomaticCheckWithinAMinuteOfTheLast() async {
+        let h = Harness(reply: .latest("1.0.0"))
+        await h.checker.start()
+        await h.checker.waitUntilIdle()
+        await h.sleeper.waitForRequests(1)
+
+        // The overdue branch with no wake delay: checks turned off and on again.
+        h.clock.advance(2 * day)
+        await h.checker.setChecksAutomatically(false)
+        await h.checker.setChecksAutomatically(true)
+        await h.sleeper.waitForRequests(2)
+        await h.yield()
+        #expect(await h.sleeper.requests == [UpdateChecker.interval, UpdateChecker.minimumSpacing])
+        #expect(await h.fetcher.calls == 1)
+
+        // A wake then also waits the rest of that minute, not only its 10 s.
+        h.uptime.advance(20)
+        h.checker.handleWake()
+        await h.sleeper.waitForRequests(3)
+        await h.yield()
+        #expect(await h.sleeper.requests.last == .seconds(40))
+        #expect(await h.fetcher.calls == 1)
+
+        h.uptime.advance(40)
+        await h.sleeper.resume()
+        await h.fetcher.waitForCalls(2)
+        await h.checker.waitUntilIdle()
+        #expect(await h.fetcher.calls == 2)
+        h.checker.stop()
+    }
+
+    /// A quit before the delayed launch check fires: it never starts.
+    @Test func stopBeforeStartWins() async {
+        let h = Harness(reply: .latest("1.0.1"))
+        h.checker.stop()
+        await h.checker.start()
+        await h.checker.waitUntilIdle()
+        await h.yield()
+        #expect(await h.fetcher.calls == 0)
+        #expect(await h.sleeper.requests.isEmpty)
+        #expect(h.logs.all.isEmpty)
+        #expect(h.shown.isEmpty)
     }
 
     @Test func turningOnChecksWhenOverdue() async {

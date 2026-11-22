@@ -41,6 +41,11 @@ public enum UpdateCheckResult: Equatable, Sendable {
 public final class UpdateChecker {
     public static let interval: Duration = .seconds(86_400)
     private static let intervalSeconds = TimeInterval(interval.components.seconds)
+    /// How long after a full wake an overdue check waits, so Wi-Fi has time to come back.
+    public static let wakeDelay: Duration = .seconds(10)
+    /// No automatic check starts sooner than this after the last check of any kind ended, on the
+    /// monotonic clock, whatever the wall clock says.
+    public static let minimumSpacing: Duration = .seconds(60)
 
     public private(set) var isChecking = false
     /// The preference, loaded by `start()`.
@@ -52,6 +57,7 @@ public final class UpdateChecker {
     @ObservationIgnored private let store: any UpdatePreferencesStore
     @ObservationIgnored private let fetcher: any ReleaseFetching
     @ObservationIgnored private let now: @Sendable () -> Date
+    @ObservationIgnored private let uptime: @Sendable () -> ContinuousClock.Instant
     @ObservationIgnored private let sleep: @Sendable (Duration) async throws -> Void
     @ObservationIgnored private let present: @MainActor (UpdateCheckResult, UpdateCheckTrigger) -> Void
     @ObservationIgnored private let log: @Sendable (String) -> Void
@@ -62,6 +68,8 @@ public final class UpdateChecker {
     @ObservationIgnored private var stopped = false
     /// When the last check of any outcome ended, so a failure waits a full interval too.
     @ObservationIgnored private var lastAttempt: Date?
+    /// The same moment on the monotonic clock, for `minimumSpacing`.
+    @ObservationIgnored private var lastAttemptUptime: ContinuousClock.Instant?
     @ObservationIgnored private var check: Task<Void, Never>?
     /// The newest check task, kept after a stop so tests can wait for it.
     @ObservationIgnored private var latestCheck: Task<Void, Never>?
@@ -72,12 +80,14 @@ public final class UpdateChecker {
     /// Saves run one after another, so the newest preferences are the ones left in the store.
     @ObservationIgnored private var saving: Task<Void, Never>?
 
-    /// The default `sleep` is on `SuspendingClock`, which stops while the Mac sleeps, so a check
-    /// never falls due during a dark wake: after a full wake, `handleWake()` recomputes the timer
-    /// from the wall clock and runs an overdue check then (design §5.2).
+    /// The default `sleep` is on `SuspendingClock`, which stops while the Mac sleeps but runs during
+    /// a dark wake (Power Nap), so the owner calls `handleSleep()` at sleep to cancel the timer, and
+    /// `handleWake()` after a full wake to set it again from the wall clock, running an overdue
+    /// check `wakeDelay` later (design §5.2). `uptime` is the monotonic clock `minimumSpacing` reads.
     public init(configuration: UpdateCheckConfiguration, preferences: any UpdatePreferencesStore,
                 fetcher: any ReleaseFetching,
                 now: @escaping @Sendable () -> Date = { Date() },
+                uptime: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
                 sleep: @escaping @Sendable (Duration) async throws -> Void = {
                     try await SuspendingClock().sleep(for: $0)
                 },
@@ -87,6 +97,7 @@ public final class UpdateChecker {
         self.store = preferences
         self.fetcher = fetcher
         self.now = now
+        self.uptime = uptime
         self.sleep = sleep
         self.present = present
         self.log = log
@@ -96,7 +107,8 @@ public final class UpdateChecker {
     private var canCheck: Bool { !configuration.isDevelopmentBuild && configuration.feed != nil }
 
     /// Loads the preferences, then runs the launch check when checks are automatic and this build
-    /// can check. Says nothing otherwise (the configuration's notes already did).
+    /// can check. Says nothing otherwise (the configuration's notes already did). After `stop()` it
+    /// does nothing, so a quit before the app's delayed start wins.
     public func start() async {
         guard !started, !stopped else { return }
         _ = await loadPreferences()
@@ -143,10 +155,17 @@ public final class UpdateChecker {
         await save(updated).value
     }
 
-    /// After a full wake: the timer is set again from the clock, and a check that fell due runs once.
+    /// Before the Mac sleeps: cancels the timer, so a dark wake can't fire it. Nothing else changes;
+    /// `handleWake()` sets it again.
+    public func handleSleep() {
+        cancelTimer()
+    }
+
+    /// After a full wake: the timer is set again from the clock, and a check that fell due runs
+    /// once, no sooner than `wakeDelay` after the wake.
     public func handleWake() {
         guard started, !stopped, check == nil else { return }
-        schedule()
+        schedule(atLeast: Self.wakeDelay)
     }
 
     /// Cancels the timer and any check in flight. No check result is presented, logged, saved or
@@ -227,6 +246,7 @@ public final class UpdateChecker {
         isChecking = false
         let ended = now()
         lastAttempt = ended
+        lastAttemptUptime = uptime()
         let result: UpdateCheckResult
         switch outcome {
         case .success(let release):
@@ -273,12 +293,18 @@ public final class UpdateChecker {
     // MARK: - The timer
 
     /// Sets the timer for the next automatic check: a full interval after the later of the last
-    /// successful check and the last attempt, at most an interval from now; overdue, it checks now.
-    private func schedule() {
+    /// successful check and the last attempt, at most an interval from now, and at least `minimum`;
+    /// overdue, it checks now, unless the last attempt ended less than `minimumSpacing` ago on the
+    /// monotonic clock (only a wall clock that jumped gets here then), when it waits out the rest.
+    private func schedule(atLeast minimum: Duration = .zero) {
         cancelTimer()
         guard started, !stopped, checksAutomatically, canCheck, check == nil, let preferences else { return }
         let last = [preferences.lastChecked, lastAttempt].compactMap { $0 }.max()
-        let wait = last.map { $0.addingTimeInterval(Self.intervalSeconds).timeIntervalSince(now()) } ?? 0
+        var wait = last.map { $0.addingTimeInterval(Self.intervalSeconds).timeIntervalSince(now()) } ?? 0
+        if wait <= 0, let since = lastAttemptUptime.map({ uptime() - $0 }), since < Self.minimumSpacing {
+            wait = Self.seconds(Self.minimumSpacing - since)
+        }
+        wait = max(wait, Self.seconds(minimum))
         guard wait > 0 else {
             beginCheck(.scheduled)
             return
@@ -302,6 +328,11 @@ public final class UpdateChecker {
         timer?.cancel()
         timer = nil
         timerID += 1
+    }
+
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let parts = duration.components
+        return TimeInterval(parts.seconds) + TimeInterval(parts.attoseconds) / 1e18
     }
 
     // MARK: - The log

@@ -70,6 +70,8 @@ public struct URLSessionReleaseFetcher: ReleaseFetching {
         let limit = Self.seconds(timeout)
         configuration.timeoutIntervalForRequest = limit
         configuration.timeoutIntervalForResource = limit
+        // Just after a wake or a login the network may not be up yet: wait for it, within the limit.
+        configuration.waitsForConnectivity = true
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         let session = URLSession(configuration: configuration)
