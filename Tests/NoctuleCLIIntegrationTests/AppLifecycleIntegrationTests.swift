@@ -442,7 +442,7 @@ private func openFiles(of pid: Int32) async -> String? {
                 Issue.record("the app never started the station (its lock is free); app: \(launched.stderr)")
                 throw CocoaError(.featureUnsupported)
             }
-            let scanner = try await SerialMock.launch(link: run.link, ["--fault", "unplug=4:3"])
+            let scanner = try await SerialMock.launch(link: run.link, ["--fault", "unplug-after-psi=2:3"])  // counted from the app's PSI
             mock = scanner
             let resumed = await waitForLog(scanner, within: 20) { lines in
                 guard let replug = lines.firstIndex(where: { $0.hasPrefix("mock: plugged in again") }) else { return false }

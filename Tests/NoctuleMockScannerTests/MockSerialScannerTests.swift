@@ -414,6 +414,32 @@ private final class RawPort: Sendable {
         }
     }
 
+    /// `unplug-after-psi`: the unplug clock starts at the first subscribing `PSI`, however long the
+    /// client took to get there, not at `start()`; a `PSI,0` doesn't start it. (On the stepped
+    /// clock for the scenario; the fault itself runs in real time, like `unplugAfter`.)
+    @Test func unplugAfterPSICountsFromTheFirstSubscription() async throws {
+        let faults = MockFaults(unplugAfter: 0.3, unplugCountsFromFirstPSI: true)
+        try await withSerialMock(faults: faults) { rig in
+            await rig.client.disconnect()
+            let port = try RawPort(rig.path)
+            defer { port.close() }
+            port.write("MDL\r")
+            port.write("PSI,0\r")
+            // Well past 0.3 s from `start()` (a late wake only lengthens this): still plugged in.
+            try await Task.sleep(for: .milliseconds(900))
+            #expect(await rig.mock.isPluggedIn, "unplugged before any subscribing PSI")
+            port.write("PSI,250\r")
+            try await eventually { !(await rig.mock.isPluggedIn) }
+        }
+    }
+
+    @Test func plainUnplugStillCountsFromStart() async throws {
+        try await withSerialMock(faults: MockFaults(unplugAfter: 0.3)) { rig in
+            #expect(!(await rig.mock.receivedCommands.contains { $0.hasPrefix("PSI,") && $0 != "PSI,0" }))
+            try await eventually { !(await rig.mock.isPluggedIn) }
+        }
+    }
+
     @Test func delayedReplyDoesNotCrossAnUnplug() async throws {
         try await withSerialMock(link: true, replyDelays: ["KEY": .milliseconds(400)]) { rig in
             await rig.client.disconnect()

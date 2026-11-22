@@ -83,7 +83,7 @@ public struct MockScannerArguments: Sendable, Equatable {
                                     [--line-out PATH [--line-out-channel left|right|both]]
                                     [--scenario default|weather|PATH] [--glt-page-size N] [--start-at S]
                                     [--verbose]
-                                    [--fault unplug=N[:M]|split-writes|stall-psi=N|line-out-silent
+                                    [--fault unplug=N[:M]|unplug-after-psi=N[:M]|split-writes|stall-psi=N|line-out-silent
                                                |drop-reply=NAME[:N]|drop-request=NAME[:N]]...
 
         A mock SDS200 on 127.0.0.1: UDP control, RTSP audio (a synthetic tone per transmission), and the
@@ -122,6 +122,8 @@ public struct MockScannerArguments: Sendable, Equatable {
                                --line-out)
           --fault unplug=N[:M] the pty closes N s after start, as when the cable is pulled; with M, a new
                                one appears M s later behind --serial-link
+          --fault unplug-after-psi=N[:M]  as unplug=N[:M], but N counts from the first subscribing
+                               PSI the mock receives (a client that has connected and got going)
           --fault split-writes replies are written 7 bytes at a time
           --fault stall-psi=N  PSI pushes stop N s after each subscription
           --fault keepalive=C  the next keepalive (GET_PARAMETER) gets status C, once
@@ -257,7 +259,7 @@ public struct MockScannerArguments: Sendable, Equatable {
         if serial {
             if let networkPort { throw misuse("--serial serves no network ports: drop \(networkPort)") }
             if faults.replugAfter != nil, serialLink == nil {
-                throw misuse("--fault unplug=N:M (replug) needs --serial-link")
+                throw misuse("--fault unplug=N:M (replug) needs --serial-link")  // also unplug-after-psi
             }
             if pushLifetime != nil, model == .sds200 {
                 throw misuse("--push-lifetime needs --model sds150 or sds100 (the SDS200 has no push lifetime)")
@@ -307,13 +309,14 @@ public struct MockScannerArguments: Sendable, Equatable {
         case ("wedge-control", 1): faults.wedgeTakesControlDown = true
         case ("split-writes", 1): faults.splitWrites = true
         case ("line-out-silent", 1): faults.lineOutSilent = true
-        case ("unplug", 2):
+        case ("unplug", 2), ("unplug-after-psi", 2):
             // N or N:M (seconds, each at least 0).
             let pieces = parts[1].split(separator: ":", omittingEmptySubsequences: false).map { Double($0) }
             let seconds = pieces.compactMap { $0 }.filter { $0 >= 0 && $0.isFinite }
             guard (1...2).contains(pieces.count), seconds.count == pieces.count else { throw bad }
             faults.unplugAfter = seconds[0]
             faults.replugAfter = seconds.count == 2 ? seconds[1] : nil
+            faults.unplugCountsFromFirstPSI = parts[0] == "unplug-after-psi"
         case ("drop-reply", 2), ("drop-request", 2):
             // NAME or NAME:N (N = how many datagrams, at least 1).
             let pieces = parts[1].split(separator: ":", omittingEmptySubsequences: false).map(String.init)

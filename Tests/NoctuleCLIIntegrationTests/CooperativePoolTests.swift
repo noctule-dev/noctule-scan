@@ -13,9 +13,10 @@ import Testing
     /// How long each tool runs, and how late the test's own short sleep may end. A `run` that waited
     /// by blocking would hold every pool thread for a whole tool, so the sleep would end at least
     /// `toolSeconds` late; one that suspends leaves it late only by the machine's load, which was
-    /// 1.4 s on the CI runner in the parallel step (run 44950610736), so the bound sits between.
-    static let toolSeconds = 5.0
-    static let lateBound = Duration.seconds(3)
+    /// 0.46–1.55 s on the CI runner in the parallel step (runs 44950610736 to 44964839734), so the
+    /// bound sits between, with about 3.5 s of room above the worst seen and 3 s below broken.
+    static let toolSeconds = 8.0
+    static let lateBound = Duration.seconds(5)
 
     /// More runs at once than the pool has threads (one per core), each `toolSeconds` long, leave
     /// the pool free: this test's own 50 ms sleep, begun while they start, ends on time.
