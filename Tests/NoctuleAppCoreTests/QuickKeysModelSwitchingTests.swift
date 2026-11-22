@@ -762,8 +762,11 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
         }
     }
 
+    /// The click must come while the poll's lost `SQK` still holds it. With 300 ms timeouts a loaded
+    /// machine's click came after that poll had ended, during the next one (local sweep, bgload);
+    /// two-second timeouts hold the poll that long.
     @Test func aClickWaitsForThePollUnderWay() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
             let model = makeModel(rig)
             model.open()
             model.showList(1)
