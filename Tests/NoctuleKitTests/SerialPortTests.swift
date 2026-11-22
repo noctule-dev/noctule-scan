@@ -16,7 +16,7 @@ private func port(_ path: String, productID: Int = 0x001A, name: String? = "SDS1
 private let first = port("/dev/cu.usbmodemA1")
 private let second = port("/dev/cu.usbmodemB1")
 
-@Suite struct SerialPortTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialPortTests {
     @Test func configuredAndPresentWins() {
         // A configured path that exists beats one listed port, and two (no `.severalFound`).
         #expect(SerialPort.resolve(configured: "/dev/ttys042", ports: [first], exists: { _ in true })

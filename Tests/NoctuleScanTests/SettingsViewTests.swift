@@ -13,7 +13,7 @@ import Testing
 /// The Settings and picker helpers, and the key map editor's chord recorder: its decisions, and
 /// its monitor end to end next to a station window's key monitor (a recorded key never reaches
 /// the scanner). Windows claim to be key (a test process can't become active).
-@MainActor @Suite(.serialized) struct SettingsViewTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(3))) struct SettingsViewTests {
     final class KeyWindow: NSWindow {
         override var isKeyWindow: Bool { true }
         override var canBecomeKey: Bool { true }

@@ -73,7 +73,7 @@ private func numberEntrySTS() throws -> DisplayStatus {
     ])
 }
 
-@Suite struct DisplayModelTests {
+@Suite(.timeLimit(.minutes(3))) struct DisplayModelTests {
     @Test func fixtureRowsAndSoftKeys() throws {
         var a = UDPDatagramAssembler()
         guard case .fields("STS", let f) = a.feed(fixture("sts-trunk-sds200-1.24.00.txt")).first else {

@@ -16,7 +16,7 @@ private final class Output: Sendable {
 /// Serialized (LESSONS.md 2026-11-12): a `flock` released by `close()` can linger for the moment a
 /// `Process()` spawned on another thread holds its copy of the descriptor, so these tests don't run
 /// beside each other, where one of them is spawning a child that holds a lock.
-@Suite(.serialized) struct StationLockTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationLockTests {
     private func tempDir() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appending(path: "noctule-lock-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

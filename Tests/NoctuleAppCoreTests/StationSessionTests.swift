@@ -12,7 +12,7 @@ import NoctuleStore
 @testable import NoctuleAppCore
 
 @MainActor
-@Suite(.serialized) struct StationSessionTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionTests {
     @Test func connectsAndShowsLiveState() async throws {
         let outcome = try await withSession { rig in
             rig.start()

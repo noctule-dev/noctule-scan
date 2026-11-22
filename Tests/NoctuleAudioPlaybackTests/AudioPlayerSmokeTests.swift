@@ -13,7 +13,7 @@ import CoreAudio
 
 /// Opt-in: `NOCTULE_AUDIO_OUTPUT_TEST=1 swift test --filter AudioPlayerSmokeTests`.
 /// Plays one second of a 440 Hz tone through the default output device.
-@Suite struct AudioPlayerSmokeTests {
+@Suite(.timeLimit(.minutes(3))) struct AudioPlayerSmokeTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["NOCTULE_AUDIO_OUTPUT_TEST"] == "1"))
     func playsToneAndReturnsWhenStreamFinishes() async throws {
         let (stream, continuation) = AsyncStream.makeStream(of: AudioChunk.self)
@@ -48,7 +48,7 @@ import CoreAudio
 }
 
 /// The prefill, through the same render code the output node runs; no output device needed.
-@Suite struct AudioPlayerPrefillTests {
+@Suite(.timeLimit(.minutes(3))) struct AudioPlayerPrefillTests {
     private func tone(_ count: Int) -> [Int16] { [Int16](repeating: 4000, count: count) }
 
     @Test func prefillIsConfigurable() {

@@ -42,7 +42,7 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
     return await condition()
 }
 
-@Suite struct ScannerClientTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerClientTests {
     @Test func readsIdentity() async throws {
         let c = ScannerClient(transport: SimulatedScannerTransport.sds200()); try await c.connect()
         let m = try await c.modelInfo(); #expect(m.model == .sds200)

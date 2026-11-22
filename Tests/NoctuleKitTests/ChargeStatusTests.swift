@@ -4,7 +4,7 @@
 import Testing
 @testable import NoctuleKit
 
-@Suite struct ChargeStatusTests {
+@Suite(.timeLimit(.minutes(3))) struct ChargeStatusTests {
     @Test func chargeStatusSpecExample() throws {
         let s = try ChargeStatus(fields: ["CST=4", "VOLT=4184mV:100%", "CURR=0000mA", "TEMP= 27.65C"])
         #expect(s.state == .full)

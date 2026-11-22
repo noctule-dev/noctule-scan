@@ -32,7 +32,7 @@ private actor Probe {
 
 private struct Boom: Error {}
 
-@Suite struct KeyPressQueueTests {
+@Suite(.timeLimit(.minutes(3))) struct KeyPressQueueTests {
     @Test func queueSendsInOrderOneAtATime() async throws {
         let p = Probe()
         let q = KeyPressQueue { await p.run($0) }

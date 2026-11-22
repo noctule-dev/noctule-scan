@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import NoctuleCLICore
 
-@Suite struct CLIArgumentsTests {
+@Suite(.timeLimit(.minutes(3))) struct CLIArgumentsTests {
     @Test func subcommands() throws {
         #expect(try CLIArguments.parse(["info"]) == CLIInvocation(command: .info))
         #expect(try CLIArguments.parse(["status"]).command == .status)

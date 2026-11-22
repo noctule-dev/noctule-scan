@@ -11,7 +11,7 @@ import NoctuleKit
 /// Every test uses its own temp-file database and removes its folder afterwards. All values are
 /// fictional. Dates are whole or quarter seconds so they survive the REAL Unix-seconds round trip
 /// exactly.
-@Suite struct HitLogTests {
+@Suite(.timeLimit(.minutes(3))) struct HitLogTests {
     private func tempDB() -> (dir: URL, url: URL) {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("noctule-hitlog-\(UUID().uuidString)", isDirectory: true)

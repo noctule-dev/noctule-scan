@@ -50,7 +50,7 @@ enum SDS150HardwareGate {
 
 /// The SDS150 over USB serial (design §8): the opt-in hardware suites, and the same checks on the
 /// mock. One serialized suite, so no two hardware suites ever hold the port at once.
-@Suite(.serialized) struct SDS150HardwareTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct SDS150HardwareTests {
     /// The owner's SDS150, read-only. Opt-in: `NOCTULE_SDS150_HARDWARE_TESTS=1` (never with
     /// `NOCTULE_NO_USB_DETECTION` set). Sends `MDL` (an SDS150, else nothing more), then `VER`,
     /// `VOL`, `SQL`, `GSI`, `STS`, one each; never `GCS`, `PSI`, `KEY`, `MSV`, `MSM` or `POF`.

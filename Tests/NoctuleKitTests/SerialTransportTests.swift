@@ -261,7 +261,7 @@ private final class LateReader: Sendable {
     var text: String { collected.withLock { String(decoding: $0, as: UTF8.self) } }
 }
 
-@Suite struct SerialTransportTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialTransportTests {
     @Test func roundTrip() async throws {
         let pty = try PseudoTerminal()
         defer { pty.close() }

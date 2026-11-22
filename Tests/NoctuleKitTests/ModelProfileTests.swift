@@ -4,7 +4,7 @@
 import Testing
 @testable import NoctuleKit
 
-@Suite struct ModelProfileTests {
+@Suite(.timeLimit(.minutes(3))) struct ModelProfileTests {
     @Test func profiles() {
         let sds200 = ModelProfile.profile(for: .sds200)
         #expect(sds200.hasNetworkAudio); #expect(sds200.supportsRemoteRestart)

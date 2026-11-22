@@ -6,7 +6,7 @@ import NoctuleKit
 import NoctuleStore
 @testable import NoctuleAppCore
 
-@Suite struct KeyboardTests {
+@Suite(.timeLimit(.minutes(3))) struct KeyboardTests {
     @Test func parsesAndFormatsEveryDefault() throws {
         let defaults = KeyMap.defaults(for: .sds200)
         #expect(!defaults.isEmpty)

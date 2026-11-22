@@ -6,7 +6,7 @@ import Testing
 import NoctuleKitTestSupport
 @testable import NoctuleKit
 
-@Suite struct DisplayStatusTests {
+@Suite(.timeLimit(.minutes(3))) struct DisplayStatusTests {
     @Test func parsesRealCapture() throws {
         var a = UDPDatagramAssembler()
         guard case .fields("STS", let f) = a.feed(fixture("sts-trunk-sds200-1.24.00.txt")).first else { Issue.record(); return }

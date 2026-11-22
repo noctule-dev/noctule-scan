@@ -299,7 +299,7 @@ func withUSBRegistry(mocks count: Int = 1,
 }
 
 @MainActor
-@Suite(.serialized) struct SessionRegistryTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct SessionRegistryTests {
     @Test func twoOpensShareOneRunner() async throws {
         let outcome = try await withRegistry { rig in
             let station = rig.stations[0]

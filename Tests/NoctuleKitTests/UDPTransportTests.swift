@@ -119,7 +119,7 @@ private let bareMSI = #"<?xml version="1.0" encoding="utf-8"?><MSI Name="Set Ran
 /// A `GLT` answer with no `GLT,<XML>,` prefix, as `bareMSI` is for `MSI`.
 private let bareGLT = #"<?xml version="1.0" encoding="utf-8"?><GLT><DEPT Index="200" Name="Lakeview Fire" Q_Key="0" /><Footer No="1" EOT="1"/></GLT>"#
 
-@Suite struct UDPTransportTests {
+@Suite(.timeLimit(.minutes(3))) struct UDPTransportTests {
     @Test func loopbackGLTReassemblesBareDocument() async throws {
         let scanner = try FakeUDPScanner { $0 == "GLT,DEPT,101\r" ? [bareGLT] : [] }
         defer { scanner.stop() }

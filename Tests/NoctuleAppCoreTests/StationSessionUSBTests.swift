@@ -12,7 +12,7 @@ import NoctuleStore
 /// `StationSession` on a USB station (Plan 8 Task 5; SDS150 design §7.2): it runs through the
 /// same `StationRunner` as `noctule log`, waits for the port with nothing opened, resumes after an
 /// unplug, and has no audio. See `withUSBSession` for what every test checks at the end.
-@MainActor @Suite(.serialized) struct StationSessionUSBTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionUSBTests {
     private let hint = SerialPort.noneFoundHint
     private let differentScannerWarning = "a different scanner answered (SDS200); still waiting for the SDS150"
 

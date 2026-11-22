@@ -283,7 +283,7 @@ private func wavSeconds(_ path: String) throws -> Double {
     return Double(max(0, size - 44)) / 16_000
 }
 
-@Suite struct StationRunnerTests {
+@Suite(.timeLimit(.minutes(3))) struct StationRunnerTests {
     @Test func logsHitsWithAudio() async throws {
         let outcome = try await withRunner { rig, _ in
             try await rig.waitForStreaming()

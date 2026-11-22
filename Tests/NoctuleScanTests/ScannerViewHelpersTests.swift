@@ -11,7 +11,7 @@ import Testing
 @testable import NoctuleScan
 
 /// The scanner view's non-trivial formatting and input logic, without any views.
-@MainActor @Suite struct ScannerViewHelpersTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct ScannerViewHelpersTests {
     // MARK: Indicators
 
     @Test func phaseIndicatorText() {

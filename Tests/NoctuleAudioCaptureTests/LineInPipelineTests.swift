@@ -8,7 +8,7 @@ import Testing
 import NoctuleAudioCapture
 
 /// The line-in pipeline on synthetic buffers: nothing here opens an audio device.
-@Suite struct LineInPipelineTests {
+@Suite(.timeLimit(.minutes(3))) struct LineInPipelineTests {
     /// Feeds `seconds` of audio to `pipeline` in buffers of `frames`, each timed at its first sample
     /// from `start`, with `sample(channel, index)` the value of that channel at that device sample.
     @discardableResult

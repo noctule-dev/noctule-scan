@@ -6,7 +6,7 @@ import Testing
 import NoctuleKit
 @testable import NoctuleStore
 
-@Suite struct StationTests {
+@Suite(.timeLimit(.minutes(3))) struct StationTests {
     @Test func decodesFromEmptyJSON() throws {
         let s = try JSONDecoder().decode(Station.self, from: Data("{}".utf8))
         #expect(s.name == "New Station")

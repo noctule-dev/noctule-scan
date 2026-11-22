@@ -8,7 +8,7 @@ import Testing
 
 /// The sleep hold (Review Focus 1): the Mac sleeps only after sessions have suspended, or at
 /// the deadline. Driven directly, without IOKit.
-@MainActor @Suite struct PowerGateTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct PowerGateTests {
     /// What happened, in order.
     @MainActor final class Log {
         var events: [String] = []

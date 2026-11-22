@@ -13,7 +13,7 @@ import Testing
 
 /// The hit log window's own logic: wording and formats, rows and sorting, sidebar entries, and
 /// playback sequencing. All values are fictional.
-@MainActor @Suite struct HitLogWindowTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct HitLogWindowTests {
     private static let noon: Date = {
         Calendar.current.startOfDay(for: Date(timeIntervalSince1970: 1_800_000_000)).addingTimeInterval(12 * 3600)
     }()
