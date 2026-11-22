@@ -51,9 +51,13 @@ public struct URLSessionReleaseFetcher: ReleaseFetching {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let parts = timeout.components
-        request.timeoutInterval = TimeInterval(parts.seconds) + TimeInterval(parts.attoseconds) / 1e18
+        request.timeoutInterval = seconds(timeout)
         return request
+    }
+
+    private static func seconds(_ duration: Duration) -> TimeInterval {
+        let parts = duration.components
+        return TimeInterval(parts.seconds) + TimeInterval(parts.attoseconds) / 1e18
     }
 
     public func fetch(_ url: URL) async throws -> (status: Int, body: Data) {
@@ -62,6 +66,10 @@ public struct URLSessionReleaseFetcher: ReleaseFetching {
             return (200, data)
         }
         let configuration = URLSessionConfiguration.ephemeral
+        // The request's own timeout is an idle timeout; these cap the whole request.
+        let limit = Self.seconds(timeout)
+        configuration.timeoutIntervalForRequest = limit
+        configuration.timeoutIntervalForResource = limit
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
         let session = URLSession(configuration: configuration)
@@ -102,7 +110,8 @@ public enum ReleaseFeed {
             return .failure(.unreadable("tag \(payload.tag_name)"))
         }
         guard let page = URL(string: payload.html_url), page.scheme == "https", page.host == "github.com",
-            page.absoluteString.hasPrefix(pagePrefix)
+            page.absoluteString.hasPrefix(pagePrefix),
+            !page.pathComponents.contains(where: { $0 == "." || $0 == ".." })
         else { return .failure(.unreadable("page \(payload.html_url)")) }
         return .success(LatestRelease(version: version, notes: payload.body ?? "", page: page))
     }

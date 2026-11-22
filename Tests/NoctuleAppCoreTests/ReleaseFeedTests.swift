@@ -45,6 +45,7 @@ import Testing
         "https://github.com.evil.example/noctule-dev/noctule-scan/releases/x",
         "https://github.com/someone-else/noctule-scan/releases/x",
         "https://github.com/noctule-dev/noctule-scan/issues/1",
+        "https://github.com/noctule-dev/noctule-scan/releases/../../other",
     ]) func refusesAPageOffTheRepository(page: String) {
         guard case .failure(.unreadable(let detail)) = ReleaseFeed.decode(status: 200, body: body(page: page))
         else {
