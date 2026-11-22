@@ -90,9 +90,10 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         // event, so the run measured from before the launch can only be longer than the real
         // one (a `listen` that stopped early still fails), and the run measured from when
         // "streaming" was seen can only be shorter, except for the lateness of seeing the exit
-        // (a `listen` that ran on past its seconds still fails). The 2.5 s allows for the
-        // teardown and for late wakeups (up to 1.4 s on the CI runner); a doubled timer is 4 s
-        // over.
+        // (a `listen` that ran on past its seconds still fails). The 3.5 s allows about 1 s for
+        // listen's own shutdown (TEARDOWN, the 500 ms close linger, the drain) plus late wakeups
+        // (up to 1.4 s on the CI runner); a doubled timer exits about 9 s after streaming and
+        // still fails.
         let ran = exitSeen.timeIntervalSince(noctule.started)
         let ranSinceStreaming = exitSeen.timeIntervalSince(streamingSeen)
         noctule.kill()
@@ -122,7 +123,7 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         // packet is recorded (none is lost or reordered on loopback, and the shutdown drains the
         // chunks before the WAV is closed), and at least 10 prove a recording, not a stub.
         #expect(ran >= 4, "listen exited \(ran) s after its launch, before its --seconds 4")
-        #expect(ranSinceStreaming < 6.5, "listen exited \(ranSinceStreaming) s after streaming began, well past its --seconds 4")
+        #expect(ranSinceStreaming < 7.5, "listen exited \(ranSinceStreaming) s after streaming began, well past its --seconds 4")
         let packets = result.stdout.split(separator: "\n").first { $0.hasPrefix("packets ") }
             .flatMap { $0.split(separator: " ").dropFirst().first }.flatMap { Int($0) }
         let received = try #require(packets, "no packets line: \(result.stdout)")
