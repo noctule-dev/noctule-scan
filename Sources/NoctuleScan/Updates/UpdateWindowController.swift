@@ -11,8 +11,10 @@ import SwiftUI
 ///
 /// **Focus.** A manual check activates the app and makes the window key: the person just asked.
 /// An automatic one only orders it in front of the app's windows, neither activating the app nor
-/// making the window key, so Return and Esc keep going to the station window (and its scanner)
-/// until the person clicks this one. The close button, like Esc, is Later: it closes and saves nothing.
+/// making the window key, and the window refuses to become key until the person clicks in it
+/// (`UpdateWindow.acceptsKey`), so closing another window (Settings, the hit log) can't hand it
+/// the focus: Return and Esc keep going to the station window (and its scanner). The close button,
+/// like Esc, is Later: it closes and saves nothing.
 @MainActor final class UpdateWindowController: NSWindowController {
     /// Skip This Version; set by the owner of the checker.
     var skip: (AppVersion) -> Void = { _ in }
@@ -46,9 +48,12 @@ import SwiftUI
             window = created
         }
         if trigger == .manual {
+            (window as? UpdateWindow)?.acceptsKey = true
             NSApp.activate()
             window.makeKeyAndOrderFront(nil)
         } else {
+            // Already key (the person clicked in it): it stays key.
+            if !window.isKeyWindow { (window as? UpdateWindow)?.acceptsKey = false }
             window.orderFront(nil)
         }
     }
@@ -56,6 +61,21 @@ import SwiftUI
 
 /// Esc closes the window when nothing in it takes the key (the OK-only messages have no Later).
 private final class UpdateWindow: NSWindow {
+    /// False while an automatic result waits unclicked; a click in the window or a manual show
+    /// sets it, and the window can then be key as usual.
+    var acceptsKey = true
+
+    override var canBecomeKey: Bool { acceptsKey && super.canBecomeKey }
+
+    override func sendEvent(_ event: NSEvent) {
+        // Before AppKit handles the click, so the same click makes the window key.
+        switch event.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: acceptsKey = true
+        default: break
+        }
+        super.sendEvent(event)
+    }
+
     override func cancelOperation(_ sender: Any?) { performClose(sender) }
 }
 #endif

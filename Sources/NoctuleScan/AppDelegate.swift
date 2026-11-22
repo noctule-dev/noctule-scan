@@ -25,9 +25,11 @@ import Synchronization
 ///   waiting for a resume still in flight; a full wake (`NSWorkspace.didWakeNotification`)
 ///   resumes them, each through its cooldown gate. While quitting, a sleep waits for the quit's
 ///   stops instead.
-/// - **Update checks** (`updates`): started once launch has finished, never holding it up; a full
-///   wake lets an overdue check run; a quit stops them first, so it never waits on one. Results
-///   show in `updateWindow`, never a modal alert.
+/// - **Update checks** (`updates`): started 5 s after launch has finished (`updateLaunchDelay`),
+///   never holding it up, so the launch routing's station window is already open when a result
+///   shows, and the network has had time to come up after a login; a sleep cancels their timer
+///   (`NSWorkspace.willSleepNotification`) and a full wake sets it again; a quit stops them first,
+///   so it never waits on one. Results show in `updateWindow`, never a modal alert.
 /// - SIGPIPE is ignored, so a closed stdout or stderr can't kill the app mid-session.
 /// - Closing the last window doesn't quit; a closed window's session stops through `release`.
 ///   Closing the last station window opens the Stations window (`stationWindows`), except while
@@ -55,6 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     private var power: SystemPowerObserver?
     private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+    /// How long after launch the first update check waits.
+    static let updateLaunchDelay: Duration = .seconds(5)
     /// The quit's `stopAll()`, once quitting.
     private var quitStop: Task<Void, Never>?
     /// True from the moment a quit starts stopping sessions (`applicationShouldTerminate`, or the
@@ -148,12 +153,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 updates.handleWake()
             }
         }
-        Task { await updates.start() }
+        // The update timer's clock runs during dark wakes; cancel it before sleep, so only the full
+        // wake above sets it again.
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { updates.handleSleep() }
+        }
+        // After the launch routing has opened its window, so a result shows in front of it; a quit
+        // before then stops the checker, and `start()` then does nothing.
+        Task {
+            try? await Task.sleep(for: Self.updateLaunchDelay)
+            await updates.start()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         power?.stop()
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

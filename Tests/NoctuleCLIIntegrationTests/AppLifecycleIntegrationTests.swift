@@ -694,8 +694,8 @@ private func openFiles(of pid: Int32) async -> String? {
             app = launched
             let started = await run.waitForLock(by: launched.process.processIdentifier, within: 30)
             #expect(started, "the app never started the station; app: \(launched.stderr)")
-            // Long enough for a launch check, had one started, to log its line.
-            try? await Task.sleep(for: .seconds(2))
+            // Long enough for a launch check (5 s after launch), had one started, to log its line.
+            try? await Task.sleep(for: .seconds(8))
             let stopped = await terminate(launched, within: 15) { "" }
             app = nil
             #expect(stopped.exited, "the app didn't exit within 15 s; app: \(stopped.stderr)")
@@ -733,7 +733,8 @@ private func openFiles(of pid: Int32) async -> String? {
                 "NOCTULE_TEST_APP_VERSION": "0.9.0",
             ])
             app = launched
-            let found = await launched.waitForStderr(within: 10) {
+            // The launch check waits 5 s after launch.
+            let found = await launched.waitForStderr(within: 30) {
                 $0.contains("update check: Noctule Scan 1.0.0 is available")
             }
             #expect(found, "no update check line; app: \(launched.stderr)")
