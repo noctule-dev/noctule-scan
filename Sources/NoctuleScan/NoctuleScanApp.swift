@@ -45,9 +45,11 @@ struct NoctuleScanApp: App {
 
         Settings {
             SettingsView(directory: appDelegate.directory, settings: appDelegate.settings,
-                         registry: appDelegate.registry, recordingsRoot: appDelegate.recordingsRoot)
+                         registry: appDelegate.registry, recordingsRoot: appDelegate.recordingsRoot,
+                         updates: appDelegate.updates)
         }
         .commands {
+            UpdateCommands(updates: appDelegate.updates)
             FileCommands()
             // View › Show/Hide Sidebar (⌃⌘S) for the hit log's sidebar.
             SidebarCommands()
@@ -82,6 +84,28 @@ struct FileCommands: Commands {
             Button("Open Station…") { openWindow(id: AppScene.picker) }
                 .keyboardShortcut("o")
         }
+    }
+}
+
+/// App › Check for Updates…, under About (update-check design §6.2); no shortcut, and disabled
+/// while a check runs.
+struct UpdateCommands: Commands {
+    let updates: UpdateChecker
+
+    var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            CheckForUpdatesButton(updates: updates)
+        }
+    }
+}
+
+/// A view, so the menu item follows `isChecking`.
+private struct CheckForUpdatesButton: View {
+    let updates: UpdateChecker
+
+    var body: some View {
+        Button(UpdateText.menuItem) { Task { await updates.checkNow() } }
+            .disabled(updates.isChecking)
     }
 }
 

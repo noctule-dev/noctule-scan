@@ -82,6 +82,8 @@ dmg="$root/build/noctule-scan-$version.dmg"
 # Only the bundle's copy: the tracked Resources/Info.plist keeps saying 0.0.0.
 plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$build_number" "$app/Contents/Info.plist"
+# The whole tag version, pre-release suffix included: the update check tells a beta from its final by it.
+plutil -replace NoctuleFullVersion -string "$version" "$app/Contents/Info.plist"
 echo "release: $version (app $short_version, build $build_number)"
 
 "$packaging/notarize.sh" "$app"
@@ -115,6 +117,8 @@ inside_build="$(plutil -extract CFBundleVersion raw "$inside")" || fail "couldn'
 if [[ "$inside_version" != "$short_version" || "$inside_build" != "$build_number" ]]; then
     fail "the app in the DMG says $inside_version (build $inside_build), expected $short_version (build $build_number)"
 fi
+inside_full="$(plutil -extract NoctuleFullVersion raw "$inside")" || fail "couldn't read the app's full version in the DMG"
+[[ "$inside_full" == "$version" ]] || fail "the app in the DMG says its full version is $inside_full, expected $version"
 detach
 mnt=""
 

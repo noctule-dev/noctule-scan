@@ -31,7 +31,7 @@ public enum SettingsStoreError: Error, Equatable, CustomStringConvertible {
 /// couldn't read. A file that fails to decode is renamed to `<name>.corrupt-<yyyyMMdd-HHmmss>`
 /// and treated as empty; if that rename fails, it throws `.quarantineFailed` instead. `app.json`
 /// (a convenience) stays best-effort: any failure there reads as defaults.
-public actor LocalSettingsStore: SettingsStore {
+public actor LocalSettingsStore: SettingsStore, UpdatePreferencesStore {
     public let directory: URL
 
     private struct StationsFile: Codable { var version: Int = 1; var stations: [Station] = [] }
@@ -40,13 +40,22 @@ public actor LocalSettingsStore: SettingsStore {
         var version: Int = 1
         var lastStationID: UUID? = nil
         var storageLocation: StorageLocation = .local
+        var checkForUpdates: Bool = true
+        var lastUpdateCheck: Date? = nil
+        var skippedUpdateVersion: String? = nil
         init() {}
-        private enum CodingKeys: String, CodingKey { case version, lastStationID, storageLocation }
+        private enum CodingKeys: String, CodingKey {
+            case version, lastStationID, storageLocation, checkForUpdates, lastUpdateCheck, skippedUpdateVersion
+        }
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
             lastStationID = try c.decodeIfPresent(UUID.self, forKey: .lastStationID)
             storageLocation = try c.decodeIfPresent(StorageLocation.self, forKey: .storageLocation) ?? .local
+            // A wrongly typed update key reads as its default rather than moving the whole file aside.
+            checkForUpdates = (try? c.decodeIfPresent(Bool.self, forKey: .checkForUpdates)) ?? true
+            lastUpdateCheck = try? c.decodeIfPresent(Date.self, forKey: .lastUpdateCheck)
+            skippedUpdateVersion = try? c.decodeIfPresent(String.self, forKey: .skippedUpdateVersion)
         }
     }
 
@@ -126,6 +135,25 @@ public actor LocalSettingsStore: SettingsStore {
         var file = loadApp()
         file.storageLocation = s.storageLocation
         try write(file, to: "app.json")
+    }
+
+    // MARK: Update preferences (app.json; best effort)
+
+    public func updatePreferences() async -> UpdatePreferences {
+        let file = loadApp()
+        var p = UpdatePreferences()
+        p.checkAutomatically = file.checkForUpdates
+        p.lastChecked = file.lastUpdateCheck
+        p.skippedVersion = file.skippedUpdateVersion
+        return p
+    }
+
+    public func saveUpdatePreferences(_ preferences: UpdatePreferences) async {
+        var file = loadApp()
+        file.checkForUpdates = preferences.checkAutomatically
+        file.lastUpdateCheck = preferences.lastChecked
+        file.skippedUpdateVersion = preferences.skippedVersion
+        try? write(file, to: "app.json")  // best effort: a preference is only a convenience
     }
 
     // MARK: Files

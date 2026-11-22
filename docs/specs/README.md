@@ -38,6 +38,9 @@ The design notes, protocol notes and plans behind Noctule Scan, in the order the
 **Quick keys**
 - [`2026-11-18-quick-keys-design.md`](2026-11-18-quick-keys-design.md): the Favorites quick keys: what the scanners answer, and the pop-over that switches them.
 
+**Updates**
+- [`2026-11-22-update-check-design.md`](2026-11-22-update-check-design.md): the app checks GitHub for a newer stable release and says so; nothing is downloaded or installed.
+
 **Packaging and releases**
 - [`2026-11-13-app-icon-design.md`](2026-11-13-app-icon-design.md): the app icon: format, build step, checks.
 - [`2026-11-13-release-packaging-design.md`](2026-11-13-release-packaging-design.md): a signed, notarized DMG and tag-driven releases.
@@ -71,3 +74,4 @@ Each plan was the step-by-step implementation plan for one piece of work. They s
 - [`2026-11-17-plan-19-line-in-cli.md`](2026-11-17-plan-19-line-in-cli.md): Plan 19, line-in audio on the command line.
 - [`2026-11-18-plan-20-quick-keys.md`](2026-11-18-plan-20-quick-keys.md): Plan 20, Favorites quick keys.
 - [`2026-11-20-plan-21-open-source-prep.md`](2026-11-20-plan-21-open-source-prep.md): Plan 21, taking Noctule Scan public (done 2026-11-22; Results at the end).
+- [`2026-11-22-plan-22-update-check.md`](2026-11-22-plan-22-update-check.md): Plan 22, checking GitHub for a newer release (design: [`2026-11-22-update-check-design.md`](2026-11-22-update-check-design.md)).

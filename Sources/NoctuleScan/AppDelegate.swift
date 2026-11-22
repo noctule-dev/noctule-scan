@@ -25,6 +25,11 @@ import Synchronization
 ///   waiting for a resume still in flight; a full wake (`NSWorkspace.didWakeNotification`)
 ///   resumes them, each through its cooldown gate. While quitting, a sleep waits for the quit's
 ///   stops instead.
+/// - **Update checks** (`updates`): started 5 s after launch has finished (`updateLaunchDelay`),
+///   never holding it up, so the launch routing's station window is already open when a result
+///   shows, and the network has had time to come up after a login; a sleep cancels their timer
+///   (`NSWorkspace.willSleepNotification`) and a full wake sets it again; a quit stops them first,
+///   so it never waits on one. Results show in `updateWindow`, never a modal alert.
 /// - SIGPIPE is ignored, so a closed stdout or stderr can't kill the app mid-session.
 /// - Closing the last window doesn't quit; a closed window's session stops through `release`.
 ///   Closing the last station window opens the Stations window (`stationWindows`), except while
@@ -45,10 +50,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Test-only (`NOCTULE_TEST_PRESENT_SHEET`): station windows present a sheet once open.
     let presentsTestSheet: Bool
     let launch = LaunchRoute()
+    /// Asks the release feed for a newer version (update-check design §5); Settings shows its state.
+    let updates: UpdateChecker
+    private let updateWindow = UpdateWindowController()
 
     private var signalSources: [DispatchSourceSignal] = []
     private var power: SystemPowerObserver?
     private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+    /// How long after launch the first update check waits.
+    static let updateLaunchDelay: Duration = .seconds(5)
     /// The quit's `stopAll()`, once quitting.
     private var quitStop: Task<Void, Never>?
     /// True from the moment a quit starts stopping sessions (`applicationShouldTerminate`, or the
@@ -96,6 +107,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingsRoot = environment.recordingsRoot
         presentsTestSheet = environment.presentsTestSheet
         directory = StationDirectory(settings: environment.settings, registry: registry)
+        let (updateConfiguration, updateNotes) = UpdateCheckConfiguration.resolve(
+            variables: ProcessInfo.processInfo.environment, infoDictionary: Bundle.main.infoDictionary ?? [:])
+        for note in updateNotes { fputs("NoctuleScan: test override: \(note)\n", stderr) }
+        let window = updateWindow
+        let checker = UpdateChecker(
+            configuration: updateConfiguration,
+            // The same app.json actor as the rest of the app.
+            preferences: environment.settings as? any UpdatePreferencesStore ?? InMemoryUpdatePreferences(),
+            fetcher: URLSessionReleaseFetcher(userAgent: "NoctuleScan/\(updateConfiguration.runningVersionText)"),
+            present: { result, trigger in window.show(result, trigger: trigger) },
+            log: { text in fputs(UpdateCheckLog.line(text) + "\n", stderr) })
+        window.skip = { [weak checker] version in Task { await checker?.skip(version) } }
+        updates = checker
         super.init()
         signalSources = installTerminationSignals { [weak self] _ in
             terminateFromRunLoop()
@@ -121,15 +145,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         power = observer
         // The one wake signal: a full wake. (IOKit's has-powered-on also arrives on dark wakes.)
+        let updates = updates
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { gate.handle(.wake) {} }
+            MainActor.assumeIsolated {
+                gate.handle(.wake) {}
+                updates.handleWake()
+            }
+        }
+        // The update timer's clock runs during dark wakes; cancel it before sleep, so only the full
+        // wake above sets it again.
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { updates.handleSleep() }
+        }
+        // After the launch routing has opened its window, so a result shows in front of it; a quit
+        // before then stops the checker, and `start()` then does nothing.
+        Task {
+            try? await Task.sleep(for: Self.updateLaunchDelay)
+            await updates.start()
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         power?.stop()
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -139,6 +180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// editor or a confirmation), stop every session anyway (`PSI,0`, TEARDOWN; at most 15 s) and
     /// exit 0, so a signal never leaves the app running with the scanner session open.
     func exitIfTerminateRefused(after grace: Duration = .seconds(2)) async {
+        // Quitting either way: no update check starts, logs or shows during the grace.
+        updates.stop()
         try? await Task.sleep(for: grace)
         guard quitStop == nil else { return }
         fputs("NoctuleScan: quit was refused (a sheet or dialog is open); stopping sessions and exiting\n", stderr)
@@ -150,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        updates.stop()
         // A second request while the first is stopping sessions: that one's reply covers both.
         guard quitStop == nil else { return .terminateLater }
         isQuitting = true

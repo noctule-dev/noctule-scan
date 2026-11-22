@@ -680,4 +680,78 @@ private func openFiles(of pid: Int32) async -> String? {
         #expect(!commands.contains { $0.hasPrefix("VOL") }, "\(commands)")
         #expect(run.cooldownFiles == [], "\(run.cooldownFiles)")
     }
+
+    // MARK: The update check
+
+    /// A private settings directory with no test feed: the app never asks for a release, says so
+    /// once at launch, logs no check, and quits in order. No scanner is behind the station's port.
+    @Test func updateCheckOffWithPrivateSettings() async throws {
+        let run = try await USBAppRun.make()
+        defer { run.cleanUp() }
+        var app: Subprocess?
+        do {
+            let launched = try run.launchApp()
+            app = launched
+            let started = await run.waitForLock(by: launched.process.processIdentifier, within: 30)
+            #expect(started, "the app never started the station; app: \(launched.stderr)")
+            // Long enough for a launch check (5 s after launch), had one started, to log its line.
+            try? await Task.sleep(for: .seconds(8))
+            let stopped = await terminate(launched, within: 15) { "" }
+            app = nil
+            #expect(stopped.exited, "the app didn't exit within 15 s; app: \(stopped.stderr)")
+            #expect(stopped.status == 0, "exit status \(stopped.status); app: \(stopped.stderr)")
+            #expect(stopped.stderr.contains(
+                "NoctuleScan: test override: no update checks with a private NOCTULE_SETTINGS_DIR"),
+                    "app: \(stopped.stderr)")
+            #expect(!stopped.stderr.contains("update check:"), "app: \(stopped.stderr)")
+        } catch {
+            Issue.record(error)
+        }
+        if let app {
+            app.kill()
+            _ = await app.finish()
+        }
+    }
+
+    /// A test feed (a file in the run's directory, fictional notes) newer than the version the
+    /// test gives the app: the launch check finds it and logs it, the station still starts, and
+    /// SIGTERM exits 0 with the Software Update window open. Nothing reaches the network.
+    @Test func updateCheckUsesTheTestFeed() async throws {
+        let run = try await USBAppRun.make()
+        defer { run.cleanUp() }
+        let feed = run.root.appending(path: "latest.json")
+        let release: [String: Any] = [
+            "tag_name": "v1.0.0", "prerelease": false, "draft": false,
+            "html_url": "https://github.com/noctule-dev/noctule-scan/releases/tag/v1.0.0",
+            "body": "## Fictional notes\n\n- A **made-up** change for the test.",
+        ]
+        try JSONSerialization.data(withJSONObject: release).write(to: feed)
+        var app: Subprocess?
+        do {
+            let launched = try run.launchApp(extra: [
+                "NOCTULE_TEST_UPDATE_FEED": feed.absoluteString,
+                "NOCTULE_TEST_APP_VERSION": "0.9.0",
+            ])
+            app = launched
+            // The launch check waits 5 s after launch.
+            let found = await launched.waitForStderr(within: 30) {
+                $0.contains("update check: Noctule Scan 1.0.0 is available")
+            }
+            #expect(found, "no update check line; app: \(launched.stderr)")
+            let started = await run.waitForLock(by: launched.process.processIdentifier, within: 30)
+            #expect(started, "the app never started the station; app: \(launched.stderr)")
+            let stopped = await terminate(launched, within: 15) { "" }
+            app = nil
+            #expect(stopped.exited, "the app didn't exit within 15 s; app: \(stopped.stderr)")
+            #expect(stopped.status == 0, "exit status \(stopped.status); app: \(stopped.stderr)")
+            #expect(stopped.stderr.contains("NoctuleScan: test override: NOCTULE_TEST_UPDATE_FEED="),
+                    "app: \(stopped.stderr)")
+        } catch {
+            Issue.record(error)
+        }
+        if let app {
+            app.kill()
+            _ = await app.finish()
+        }
+    }
 }

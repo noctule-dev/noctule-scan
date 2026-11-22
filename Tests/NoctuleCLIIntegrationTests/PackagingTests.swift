@@ -31,6 +31,7 @@ func repositoryFile(_ path: String) throws -> URL {
         #expect(plist["CFBundleIdentifier"] as? String == "app.noctule.scan")
         #expect(plist["CFBundleShortVersionString"] as? String == "0.0.0")
         #expect(plist["CFBundleVersion"] as? String == "0")
+        #expect(plist["NoctuleFullVersion"] as? String == "0.0.0")
     }
 
     @Test func oldIdentifierIsGone() throws {
@@ -952,10 +953,11 @@ func porcelain(_ repo: URL) async throws -> String {
     try await run(tool("git"), ["-C", repo.path, "status", "--porcelain"]).stdout
 }
 
-private func bundleVersions(_ app: URL) throws -> (short: String?, build: String?) {
+private func bundleVersions(_ app: URL) throws -> (short: String?, build: String?, full: String?) {
     let data = try Data(contentsOf: app.appending(path: "Contents/Info.plist"))
     let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
-    return (plist?["CFBundleShortVersionString"] as? String, plist?["CFBundleVersion"] as? String)
+    return (plist?["CFBundleShortVersionString"] as? String, plist?["CFBundleVersion"] as? String,
+            plist?["NoctuleFullVersion"] as? String)
 }
 
 extension DiskImageTests {
@@ -1113,7 +1115,13 @@ extension DiskImageTests {
             let versions = try bundleVersions(app)
             #expect(versions.short == "0.3.0")
             #expect(versions.build == "7")
+            #expect(versions.full == "0.3.0-beta.1")
             #expect(FileManager.default.fileExists(atPath: dmg.path))
+            try await withMountedImage(dmg) { mount in
+                let inside = try bundleVersions(mount.appending(path: "Noctule Scan.app"))
+                #expect(inside.short == "0.3.0")
+                #expect(inside.full == "0.3.0-beta.1")
+            }
             let calls = stubs.calls()
             #expect(inOrder(calls, [
                 "security find-identity",
@@ -1206,7 +1214,19 @@ extension DiskImageTests {
                 let versions = try bundleVersions(mount.appending(path: "Noctule Scan.app"))
                 #expect(versions.short == "0.2.0")
                 #expect(versions.build == "12")
+                #expect(versions.full == "0.2.0")
             }
+        }
+
+        @Test func wrongFullVersionInsideTheDMGFails() async throws {
+            let stubs = try StubTools()
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0", "--build", "12"], stubs, repo, ["STUB_PLUTIL_NOOP_KEY": "NoctuleFullVersion"])
+            #expect(result.status == 1)
+            #expect(result.stderr.contains("release: the app in the DMG says its full version is 0.0.0, expected 0.2.0"), "\(result.stderr)")
+            #expect(!result.stdout.contains("sha256:"))
+            #expect(try await attachedImages(under: stubs.directory) == false)
         }
 
         @Test func wrongBuildInsideTheDMGFails() async throws {
