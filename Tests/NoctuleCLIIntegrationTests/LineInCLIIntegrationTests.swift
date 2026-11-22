@@ -41,7 +41,7 @@ private func jackArrivals(_ path: String, reads: Int, limit: Double) -> [Continu
     var arrivals: [ContinuousClock.Instant] = []
     var buffer = [UInt8](repeating: 0, count: 65_536)
     while arrivals.count < reads, ContinuousClock.now < deadline {
-        let count = recv(fd, &buffer, buffer.count, 0)
+        let count = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: a dispatch thread
         if count > 0 { arrivals.append(.now) } else if count == 0 { break }
     }
     return arrivals

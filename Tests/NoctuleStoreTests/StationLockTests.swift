@@ -81,7 +81,7 @@ private final class Output: Sendable {
         // hold the flock and could make the child's LOCK_NB fail.
         let output = Output()
         pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
+            let data = handle.availableData  // off the cooperative pool: a readability handler
             if data.isEmpty { handle.readabilityHandler = nil; return }
             output.append(String(decoding: data, as: UTF8.self))
         }

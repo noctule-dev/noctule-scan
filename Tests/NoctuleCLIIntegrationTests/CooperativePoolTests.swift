@@ -54,20 +54,27 @@ import Testing
     }
 
     /// Text one of the checks below needs, a cheap filter before the expression.
-    private static let tokens = ["waitUntilExit(", "readDataToEndOfFile(", "readToEnd(", "readData(", "read(upToCount:",
-                                 "availableData", "sleep(", "poll(", "waitpid(", "DispatchSemaphore(", "DispatchGroup(",
-                                 ".wait(", ".sync"]
+    private static let tokens = ["waitUntilExit(", "readDataToEndOfFile(", ".readToEnd(", "readData(", "read(upToCount:",
+                                 "availableData", "sleep(", "poll(", "waitpid(", "recv(", "recvfrom(", "accept(",
+                                 "DispatchSemaphore(", "DispatchGroup(",
+                                 ".wait()", ".wait(timeout:", ".sync(execute:", "RunLoop"]
 
     /// Whether a line of code (comments and strings taken out) holds a blocking call.
     static func blocks(_ code: String) -> Bool {
-        tokens.contains { code.contains($0) } && code.contains(blocking)
+        guard tokens.contains(where: { code.contains($0) }) else { return false }
+        // A declaration (`func accept(`) isn't a call.
+        let code = code.contains("func ") ? code.replacing(/func\s+\w+\(/, with: "func (") : code
+        return code.contains(blocking)
     }
 
-    /// The checks below, in a line of code, with comments and string literals taken out.
+    /// The checks below, in a line of code, with comments and string literals taken out. A
+    /// `sync { }` on a serial queue used as a lock (the mocks' `core.sync`) is a short critical
+    /// section, not a wait, and isn't flagged; `sync(execute:)`, a semaphore's or group's
+    /// `wait()`, and a run loop's `run` are.
     private static var blocking: Regex<AnyRegexOutput> { try! Regex(
-        #"waitUntilExit\(|readDataToEndOfFile\(|readToEnd\(|readData\(|read\(upToCount:|availableData\b|"#
-        + #"Thread\.sleep\(|(^|[^.\w])(usleep|sleep|nanosleep|poll|waitpid)\(|DispatchSemaphore\(|DispatchGroup\(|"#
-        + #"\.wait\(|\.sync\s*\{"#) }
+        #"waitUntilExit\(|readDataToEndOfFile\(|\.readToEnd\(|readData\(|read\(upToCount:|availableData\b|"#
+        + #"Thread\.sleep\(|(^|[^.\w]|Darwin\.)(usleep|sleep|nanosleep|poll|waitpid|recv|recvfrom|accept)\(|DispatchSemaphore\(|"#
+        + #"DispatchGroup\(|\.wait\(\)|\.wait\(timeout:|\.sync\(execute:|RunLoop\.(current|main)\.run"#) }
 
     /// Strips string literals (single-line, raw and multi-line) and comments (line and block)
     /// from Swift source, line by line, keeping line numbers.
@@ -115,23 +122,31 @@ import Testing
         }
     }
 
-    /// No test here waits by blocking its thread. A blocking call may stay only on a thread of its
-    /// own (a fake's loop, a dispatch queue, a pipe's readability handler), marked on its line with
-    /// `// off the cooperative pool`.
+    /// The marker that allows a blocking call on its line: the call runs off the cooperative pool
+    /// (on a `Thread` of its own, a dispatch queue, a pipe's readability handler) or blocks only
+    /// for an instant by design. Put it on the line itself, with a word on why.
+    static let allowMarker = "// off the cooperative pool"
+
+    /// No test, in any test target, waits by blocking its thread: Swift Testing runs them all on
+    /// the cooperative pool (one thread per core, three on the CI runner), and one test's blocking
+    /// wait stalls every other test and fake in its process (LESSONS.md 2026-11-21, 2026-11-22).
+    /// A deliberate blocking call carries `allowMarker` on its line.
     @Test func noTestWaitsByBlockingItsThread() throws {
-        let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let tests = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
         var offenders: [String] = []
-        let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        let walker = try #require(FileManager.default.enumerator(at: tests, includingPropertiesForKeys: nil))
+        let files = walker.compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" && $0.lastPathComponent != "CooperativePoolTests.swift" }
         for file in files {
             let source = try String(contentsOf: file, encoding: .utf8)
             let lines = source.components(separatedBy: "\n")
             for (index, code) in Self.codeLines(source).enumerated() where Self.blocks(code) {
-                guard !lines[index].contains("// off the cooperative pool") else { continue }
-                offenders.append("\(file.lastPathComponent):\(index + 1): \(lines[index].trimmingCharacters(in: .whitespaces))")
+                guard !lines[index].contains(Self.allowMarker) else { continue }
+                let target = file.deletingLastPathComponent().lastPathComponent
+                offenders.append("\(target)/\(file.lastPathComponent):\(index + 1): \(lines[index].trimmingCharacters(in: .whitespaces))")
             }
         }
-        #expect(files.count > 10, "found only \(files.count) test files in \(directory.path)")
+        #expect(files.count > 50, "found only \(files.count) test files under \(tests.path)")
         #expect(offenders.isEmpty, "blocking waits on a cooperative thread:\n\(offenders.joined(separator: "\n"))")
     }
 
@@ -139,11 +154,17 @@ import Testing
     @Test func theScanSeesCodeOnly() {
         let flagged = [
             "_ = poll(nil, 0, 20)", "usleep(20_000)", "sleep(1)", "nanosleep(&t, nil)", "p.waitUntilExit()",
-            "let d = h.availableData", "Thread.sleep(forTimeInterval: 1)", "s.wait()", "q.sync { }", "waitpid(pid, &s, 0)",
+            "let d = h.availableData", "Thread.sleep(forTimeInterval: 1)", "s.wait()", "g.wait(timeout: .now() + 1)",
+            "waitpid(pid, &s, 0)", "let all = try h.readToEnd()",
+            "_ = Darwin.poll(&d, 1, 10)", "Darwin.usleep(5)", "q.sync(execute: work)", "RunLoop.current.run(until: d)",
+            "let n = recv(fd, &b, 64, 0)", "let c = Darwin.accept(fd, nil, nil)",
         ]
         let clean = [
             "try await Task.sleep(for: .seconds(1))", "let x = 1  // usleep(1)", "/* poll( */ let y = 2",
             #"let s = "proc.wait()""#, ##"let r = #"sleep(1)"#"##, "func snooze() {}", "let asleep = now",
+            "core.sync { $0.log }", "state.sync(with: x)", "case .wait(let remaining):", "return .wait(.seconds(7))",
+            "await Self.wait(up: limit) { done }", "func readToEnd(_ fd: Int32) async -> Data",
+            "func accept(within limit: Duration) async -> Int32? {",
         ]
         for line in flagged { #expect(Self.blocks(Self.codeLines(line)[0]), "missed: \(line)") }
         for line in clean { #expect(!Self.blocks(Self.codeLines(line)[0]), "flagged: \(line)") }

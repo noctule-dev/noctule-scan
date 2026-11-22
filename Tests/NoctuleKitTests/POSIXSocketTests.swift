@@ -70,7 +70,7 @@ private func offThePool<T: Sendable>(_ body: @escaping @Sendable () -> T) async 
 private func readOnce(_ fd: Int32, timeout: Duration = .seconds(2)) async -> ReadOutcome {
     await offThePool {
         var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&descriptor, 1, milliseconds(timeout))
+        let ready = poll(&descriptor, 1, milliseconds(timeout))  // off the cooperative pool: run through offThePool
         if ready == 0 { return .timeout }
         if ready < 0 { return .error(errno) }
         var buffer = [UInt8](repeating: 0, count: 4096)
@@ -128,8 +128,8 @@ private final class LoopbackListener: Sendable {
         let fd = self.fd
         let accepted: Int32 = await offThePool {
             var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-            guard poll(&descriptor, 1, milliseconds(timeout)) == 1 else { return -1 }
-            let client = Darwin.accept(fd, nil, nil)
+            guard poll(&descriptor, 1, milliseconds(timeout)) == 1 else { return -1 }  // off the cooperative pool: run through offThePool
+            let client = Darwin.accept(fd, nil, nil)  // off the cooperative pool: run through offThePool
             if client >= 0 {
                 var one: Int32 = 1
                 setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
@@ -269,7 +269,7 @@ private let unansweredLoopbackWaits = Task<Bool, Never> { await offThePool(probe
     }
     guard result != 0, errno == EINPROGRESS else { return false }
     var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-    return poll(&descriptor, 1, 200) == 0
+    return poll(&descriptor, 1, 200) == 0  // off the cooperative pool: run through offThePool
 }
 
 /// How many of this process's TCP sockets are connected, or connecting, to `host`:`port` (read

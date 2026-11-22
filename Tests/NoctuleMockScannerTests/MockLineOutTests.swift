@@ -106,7 +106,7 @@ private final class JackClient: Sendable {
         var bytes: [UInt8] = []
         var buffer = [UInt8](repeating: 0, count: 65_536)
         while ContinuousClock.now < deadline {
-            let count = recv(fd, &buffer, buffer.count, 0)
+            let count = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: a dispatch thread
             if count > 0 {
                 if waitingForFirstByte {
                     waitingForFirstByte = false
