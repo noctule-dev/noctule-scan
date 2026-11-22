@@ -19,36 +19,41 @@ import Testing
 
     // MARK: - Fakes
 
-    /// An input listing the test changes. `hold()` makes the next `inputs()` call wait until
-    /// `release()`, as a slow Core Audio listing would, so a test can stop the source mid-decision.
+    /// An input listing the test changes. `hold()` makes the next `inputs()` call wait until the task
+    /// that called it is cancelled, as a slow Core Audio listing that a stop lands during would, so a
+    /// test can stop the source mid-decision whatever the pool's other threads are doing.
     final class Inputs: AudioInputListing {
         private struct State {
             var devices: [AudioInputDevice]
-            /// Set by `hold()`; the next `inputs()` takes it and waits on it.
-            var gate: DispatchSemaphore?
-            var waitingOn: DispatchSemaphore?
+            /// Set by `hold()`; the next `inputs()` takes it and waits.
+            var hold = false
+            var holding = false
         }
         private let state: Mutex<State>
         init(_ devices: [AudioInputDevice]) { state = Mutex(State(devices: devices)) }
 
         func inputs() -> [AudioInputDevice] {
-            let gate = state.withLock { s -> DispatchSemaphore? in
-                defer { s.gate = nil }
-                s.waitingOn = s.gate
-                return s.gate
+            let held = state.withLock { s -> Bool in
+                defer { s.hold = false }
+                s.holding = s.hold
+                return s.hold
             }
-            // Bounded: a test that fails before its release mustn't leave the source's task blocked for good.
-            _ = gate?.wait(timeout: .now() + 10)  // off the cooperative pool: a held listing, by design (one test, about 100 ms)
+            if held {
+                // Called on the source's own task, so this sees the stop's cancellation. Bounded: a
+                // test that fails before its stop mustn't leave the task blocked for good.
+                let deadline = ContinuousClock.now + .seconds(10)
+                while !Task.isCancelled, ContinuousClock.now < deadline {
+                    usleep(1_000)  // off the cooperative pool: a held listing, by design (one test, until its stop)
+                }
+                state.withLock { $0.holding = false }
+            }
             return state.withLock { $0.devices }
         }
 
         func set(_ new: [AudioInputDevice]) { state.withLock { $0.devices = new } }
-        func hold() { state.withLock { $0.gate = DispatchSemaphore(value: 0) } }  // off the cooperative pool: the hold, released by the test
+        func hold() { state.withLock { $0.hold = true } }
         /// Whether an `inputs()` call is waiting on `hold()`.
-        var isHeld: Bool { state.withLock { $0.waitingOn != nil } }
-        func release() {
-            state.withLock { s in defer { s.waitingOn = nil }; return s.waitingOn }?.signal()
-        }
+        var isHeld: Bool { state.withLock { $0.holding } }
     }
 
     struct FakeEngineError: Error, CustomStringConvertible {
@@ -507,8 +512,8 @@ import Testing
     /// The held listing blocks the source's own task, which runs on the cooperative pool (it calls
     /// the listing synchronously, as Core Audio is called), so the stop needs another thread to
     /// arrive: it can't run in a one-thread pool (`LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where it
-    /// deadlocked the whole product). The release comes from a dispatch thread, so the blocked
-    /// pool thread is let go even when the pool is busy (LESSONS.md 2026-11-22).
+    /// deadlocked the whole process before the hold was bounded). The listing answers only once
+    /// the stop has cancelled the source's task (LESSONS.md 2026-11-22).
     @Test(.disabled(if: ProcessInfo.processInfo.environment["LIBDISPATCH_COOPERATIVE_POOL_STRICT"] == "1",
                     "needs a second cooperative thread for the stop to arrive"))
     func stopWhileDecidingNeverStartsTheEngine() async throws {
@@ -525,11 +530,14 @@ import Testing
             await source.stop()
             stopped.withLock { $0 = true }
         }
-        // Let the stop's cancellation land, then let the listing answer with the device present,
-        // released from a dispatch thread (the waiting listing holds a cooperative one).
-        let inputs = rig.inputs
-        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(100)) { inputs.release() }
-        try await waitUntil("stop() to return", timeout: .seconds(1)) { stopped.withLock { $0 } }
+        // The held listing answers, with the device present, once the stop's cancellation has landed
+        // on the source's task: never before, however late the stop's own task gets a thread (on the
+        // runner a timed release came first, and the engine rightly started before any stop).
+        // Not a speed check: what is pinned is that the stop returns and no engine starts. The held
+        // listing keeps one cooperative thread, and on the 3-core runner the other two were often
+        // busy with LineInPipelineTests' long synchronous checks, so the stop's own task waited
+        // more than a second for a thread (10 of 10 runner passes, run 45019776194).
+        try await waitUntil("stop() to return", timeout: .seconds(15)) { stopped.withLock { $0 } }
         #expect(rig.engines.made.isEmpty)
         #expect(rig.engines.starts.isEmpty)
         // Nothing queued before the stop acts after it.

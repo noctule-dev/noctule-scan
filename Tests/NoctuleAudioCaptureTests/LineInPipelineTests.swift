@@ -70,12 +70,17 @@ import NoctuleAudioCapture
         #expect(out.levels.count == 30)
     }
 
-    @Test func fortyFourOneHasNoDrift() {
+    /// A minute of audio, seconds of CPU on the runner: fed on a dispatch thread, as the ten-minute
+    /// check is, so it holds no cooperative thread the line-in source's tests need.
+    @Test func fortyFourOneHasNoDrift() async {
         let fmt = format(44_100, channels: 2)
         let pipeline = LineInPipeline(inputFormat: fmt, channel: .both, ssrc: 1)
         let start = ContinuousClock.now
         let t = tone(440, amplitude: 0.5, rate: 44_100)
-        let out = feed(pipeline, format: fmt, seconds: 60, frames: 512, start: start) { _, i in t(i) }
+        nonisolated(unsafe) let work = { feed(pipeline, format: fmt, seconds: 60, frames: 512, start: start) { _, i in t(i) } }
+        let out = await withCheckedContinuation { (continuation: CheckedContinuation<(chunks: [AudioChunk], levels: [LineInLevel]), Never>) in
+            DispatchQueue.global().async { continuation.resume(returning: work()) }
+        }
         let total = out.chunks.reduce(0) { $0 + $1.samples.count }
         #expect(abs(total - 480_000) <= 320, "got \(total) samples")
         #expect(out.chunks.allSatisfy { $0.samples.count == 320 })
