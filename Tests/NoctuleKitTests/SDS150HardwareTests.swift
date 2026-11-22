@@ -470,8 +470,10 @@ extension SDS150HardwareTests {
         // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
         @Test
         func passesWhenKALRestartsTheLifetime() async throws {
+            let sent = Mutex(-1)
             let mock = try await withMockHandheld(personality: keepAliveMock(), clock: .real()) { path in
                 let report = try await shortKeepAliveCheck(path)
+                sent.withLock { $0 = report.keepAlives }
                 #expect(report.pushes > 10)
                 // At most one per 150 ms over 1.2 s, and not many fewer.
                 #expect(report.keepAlives >= 5 && report.keepAlives <= 8, "\(report.summary)")
@@ -484,7 +486,9 @@ extension SDS150HardwareTests {
             #expect(Array(commands.prefix(2)) == ["MDL", "PSI,50"], "\(commands)")
             #expect(commands.last == "PSI,0", "\(commands)")
             #expect(commands.dropFirst(2).dropLast().allSatisfy { $0 == "KAL" }, "\(commands)")
-            #expect(commands.filter { $0 == "KAL" }.count >= 7, "\(commands)")
+            // Every KAL the check wrote reached the mock. Not a fixed number: how many a 150 ms timer
+            // fits in 1.2 s depends on how late it wakes (six under background priority; local sweep).
+            #expect(commands.filter { $0 == "KAL" }.count == sent.withLock { $0 }, "\(commands)")
             expectNothingForbidden(commands)
             #expect(await mock.activeSubscribers == 0)
         }
