@@ -78,7 +78,7 @@ private final class UndrainedPTY: Sendable {
         // as `PseudoTerminal` does.
         var opened = posix_openpt(O_RDWR | O_NOCTTY)
         for _ in 0..<100 where opened < 0 && errno == -6 {
-            Thread.sleep(forTimeInterval: 0.001)
+            Thread.sleep(forTimeInterval: 0.001)  // off the cooperative pool: a 1 ms retry, by design
             opened = posix_openpt(O_RDWR | O_NOCTTY)
         }
         master = opened
@@ -245,12 +245,12 @@ private final class LateReader: Sendable {
 
     init(_ pty: UndrainedPTY, after delay: Duration, for limit: Duration = .milliseconds(600)) {
         let thread = Thread { [self] in
-            Thread.sleep(forTimeInterval: delay / .seconds(1))
+            Thread.sleep(forTimeInterval: delay / .seconds(1))  // off the cooperative pool: its own Thread
             let deadline = ContinuousClock.now + limit
             while ContinuousClock.now < deadline {
                 let chunk = pty.drain()
                 collected.withLock { $0.append(chunk) }
-                Thread.sleep(forTimeInterval: 0.005)
+                Thread.sleep(forTimeInterval: 0.005)  // off the cooperative pool: its own Thread
             }
             done.withLock { $0 = true }
         }
@@ -261,7 +261,7 @@ private final class LateReader: Sendable {
     var text: String { collected.withLock { String(decoding: $0, as: UTF8.self) } }
 }
 
-@Suite struct SerialTransportTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialTransportTests {
     @Test func roundTrip() async throws {
         let pty = try PseudoTerminal()
         defer { pty.close() }
@@ -703,8 +703,10 @@ private final class LateReader: Sendable {
 
     /// When the device went away there is nothing to wait for: the descriptor was closed at once,
     /// and neither then nor at the owner's `close()` is the output queue asked.
-    @Test(.skippedOnCIRunner("a 100 ms bound on close(); too tight on the CI runner"))
-    func noDrainAfterTheDeviceWentAway() async throws {
+    /// `queue.count == 0` (the output queue never asked) is the proof that nothing drained; the
+    /// time is only a bound against a hang (a 100 ms bound was too tight on the CI runner;
+    /// LESSONS.md 2026-11-22).
+    @Test func noDrainAfterTheDeviceWentAway() async throws {
         let pty = try PseudoTerminal()
         defer { pty.close() }
         let path = pty.slavePath
@@ -722,7 +724,7 @@ private final class LateReader: Sendable {
             #expect(descriptors(on: path) == 1)  // the holder's
             let began = ContinuousClock.now
             await transport.close()
-            #expect(ContinuousClock.now - began < .milliseconds(100))
+            #expect(ContinuousClock.now - began < .seconds(2))
             #expect(queue.count == 0)
         }
         await transport.close()

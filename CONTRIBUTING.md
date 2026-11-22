@@ -5,7 +5,7 @@ Thanks for helping. Noctule Scan controls, listens to and logs Uniden SDS-series
 ## Before you start
 
 - **Open an issue first for anything large** (a new feature, a new scanner model, a change to how the app talks to the scanner, a new dependency), so we can agree on the approach before you spend time on it. Small fixes can go straight to a pull request.
-- Bugs and feature requests go through the issue templates. Security problems go through private vulnerability reporting ([`SECURITY.md`](SECURITY.md)), never a public issue.
+- Bugs and feature requests go through the issue templates. Questions, ideas that aren't yet a concrete request, and what you've built go to [Discussions](https://github.com/noctule-dev/noctule-scan/discussions). Security problems go through private vulnerability reporting ([`SECURITY.md`](SECURITY.md)), never a public issue.
 - Everyone who takes part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build and test
@@ -91,4 +91,4 @@ git push --force-with-lease
 
 ## Pull requests
 
-Fill in the pull request template: the tests you ran, the mock first, the iOS build for shared code, signed-off commits, no real traffic, and a spec or lessons entry where the change needs one. CI builds and tests every pull request; changes under `.github/`, `packaging/` and `scripts/` also wait for the maintainer's review.
+Fill in the pull request template: the tests you ran, the mock first, the iOS build for shared code, signed-off commits, no real traffic, and a spec or lessons entry where the change needs one. CI builds and tests every pull request on a larger paid runner (`xcode-27-xlarge`; one that changes only documentation runs just the tests that check the repository's files and documentation), so a pull request from an outside contributor waits for the maintainer's approval before CI runs; changes under `.github/`, `packaging/` and `scripts/` also wait for the maintainer's review.

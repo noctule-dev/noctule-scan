@@ -6,7 +6,7 @@ import Testing
 @testable import NoctuleKit
 
 /// The fixtures are the design's §4.3 samples (sanitized names).
-@Suite struct MenuScreenTests {
+@Suite(.timeLimit(.minutes(3))) struct MenuScreenTests {
     private func screen(_ xml: String) throws -> MenuScreen {
         try MenuScreen(xml: XMLNode.parse(Data(xml.utf8)))
     }

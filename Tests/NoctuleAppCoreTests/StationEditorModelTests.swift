@@ -44,7 +44,7 @@ private func station(_ name: String, host: String? = "127.0.0.1") -> Station {
     return s
 }
 
-@Suite struct StationEditorModelTests {
+@Suite(.timeLimit(.minutes(3))) struct StationEditorModelTests {
     /// R18: saving an existing station applies only the editor's fields, so a view choice,
     /// saved filter or counts reset made in another window meanwhile survives.
     @MainActor @Test func saveKeepsFieldsTheEditorDoesNotOwn() async throws {
@@ -209,8 +209,25 @@ private func station(_ name: String, host: String? = "127.0.0.1") -> Station {
         #expect(leaked.isEmpty)
     }
 
+    /// The no-answer port stays taken for the test: nothing else (a mock starting at the same
+    /// moment) can bind it and answer.
+    @Test func theSilentPortCantBeTaken() throws {
+        let port = try silentUDPPort()
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        try #require(fd >= 0)
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_port = port.bigEndian
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        #expect(result != 0 && errno == EADDRINUSE, "another socket bound the silent port \(port)")
+    }
+
     @MainActor @Test func testConnectionNoAnswer() async throws {
-        let port = try closedUDPPort()
+        let port = try silentUDPPort()
         try await withEditor { model in
             model.draft = station("Nowhere", host: "127.0.0.1")
             model.draft.connection.udpPort = port
@@ -268,7 +285,7 @@ extension StationEditorModelTests {
                                          rebootDuration: .milliseconds(300))
         let mock = MockSDS200(scenario: .default, options: options)
         let ports = try await mock.start()
-        let closedPort = try closedUDPPort()
+        let closedPort = try silentUDPPort()
         var counters: [CountingTransport] = []
         var results: [ConnectionTest] = []
         // Nothing in here throws, so the mock is always stopped below.

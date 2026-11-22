@@ -12,7 +12,7 @@ import NoctuleStore
 @testable import NoctuleAppCore
 
 @MainActor
-@Suite(.serialized) struct StationSessionTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionTests {
     @Test func connectsAndShowsLiveState() async throws {
         let outcome = try await withSession { rig in
             rig.start()
@@ -187,7 +187,7 @@ import NoctuleStore
     }
 
     @Test func noAnswerOnDeadHost() async throws {
-        let port = try closedUDPPort()
+        let port = try silentUDPPort()
         var setup = Setup()
         setup.udpPort = port
         let outcome = try await withSession(setup) { rig in

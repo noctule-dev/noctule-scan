@@ -14,7 +14,7 @@ private let nameRules = MenuScreen.InputRules(maxLength: 64, allowedCharacters: 
 private let rangeRules = MenuScreen.InputRules(maxLength: 5, allowedCharacters: "0123456789.",
                                                addedInformation: "          (mile)")
 
-@Suite struct MenuInputTests {
+@Suite(.timeLimit(.minutes(3))) struct MenuInputTests {
     @Test func sanitizeKeepsOnlyAllowedCharacters() {
         // The comma is in EnableKeys but is never sent; é isn't; the newline never is.
         #expect(MenuInput.sanitize("Fire, é North\n", rules: nameRules) == "Fire  North")

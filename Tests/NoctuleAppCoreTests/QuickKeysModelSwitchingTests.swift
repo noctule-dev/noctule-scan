@@ -4,7 +4,7 @@
 import Foundation
 import Synchronization
 import Testing
-import NoctuleKit
+@testable import NoctuleKit
 import NoctuleMockScanner
 @testable import NoctuleAppCore
 
@@ -235,6 +235,15 @@ private func count(_ command: String, in commands: [String]) -> Int {
     commands.filter { $0 == command }.count
 }
 
+/// Waits for a poll to end (its last read, `last`, logged once more), so a fault armed right after is
+/// in place before the next poll's first read: these tests poll every second. Armed at a random
+/// moment between 150 ms polls, the fault came too late on a runner VM, the read it was meant to lose
+/// was answered and the poll went on (run 45019776194).
+private func waitForAPollToEnd(_ rig: QKSwitchRig, last: String) async throws {
+    let before = count(last, in: await rig.commands())
+    try await waitUntil("a poll to end (\(rig.label))") { await count(last, in: rig.commands()) > before }
+}
+
 private func child(_ index: UInt32, in favorites: MockFavorites) -> MockFavorites.ChildRow? {
     favorites.children.first { $0.index == index }
 }
@@ -282,6 +291,63 @@ private func everyRow(_ model: QuickKeysModel) -> [QuickKeyRow] {
         }
     }
     return rows
+}
+
+/// A click whose set queues for the client's request slot behind a read the mock never answers (QA's probe for
+/// I2 in the flaky-sweep review, made deterministic). Once armed, the model's `control()` just before the set
+/// (after `checkReads` calls for the pre-set check's reads) first starts a `GSI` the mock drops, waits until the mock has it (so it holds the slot), and
+/// then hands over the client. When the set is queued behind it (`requestsWaitingForTheSlot`), `interfere` runs
+/// on the main actor; then the `GSI` is cancelled, which frees the slot at once. Returns every command the mock
+/// received from the click on, after the click and every stopped loop have ended.
+@MainActor
+private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkReads: Int = 0,
+                                whileWaiting interfere: @MainActor (QuickKeysModel) throws -> Void,
+                                then check: @MainActor (QuickKeysModel, [String]) async throws -> Void) async throws {
+    // nil: disarmed; else the control calls still to pass before the one that holds the slot.
+    let armed = Mutex<Int?>(nil)
+    let held = Mutex<Task<Void, Never>?>(nil)
+    let client = rig.client
+    let commands = rig.commands
+    let model = QuickKeysModel(cacheURL: rig.cacheURL, pollInterval: .seconds(30))
+    model.attach(control: {
+        let hold = armed.withLock { armed -> Bool in
+            guard let left = armed else { return false }
+            armed = left == 0 ? nil : left - 1
+            return left == 0
+        }
+        if hold {
+            let mark = await commands().count
+            held.withLock { $0 = Task { _ = try? await client.scannerInfo() } }
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !(await commands().dropFirst(mark).contains("GSI")), ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        return client
+    })
+    model.open()
+    try await waitAllFresh(model, rig.label)
+    let mark = await rig.commands().count
+    await rig.setFaults(MockFaults(dropNextRequest: "GSI"))
+    armed.withLock { $0 = checkReads }
+    let click = Task { await model.toggle(row) }
+    do {
+        try await waitUntil("the set queued behind the held GSI (\(rig.label))") {
+            await client.requestsWaitingForTheSlot == 1
+        }
+        try interfere(model)
+    } catch {
+        held.withLock { $0?.cancel() }
+        await click.value
+        await shutDown(model)
+        throw error
+    }
+    held.withLock { $0?.cancel() }
+    await click.value
+    await model.quiesce()
+    await held.withLock { $0 }?.value
+    try await check(model, Array(await rig.commands().dropFirst(mark)))
+    await shutDown(model)
 }
 
 @MainActor
@@ -705,13 +771,16 @@ private func everyRow(_ model: QuickKeysModel) -> [QuickKeyRow] {
         }
     }
 
+    /// The click must come while the poll's lost `SQK` still holds it. With 300 ms timeouts a loaded
+    /// machine's click came after that poll had ended, during the next one (local sweep, bgload);
+    /// two-second timeouts hold the poll that long.
     @Test func aClickWaitsForThePollUnderWay() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             model.showList(1)
             try await waitAllFresh(model, rig.label)
-            try await waitUntil("a poll of list 1 (\(rig.label))") { await count("DQK,7,1", in: rig.commands()) >= 2 }
+            try await waitForAPollToEnd(rig, last: "DQK,7,1")
             let mark = await rig.commands().count
             // The next poll's SQK,7 goes unanswered, so the poll is under way for a command timeout.
             await rig.setFaults(MockFaults(dropNextRequest: "SQK"))
@@ -731,11 +800,19 @@ private func everyRow(_ model: QuickKeysModel) -> [QuickKeyRow] {
         }
     }
 
+    /// The click waits behind a poll held up by two unanswered `FQK`s; the close must come while it
+    /// is still queued, which is all this pins: a click still queued at the close sends nothing. (One
+    /// already past `perform`'s last check, waiting for the client's request slot, can still send its
+    /// set after the close; that gap is the product's, open in its own pull request.) With 300 ms
+    /// timeouts the window was 600 ms, which a slow runner overran: the poll had ended, the click had
+    /// sent its set while the pop-over was open, and only then did the close come (flake hunt on
+    /// hunt/flaky-1). Two-second timeouts keep the click queued for about four seconds.
     @Test func aClickStillWaitingWhenThePopoverClosesSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             try await waitAllFresh(model, rig.label)
+            try await waitForAPollToEnd(rig, last: "FQK")
             let mark = await rig.commands().count
             // The next poll's FQK goes unanswered twice: the poll is under way for two command timeouts.
             await rig.setFaults(MockFaults(dropNextRequest: "FQK", dropCount: 2))
@@ -757,11 +834,15 @@ private func everyRow(_ model: QuickKeysModel) -> [QuickKeyRow] {
         }
     }
 
+    /// As above: two-second timeouts keep the click queued while the menu arrives, so this pins that a
+    /// click still queued when the scanner enters a menu sends nothing. A click already past its last
+    /// check can still send after the menu (QA's I2; its own pull request), which this doesn't reach.
     @Test func aClickWaitingWhenTheScannerEntersAMenuSendsNothing() async throws {
-        try await onBothMocks(commandTimeout: .milliseconds(300)) { rig in
-            let model = makeModel(rig)
+        try await onBothMocks(commandTimeout: .seconds(2)) { rig in
+            let model = makeModel(rig, pollInterval: .seconds(1))
             model.open()
             try await waitAllFresh(model, rig.label)
+            try await waitForAPollToEnd(rig, last: "FQK")
             let mark = await rig.commands().count
             await rig.setFaults(MockFaults(dropNextRequest: "FQK", dropCount: 2))
             try await waitUntil("the poll's lost FQK (\(rig.label))") {
@@ -770,11 +851,74 @@ private func everyRow(_ model: QuickKeysModel) -> [QuickKeyRow] {
             let click = Task { await model.toggle(.list(4)) }
             try await waitUntil("the click waiting (\(rig.label))") { model.switchState(for: .list(4)) == .busy }
             // When its turn comes the row is checked again: in a menu, nothing is sent.
+            let beforeMenu = sets(Array(await rig.commands().dropFirst(mark))).count
             model.statusArrived(try inMenu())
             await click.value
-            #expect(sets(Array(await rig.commands().dropFirst(mark))).isEmpty, "\(rig.label)")
+            // Which side of the menu a set fell on tells a broken premise (the click had already
+            // sent while it looked busy) from a set sent after the menu came (a click past its last
+            // check, waiting for the request slot: the product gap its own pull request closes).
+            let all = sets(Array(await rig.commands().dropFirst(mark))).count
+            #expect(all == 0, "\(rig.label): \(beforeMenu) set(s) before the menu came, \(all - beforeMenu) after it")
             #expect(model.switchState(for: .list(4)) == .inMenu, "\(rig.label)")
             await shutDown(model)
+        }
+    }
+
+    // MARK: Decided at the slot (flaky-sweep review I2)
+
+    @Test func aClickHeldAtTheSlotSendsItsSetOnce() async throws {
+        try await onBothMocks(commandTimeout: .seconds(10)) { rig in
+            try await clickHeldAtTheSlot(rig, .list(4), whileWaiting: { _ in }) { model, after in
+                #expect(sets(after).count == 1, "\(rig.label): \(after)")
+                #expect(namesOnlyKey(sets(after).first.flatMap(setValues), 1, "2"), "\(rig.label): \(after)")
+                #expect(command(after: "FQK,", in: after) == "FQK", "\(rig.label): \(after)")
+                #expect(model.switchState(for: .list(4)) == .on, "\(rig.label)")
+                #expect(await rig.favorites().lists.first { $0.index == 4 }?.isOn == true, "\(rig.label)")
+                #expect(model.lastError == nil, "\(rig.label)")
+            }
+        }
+    }
+
+    @Test func aClickHeldAtTheSlotWhenThePopoverClosesSendsNothing() async throws {
+        try await onBothMocks(commandTimeout: .seconds(10)) { rig in
+            try await clickHeldAtTheSlot(rig, .list(4), whileWaiting: { $0.close() }) { _, after in
+                #expect(sets(after).isEmpty, "\(rig.label): \(after)")
+                #expect(await rig.favorites().lists.first { $0.index == 4 }?.isOn == false, "\(rig.label)")
+            }
+        }
+    }
+
+    @Test func aClickHeldAtTheSlotWhenTheScannerEntersAMenuSendsNothing() async throws {
+        try await onBothMocks(commandTimeout: .seconds(10)) { rig in
+            try await clickHeldAtTheSlot(rig, .list(4), whileWaiting: { $0.statusArrived(try inMenu()) }) { model, after in
+                #expect(sets(after).isEmpty, "\(rig.label): \(after)")
+                #expect(await rig.favorites().lists.first { $0.index == 4 }?.isOn == false, "\(rig.label)")
+                #expect(model.switchState(for: .list(4)) == .inMenu, "\(rig.label)")
+                // Nothing was sent, so nothing is unconfirmed.
+                #expect(model.lastError == nil, "\(rig.label)")
+            }
+        }
+    }
+
+    @Test func aClickHeldAtTheSlotWhenTheSessionDetachesSendsNothing() async throws {
+        try await onBothMocks(commandTimeout: .seconds(10)) { rig in
+            try await clickHeldAtTheSlot(rig, .list(4), whileWaiting: { $0.detach() }) { _, after in
+                #expect(sets(after).isEmpty, "\(rig.label): \(after)")
+                #expect(await rig.favorites().lists.first { $0.index == 4 }?.isOn == false, "\(rig.label)")
+            }
+        }
+    }
+
+    @Test func aSystemClickHeldAtTheSlotWhenThePopoverClosesSendsNothing() async throws {
+        try await onBothMocks(commandTimeout: .seconds(10)) { rig in
+            // The pre-set check's five reads come first and pass; the control call just before the set holds the slot.
+            try await clickHeldAtTheSlot(rig, .system(list: 1, system: 102), checkReads: 5,
+                                         whileWaiting: { $0.close() }) { _, after in
+                #expect(Array(after.prefix(6)) == ["GLT,FL", "GLT,SYS,1", "GLT,FL", "GLT,SYS,1", "GLT,FL", "GSI"],
+                        "the check passed, then the slot was held (\(rig.label)): \(after)")
+                #expect(sets(after).isEmpty, "\(rig.label): \(after)")
+                #expect(system(102, in: await rig.favorites())?.isOn == true, "\(rig.label)")
+            }
         }
     }
 

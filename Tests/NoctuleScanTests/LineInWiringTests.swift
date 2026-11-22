@@ -14,7 +14,7 @@ import Testing
 /// How the app picks its line-in pieces (line-in design §8): the system's, the mock's stream under the
 /// test override, or none under the kill-switch. The "system" pieces here are fakes that count their
 /// calls, so nothing opens an audio input or asks for the microphone.
-@Suite struct LineInWiringTests {
+@Suite(.timeLimit(.minutes(3))) struct LineInWiringTests {
     private final class SystemCalls: Sendable {
         private let counts = Mutex((sources: 0, listings: 0))
         var sources: Int { counts.withLock { $0.sources } }

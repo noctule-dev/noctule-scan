@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import NoctuleStore
 
-@Suite struct SettingsStoreTests {
+@Suite(.timeLimit(.minutes(3))) struct SettingsStoreTests {
     private func tempDir() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("noctule-settings-\(UUID().uuidString)", isDirectory: true)

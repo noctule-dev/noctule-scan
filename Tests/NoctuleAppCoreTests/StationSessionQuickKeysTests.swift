@@ -2,6 +2,8 @@
 // Copyright 2026 Sean Foley and the Noctule Scan contributors
 
 import Foundation
+import Observation
+import Synchronization
 import Testing
 import NoctuleKit
 import NoctuleMockScanner
@@ -126,6 +128,34 @@ struct StationSessionQuickKeysTests {
         let lastStop = try #require(outcome.commands.lastIndex(of: "PSI,0"))
         let after = outcome.commands[(lastStop + 1)...]
         #expect(!after.contains(where: isQuickKeyCommand), "\(Array(after))")
+    }
+
+    @Test func aStopDetachesTheQuickKeysAndTheMenuBeforeItsFirstAwait() async throws {
+        // A set or menu command still waiting for the client's slot is withheld from a stop's first synchronous step
+        // (`halt()`), not only from `performStop`'s phase change a task hop later (QA review of the slot guard, I1).
+        // Observation's `onChange` runs synchronously in `phase`'s `willSet`, the stop's first phase change, which
+        // comes before that setter's `didSet` detaches the models: whatever is detached then, `halt()` detached.
+        try await withSession(Setup(quickKeysPollInterval: .seconds(30))) { rig in
+            let session = rig.session
+            rig.start()
+            try await rig.waitConnected()
+            #expect(session.quickKeys.isAttached)
+            #expect(session.menu.isAttached)
+            let seen = Mutex<(quickKeys: Bool, menu: Bool)?>(nil)
+            withObservationTracking {
+                _ = session.phase
+            } onChange: {
+                MainActor.assumeIsolated {
+                    let attached = (session.quickKeys.isAttached, session.menu.isAttached)
+                    seen.withLock { $0 = attached }
+                }
+            }
+            try await rig.stopSession()
+            let atPhaseChange = try #require(seen.withLock { $0 }, "the stop changed the phase")
+            #expect(!atPhaseChange.quickKeys, "the quick keys detached by `halt()`, before the phase changed")
+            #expect(!atPhaseChange.menu, "the menu detached by `halt()`, before the phase changed")
+            #expect(!rig.isConnected)
+        }
     }
 
     @Test func theCacheFileIsPerStation() async throws {

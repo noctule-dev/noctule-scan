@@ -5,7 +5,7 @@ import Foundation
 import Testing
 @testable import NoctuleKit
 
-@Suite struct LineInMeterTests {
+@Suite(.timeLimit(.minutes(3))) struct LineInMeterTests {
     private func sine(amplitude: Float, frequency: Double = 1000, sampleRate: Double, seconds: Double) -> [Float] {
         let count = Int(sampleRate * seconds)
         return (0..<count).map { Float(Double(amplitude) * sin(2 * .pi * frequency * Double($0) / sampleRate)) }

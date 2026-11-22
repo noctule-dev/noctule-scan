@@ -13,7 +13,7 @@ private func gsiSerial() -> String {
 
 private let stsLine = "STS,011,A,,B,,C,\r"
 
-@Suite struct SerialResponseAssemblerTests {
+@Suite(.timeLimit(.minutes(3))) struct SerialResponseAssemblerTests {
     @Test func fieldsLine() {
         var a = SerialResponseAssembler()
         #expect(a.ingest(Data("MDL,SDS150\r".utf8)) == [.fields(command: "MDL", fields: ["SDS150"])])

@@ -12,7 +12,7 @@ import Testing
 @testable import NoctuleScan
 
 /// The Mac-style view's text, "Active now", and the view-choice save, without any views.
-@MainActor @Suite struct MacStyleTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct MacStyleTests {
     private func info(_ inner: String, attrs: String = #"Mode="Trunk Scan" V_Screen="trunk_scan""#) throws -> ScannerInfo {
         try ScannerInfo(xml: NoctuleKit.XMLNode.parse(Data("<ScannerInfo \(attrs)>\(inner)</ScannerInfo>".utf8)))
     }

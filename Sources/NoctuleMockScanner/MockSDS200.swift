@@ -38,6 +38,11 @@ public struct MockFaults: Sendable, Equatable {
     /// Serial mock only: this many seconds after that unplug a new port appears behind the same
     /// link path (without one, no client could find it; the executable requires `--serial-link`).
     public var replugAfter: Double?
+    /// Serial mock only: `unplugAfter` counts from the first subscribing `PSI` (any but `PSI,0`)
+    /// the mock receives, not from `start()`, so a test's "connected, then the cable goes" doesn't
+    /// depend on how quickly the client got going (`--fault unplug-after-psi=N[:M]`). Once only,
+    /// like `unplugAfter`.
+    public var unplugCountsFromFirstPSI: Bool
     /// Serial mock only: replies and pushes are written 7 bytes at a time.
     public var splitWrites: Bool
     /// Serial mock with a line-out only (`MockLineOut`): the jack carries only its idle hiss,
@@ -54,10 +59,12 @@ public struct MockFaults: Sendable, Equatable {
                 wedgeAudio: Bool = false, wedgeTakesControlDown: Bool = false,
                 dropNextReply: String? = nil, dropNextRequest: String? = nil, dropCount: Int = 1,
                 rejectNext: String? = nil, unplugAfter: Double? = nil, replugAfter: Double? = nil,
+                unplugCountsFromFirstPSI: Bool = false,
                 splitWrites: Bool = false, lineOutSilent: Bool = false, pushBeforeStop: Bool = false) {
         self.dropNextReply = dropNextReply; self.dropNextRequest = dropNextRequest; self.dropCount = dropCount
         self.rejectNext = rejectNext
         self.unplugAfter = unplugAfter; self.replugAfter = replugAfter; self.splitWrites = splitWrites
+        self.unplugCountsFromFirstPSI = unplugCountsFromFirstPSI
         self.lineOutSilent = lineOutSilent
         self.pushBeforeStop = pushBeforeStop
         self.stallPSIAfter = stallPSIAfter; self.keepaliveStatus = keepaliveStatus

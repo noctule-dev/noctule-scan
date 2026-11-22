@@ -16,7 +16,7 @@ import Testing
 /// fictional menu tree: what each click or key press sends, read from the mock's received commands.
 /// Every wait is bounded; every test stops the session and the mock on all paths and checks that
 /// no RTSP session leaked. All names are fictional.
-@MainActor @Suite(.serialized) struct MacMenuActionsTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(3))) struct MacMenuActionsTests {
     struct TimedOut: Error { let what: String }
     final class Flag { var value = false }
 

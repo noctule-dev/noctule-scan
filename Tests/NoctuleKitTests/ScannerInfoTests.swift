@@ -6,7 +6,7 @@ import Testing
 import NoctuleKitTestSupport
 @testable import NoctuleKit
 
-@Suite struct ScannerInfoTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerInfoTests {
     @Test func parsesRealTrunkCapture() throws {
         let info = try ScannerInfo(xml: XMLNode.parse(fixture("gsi-trunk-sds200-1.24.00.xml")))
         #expect(info.mode == "Trunk Scan"); #expect(info.screen == "trunk_scan")

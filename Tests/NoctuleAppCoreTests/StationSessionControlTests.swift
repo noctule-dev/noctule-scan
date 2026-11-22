@@ -25,7 +25,7 @@ private func softKeyStatus(_ labels: String) throws -> DisplayStatus {
 private final class Box<Value> { var value: Value? }
 
 @MainActor
-@Suite(.serialized) struct StationSessionControlTests {
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionControlTests {
     // MARK: Keys, levels, hold
 
     @Test func keysReachMock() async throws {

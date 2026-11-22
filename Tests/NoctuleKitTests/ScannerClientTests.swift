@@ -2,6 +2,7 @@
 // Copyright 2026 Sean Foley and the Noctule Scan contributors
 
 import Foundation
+import Synchronization
 import Testing
 import NoctuleKitTestSupport
 @testable import NoctuleKit
@@ -41,7 +42,7 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
     return await condition()
 }
 
-@Suite struct ScannerClientTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerClientTests {
     @Test func readsIdentity() async throws {
         let c = ScannerClient(transport: SimulatedScannerTransport.sds200()); try await c.connect()
         let m = try await c.modelInfo(); #expect(m.model == .sds200)
@@ -292,6 +293,72 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         #expect(ContinuousClock.now - start < .seconds(1))
     }
 
+    // MARK: onlyIf: decided at the slot (flaky-sweep review I2)
+
+    @Test func onlyIfIsDecidedOnceTheRequestHoldsTheSlot() async throws {
+        let t = SimulatedScannerTransport { _ in [] }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let wanted = Mutex(true)
+        let asked = Mutex(0)
+        let model = Task { try await c.modelInfo().reported }
+        #expect(await eventually { await t.sentCommands.count == 1 })
+        let set = Task {
+            try await c.setListKey(3, on: true, onlyIf: {
+                asked.withLock { $0 += 1 }
+                return wanted.withLock { $0 }
+            })
+        }
+        #expect(await eventually { await c.requestsWaitingForTheSlot == 1 })
+        // Asked nothing while it waits; the caller changes its mind meanwhile.
+        #expect(asked.withLock { $0 } == 0)
+        wanted.withLock { $0 = false }
+        await t.emit(reply(to: await t.sentCommands[0]))
+        #expect(try await model.value == "SDS200")
+        await #expect(throws: ScannerClientError.withheld(command: "FQK")) { try await set.value }
+        #expect(asked.withLock { $0 } == 1, "asked once, holding the slot")
+        #expect(await t.sentCommands.map(\.name) == ["MDL"], "nothing written for the withheld set")
+        // The slot is free again at once.
+        let version = Task { try await c.firmwareVersion() }
+        #expect(await eventually { await t.sentCommands.count == 2 })
+        await t.emit(reply(to: await t.sentCommands[1]))
+        #expect(try await version.value == "1.24.00")
+    }
+
+    @Test func onlyIfStillWantedSendsTheCommandOnce() async throws {
+        let t = SimulatedScannerTransport { command in
+            command.name == "FQK" ? [.fields(command: "FQK", fields: ["OK"])] : []
+        }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let asked = Mutex(0)
+        let model = Task { try await c.modelInfo().reported }
+        #expect(await eventually { await t.sentCommands.count == 1 })
+        let set = Task { try await c.setListKey(3, on: true, onlyIf: { asked.withLock { $0 += 1 }; return true }) }
+        #expect(await eventually { await c.requestsWaitingForTheSlot == 1 })
+        await t.emit(reply(to: await t.sentCommands[0]))
+        _ = try await model.value
+        try await set.value
+        #expect(asked.withLock { $0 } == 1)
+        let sent = await t.sentCommands
+        #expect(sent.map(\.name) == ["MDL", "FQK"])
+        #expect(sent.last?.arguments.count == 100)
+    }
+
+    @Test func everyStateChangingCallTakesOnlyIf() async throws {
+        let t = SimulatedScannerTransport { _ in [] }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let no: @Sendable () -> Bool = { false }
+        await #expect(throws: ScannerClientError.withheld(command: "FQK")) { try await c.setListKey(1, on: true, onlyIf: no) }
+        await #expect(throws: ScannerClientError.withheld(command: "SQK")) {
+            try await c.setSystemKey(1, inList: 2, on: false, onlyIf: no)
+        }
+        await #expect(throws: ScannerClientError.withheld(command: "DQK")) {
+            try await c.setDepartmentKey(1, inList: 2, system: 3, on: true, onlyIf: no)
+        }
+        await #expect(throws: ScannerClientError.withheld(command: "KEY")) { try await c.press(.menu, onlyIf: no) }
+        await #expect(throws: ScannerClientError.withheld(command: "MSV")) { try await c.setMenuValue("4", onlyIf: no) }
+        #expect(await t.sentCommands.isEmpty)
+    }
+
     @Test func pushStreamReceivesPushes() async throws {
         let t = SimulatedScannerTransport.sds200(); let c = ScannerClient(transport: t); try await c.connect()
         let pushes = try await c.startPush(interval: .milliseconds(250))
@@ -406,13 +473,17 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         #expect(await t.sentCommands.map(\.name) == ["MDL"])
     }
 
-    @Test(.skippedOnCIRunner("70–130 ms window; too tight on the 3-core CI runner"))
-    func pushUpdatesAreStampedOnArrival() async throws {
+    /// The stamps are taken when a push arrives, not when the consumer reads it: each is at or after
+    /// its own emit, in order, and before the late read began. (No window on the gap between them:
+    /// a 70–130 ms one was too tight on the 3-core CI runner; LESSONS.md 2026-11-22.)
+    @Test func pushUpdatesAreStampedOnArrival() async throws {
         let t = SimulatedScannerTransport.sds200(); let c = ScannerClient(transport: t); try await c.connect()
         let pushes = try await c.startPushUpdates(interval: .milliseconds(100))
         #expect(await t.sentCommands == [try ScannerCommand("PSI", "100")])
+        let firstEmitted = ContinuousClock.now
         await t.emit(.xml(command: "PSI", root: XMLNode(name: "ScannerInfo", attributes: ["Mode": "One"])))
         try await Task.sleep(for: .milliseconds(100))
+        let secondEmitted = ContinuousClock.now
         await t.emit(.xml(command: "PSI", root: XMLNode(name: "ScannerInfo", attributes: ["Mode": "Two"])))
         // Consume late: the stamps must reflect arrival, not when the consumer read them.
         try await Task.sleep(for: .milliseconds(150))
@@ -420,9 +491,9 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         guard case .value(let first) = await next(pushes) else { Issue.record("no first push"); return }
         guard case .value(let second) = await next(pushes) else { Issue.record("no second push"); return }
         #expect(first.info.mode == "One"); #expect(second.info.mode == "Two")
-        let gap = second.receivedAt - first.receivedAt
-        #expect(gap >= .milliseconds(70) && gap <= .milliseconds(130), "gap \(gap)")
-        #expect(consumedAt - second.receivedAt >= .milliseconds(100))
+        #expect(first.receivedAt >= firstEmitted && second.receivedAt >= secondEmitted)
+        #expect(first.receivedAt < second.receivedAt)
+        #expect(second.receivedAt < consumedAt, "stamped \(second.receivedAt - consumedAt) after the read began")
         await c.disconnect()
         #expect(await t.sentCommands.filter { $0.name == "PSI" }.map(\.arguments) == [["100"], ["0"]])
     }

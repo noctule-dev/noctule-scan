@@ -13,7 +13,7 @@ on:
 
 jobs:
   release:
-    runs-on: xcode-27
+    runs-on: xcode-27-xlarge
     environment: release
     timeout-minutes: 180
     permissions:
@@ -47,9 +47,9 @@ jobs:
         timeout-minutes: 15
         run: swift build --build-tests
 
-      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on the 3-core runner, so
-      # they run alone in the next step, one at a time. Seven known flakes skip themselves on this
-      # runner (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`). The full suite runs locally.
+      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on a busy runner, so
+      # they run alone in the next step, one at a time. A test the runner can't run reliably skips
+      # itself here (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`); none does at present.
       - name: Test (parallel)
         timeout-minutes: 20
         run: swift test --skip-build --skip MockSDS200Tests --skip MockSerialScannerTests --skip ScannerClientTests --skip KeepAliveOnTheMock --skip PipeLineInSourceTests --skip MockLineOutTests --skip StationRunnerLineInTests --skip StationRunnerClippedAndSilentHitsTests --skip LineInCLIIntegrationTests

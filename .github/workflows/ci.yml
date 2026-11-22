@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: xcode-27
+    runs-on: xcode-27-xlarge
     timeout-minutes: 120
     env:
       NOCTULE_NO_USB_DETECTION: "1"
@@ -36,6 +36,15 @@ jobs:
         if: github.event_name == 'pull_request'
         run: scripts/check-dco.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
 
+      # A pull request that changes only documentation (scripts/ci-changes.sh) runs just the repository
+      # suites below; every other run, a push to main included, has no scope and runs everything.
+      - name: Classify the change
+        id: changes
+        if: github.event_name == 'pull_request'
+        run: |
+          scope=$(scripts/ci-changes.sh "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+
       - name: Select Xcode
         run: |
           sudo xcode-select -s /Applications/Xcode_27.2.app
@@ -45,23 +54,32 @@ jobs:
         timeout-minutes: 15
         run: swift build --build-tests
 
-      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on the 3-core runner, so
-      # they run alone in the next step, one at a time. Seven known flakes skip themselves on this
-      # runner (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`). The full suite runs locally.
+      - name: Test (documentation checks)
+        if: steps.changes.outputs.scope == 'docs'
+        timeout-minutes: 10
+        run: swift test --skip-build --filter "RepositoryFilesTests|RepositoryHygieneTests|CIWorkflowTests|PrivateWordsTests|RealNamesTests|InfoPlistTests|PlaceholderBackgroundTests"
+
+      # Some suites are timing-sensitive (the real-time line-in suites among them) and time out under parallel load on a busy runner, so
+      # they run alone in the next step, one at a time. A test the runner can't run reliably skips
+      # itself here (NOCTULE_CI_RUNNER, `.skippedOnCIRunner`); none does at present.
       - name: Test (parallel)
+        if: steps.changes.outputs.scope != 'docs'
         timeout-minutes: 20
         run: swift test --skip-build --skip MockSDS200Tests --skip MockSerialScannerTests --skip ScannerClientTests --skip KeepAliveOnTheMock --skip PipeLineInSourceTests --skip MockLineOutTests --skip StationRunnerLineInTests --skip StationRunnerClippedAndSilentHitsTests --skip LineInCLIIntegrationTests
 
       - name: Test (timing-sensitive suites, one at a time)
+        if: steps.changes.outputs.scope != 'docs'
         timeout-minutes: 20
         run: swift test --skip-build --no-parallel --filter "MockSDS200Tests|MockSerialScannerTests|ScannerClientTests|KeepAliveOnTheMock|PipeLineInSourceTests|MockLineOutTests|StationRunnerLineInTests|StationRunnerClippedAndSilentHitsTests|LineInCLIIntegrationTests"
 
       - name: Build the app
+        if: steps.changes.outputs.scope != 'docs'
         timeout-minutes: 20
         env:
           NOCTULE_BRANDING_DIR: ""
         run: scripts/build-app.sh
 
       - name: Check the shared code builds for iOS
+        if: steps.changes.outputs.scope != 'docs'
         timeout-minutes: 20
         run: xcodebuild -scheme NoctuleAppCore -destination 'generic/platform=iOS' build

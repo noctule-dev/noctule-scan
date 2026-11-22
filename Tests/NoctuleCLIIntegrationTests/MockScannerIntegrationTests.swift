@@ -43,7 +43,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
     var buffer = [UInt8](repeating: 0, count: 65_536)
     let deadline = ContinuousClock.now + .milliseconds(Int(limit * 1000))
     while arrivals.count < count, ContinuousClock.now < deadline {
-        let received = recv(fd, &buffer, buffer.count, 0)
+        let received = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: called on a dispatch queue
         guard received > 0 else { continue }
         let text = String(decoding: buffer[0..<received], as: UTF8.self)
         if text.hasPrefix("PSI,"), !text.hasPrefix("PSI,OK") { arrivals.append(.now) }
@@ -62,10 +62,10 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
         do {
             let process = try Subprocess(
                 try noctuleBinary(), ["quick-keys", "--host", "127.0.0.1", "--port", String(mock.udpPort)],
-                environment: ["NOCTULE_NO_USB_DETECTION": "1"], currentDirectory: directory)
+                environment: noctuleTestEnvironment, currentDirectory: directory)
             let exited = await process.waitForExit(within: 20)
             process.kill()
-            let result = process.finish()
+            let result = await process.finish()
             run = (exited, result.status, result.stdout, result.stderr)
         } catch {
             Issue.record(error)
@@ -166,13 +166,13 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             let listen = try Subprocess(try noctuleBinary(), [
                 "listen", "--no-play", "--host", "127.0.0.1", "--port", String(mock.udpPort),
                 "--rtsp-port", String(mock.rtspPort), "--cooldown-seconds", "1", "--cooldown-store", store.path,
-            ])
+            ], environment: noctuleTestEnvironment)
             let streaming = await listen.waitForStderr(within: 15) { $0.contains("audio: streaming") }
             #expect(streaming, "\(listen.stderr)")
             listen.send(signal)
             let exited = await listen.waitForExit(within: 15)
             listen.kill()
-            let result = listen.finish()
+            let result = await listen.finish()
             #expect(exited)
             #expect(result.status == expectedStatus, "\(result.status) \(result.stderr)")
             #expect(result.stdout.contains("packets "), "\(result.stdout)")
@@ -203,12 +203,12 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
                 #expect(result.stderr.contains("audio: streaming"), "run \(run): \(result.stderr)")
                 #expect(!result.stderr.contains("before reconnecting"), "run \(run): \(result.stderr)")
             }
-            let third = try Subprocess(try noctuleBinary(), base)
+            let third = try Subprocess(try noctuleBinary(), base, environment: noctuleTestEnvironment)
             let waiting = await third.waitForStderr(within: 10) { $0.contains("before reconnecting (scanner cooldown)") }
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let result = third.finish()
+            let result = await third.finish()
             #expect(waiting, "\(result.stderr)")
             #expect(exited && result.status == 130, "\(result.status) \(result.stderr)")
         } catch {
@@ -251,6 +251,7 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
         do {
             let process = Process()
             process.executableURL = try noctuleBinary()
+            process.environment = ProcessInfo.processInfo.environment.merging(noctuleTestEnvironment) { _, new in new }
             process.arguments = [
                 "listen", "--no-play", "--seconds", "2", "--host", "127.0.0.1", "--port", String(mock.udpPort),
                 "--rtsp-port", String(mock.rtspPort), "--cooldown-seconds", "1",
@@ -263,12 +264,12 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
             try process.run()
             // Nobody reads stderr: the first state line hits a broken pipe.
             try errPipe.fileHandleForReading.close()
-            let deadline = Date().addingTimeInterval(15)
-            while process.isRunning, Date() < deadline { try? await Task.sleep(for: .milliseconds(50)) }
-            let exited = !process.isRunning
+            let exited = await waitFor(15) { !process.isRunning }
             if !exited { Darwin.kill(process.processIdentifier, SIGKILL) }
-            process.waitUntilExit()
+            // Never `waitUntilExit()`: it blocks a cooperative thread (IntegrationSupport.swift).
+            let gone = await waitFor(10) { !process.isRunning }
             #expect(exited)
+            try #require(gone, "process \(process.processIdentifier) still running after SIGKILL")
             #expect(process.terminationReason == .exit && process.terminationStatus == 0,
                     "reason \(process.terminationReason.rawValue), status \(process.terminationStatus)")
         } catch {
@@ -283,13 +284,13 @@ private func pushArrivals(port: UInt16, interval: Int, count: Int, limit: Double
     @Test func watchStopsPushOnSigterm() async throws {
         let mock = try await MockScanner.launch([])
         do {
-            let watch = try Subprocess(try noctuleBinary(), ["watch", "--host", "127.0.0.1", "--port", String(mock.udpPort)])
+            let watch = try Subprocess(try noctuleBinary(), ["watch", "--host", "127.0.0.1", "--port", String(mock.udpPort)], environment: noctuleTestEnvironment)
             let updating = await watch.waitForOutput(within: 10) { !$0.isEmpty }
             #expect(updating, "\(watch.stderr)")
             watch.send(SIGTERM)
             let exited = await watch.waitForExit(within: 10)
             watch.kill()
-            let result = watch.finish()
+            let result = await watch.finish()
             #expect(exited)
             #expect(result.status == 143, "\(result.status) \(result.stderr)")
         } catch {

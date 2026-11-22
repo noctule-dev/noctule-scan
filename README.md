@@ -58,7 +58,7 @@ Signed, notarized DMGs are on the [Releases](https://github.com/noctule-dev/noct
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Please also read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and, for security problems, [SECURITY.md](SECURITY.md).
+Questions and ideas are welcome in [Discussions](https://github.com/noctule-dev/noctule-scan/discussions). See [CONTRIBUTING.md](CONTRIBUTING.md). Please also read [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) and, for security problems, [SECURITY.md](SECURITY.md).
 
 ## License and trademarks
 

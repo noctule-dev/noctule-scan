@@ -45,6 +45,7 @@ The design notes, protocol notes and plans behind Noctule Scan, in the order the
 
 **Taking the project public**
 - [`2026-11-20-open-source-prep-design.md`](2026-11-20-open-source-prep-design.md): licence, history, branding art, hygiene checks and community files for the public repository.
+- [`2026-11-21-ci-docs-fast-path.md`](2026-11-21-ci-docs-fast-path.md): a documentation-only pull request runs only the repository suites **(owner)**.
 
 ## Plans (history)
 

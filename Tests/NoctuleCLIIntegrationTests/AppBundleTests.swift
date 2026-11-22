@@ -30,7 +30,7 @@ private func plist(_ path: String) throws -> [String: Any] {
 
     /// The codesign line of `build-app.sh`, run for real (ad hoc) on a fake app: it must carry the hardened
     /// runtime and the entitlement.
-    @Test func buildAppSignsWithTheEntitlements() throws {
+    @Test func buildAppSignsWithTheEntitlements() async throws {
         let script = try String(contentsOf: repositoryFile("scripts/build-app.sh"), encoding: .utf8)
         let line = try #require(script.split(separator: "\n").first { $0.hasPrefix("codesign ") }.map(String.init))
         #expect(line.contains("--options runtime"), "\(line)")
@@ -48,15 +48,15 @@ private func plist(_ path: String) throws -> [String: Any] {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
 
         let root = try #require(packagingRoot).path
-        let sign = try run(URL(fileURLWithPath: "/bin/bash"), ["-c", "root=\"$1\"; app=\"$2\"; \(line)", "bash", root, app.path])
+        let sign = try await run(URL(fileURLWithPath: "/bin/bash"), ["-c", "root=\"$1\"; app=\"$2\"; \(line)", "bash", root, app.path])
         try #require(sign.status == 0, "codesign: \(sign.stderr)")
 
-        let entitlements = try run(tool("codesign"), ["-d", "--entitlements", "-", app.path])
+        let entitlements = try await run(tool("codesign"), ["-d", "--entitlements", "-", app.path])
         #expect((entitlements.stdout + entitlements.stderr).contains("com.apple.security.device.audio-input"),
                 "\(entitlements.stdout)\(entitlements.stderr)")
-        let details = try run(tool("codesign"), ["-dv", app.path])
+        let details = try await run(tool("codesign"), ["-dv", app.path])
         #expect(details.stderr.contains("runtime"), "codesign -dv: \(details.stderr)")
-        #expect(try run(tool("codesign"), ["--verify", "--strict", app.path]).status == 0)
+        #expect(try await run(tool("codesign"), ["--verify", "--strict", app.path]).status == 0)
     }
 
     @Test func buildAppHeaderNoLongerSaysNoEntitlements() throws {

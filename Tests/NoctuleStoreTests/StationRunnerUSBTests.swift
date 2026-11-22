@@ -555,7 +555,7 @@ private let connectedSDS100 = RunnerEvent.connected(model: "SDS100", firmware: "
 /// What a runner sends to connect and subscribe (the tests' push interval is 100 ms).
 private let startCommands = ["MDL", "VER", "PSI,100"]
 
-@Suite struct StationRunnerUSBTests {
+@Suite(.timeLimit(.minutes(3))) struct StationRunnerUSBTests {
     @Test func usbStationLogsHitsWithoutAudio() async throws {
         // Save-audio says "every transmission": on a USB station it has no effect.
         let outcome = try await withUSBRunner { rig in
@@ -2090,7 +2090,7 @@ private let startCommands = ["MDL", "VER", "PSI,100"]
 
 /// `willResume` tells a caller (`noctule log`) whether the runner is going to wait for the scanner
 /// after a `.disconnected`. It is set before the event is emitted.
-@Suite struct StationRunnerWillResumeTests {
+@Suite(.timeLimit(.minutes(3))) struct StationRunnerWillResumeTests {
     @Test func willResumeAfterAWorkingConnection() async throws {
         try await withUSBRunner { rig in
             #expect(await rig.runner.willResume == false)  // nothing has disconnected yet

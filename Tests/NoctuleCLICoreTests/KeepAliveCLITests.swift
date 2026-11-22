@@ -9,7 +9,7 @@ import NoctuleStore
 
 // The push keep-alive `watch` passes, and the test-only `NOCTULE_TEST_KEEPALIVE_SECONDS`.
 
-@Suite struct KeepAliveOverrideTests {
+@Suite(.timeLimit(.minutes(3))) struct KeepAliveOverrideTests {
     private let key = "NOCTULE_TEST_KEEPALIVE_SECONDS"
 
     @Test func keyName() {

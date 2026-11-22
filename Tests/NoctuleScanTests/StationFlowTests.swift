@@ -10,7 +10,7 @@ import Testing
 /// Plan 5 Task 3: the Stations window closes itself after a successful Connect (`PickerAutoClose`),
 /// closing the last station window brings it back (`StationWindowTracker`), and the status bar's
 /// Stations and Disconnect buttons (`StationFooterText`).
-@MainActor @Suite struct StationFlowTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct StationFlowTests {
     private let a = UUID()
     private let b = UUID()
     private let connected = SessionPhase.connected(model: "SDS200", firmware: "1.26.01")

@@ -4,7 +4,7 @@
 import Testing
 import NoctuleKitTestSupport
 
-@Suite struct CIRunnerTraitTests {
+@Suite(.timeLimit(.minutes(3))) struct CIRunnerTraitTests {
     @Test func unsetIsNotARunner() {
         #expect(isCIRunner([:]) == false)
     }

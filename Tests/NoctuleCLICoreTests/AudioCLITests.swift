@@ -6,7 +6,7 @@ import Testing
 import NoctuleKit
 @testable import NoctuleCLICore
 
-@Suite struct ListenArgumentsTests {
+@Suite(.timeLimit(.minutes(3))) struct ListenArgumentsTests {
     @Test func listenDefaults() throws {
         let a = try CLIArguments.parse(["listen"])
         #expect(a == CLIInvocation(command: .listen(record: nil, seconds: nil, play: true)))
@@ -53,7 +53,7 @@ import NoctuleKit
     }
 }
 
-@Suite struct AudioTargetTests {
+@Suite(.timeLimit(.minutes(3))) struct AudioTargetTests {
     private func withConfig(_ text: String?, _ body: (URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "noctule-audio-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appending(path: "config"), withIntermediateDirectories: true)
@@ -95,7 +95,7 @@ import NoctuleKit
     }
 }
 
-@Suite struct ListenFormatTests {
+@Suite(.timeLimit(.minutes(3))) struct ListenFormatTests {
     @Test func stateLines() {
         #expect(ListenFormat.stateLine(.streaming) == "audio: streaming")
         #expect(ListenFormat.stateLine(.recovering(attempt: 1)) == "audio: recovering (attempt 1)")
@@ -134,7 +134,7 @@ import NoctuleKit
     }
 }
 
-@Suite struct RestartFormatTests {
+@Suite(.timeLimit(.minutes(3))) struct RestartFormatTests {
     @Test func promptAndConfirmation() {
         #expect(RestartFormat.prompt(host: "192.0.2.10") == "Restart the scanner at 192.0.2.10? [y/N] ")
         for yes in ["y", "Y", "yes", " YES \n"] { #expect(RestartFormat.isConfirmation(yes), "\(yes)") }

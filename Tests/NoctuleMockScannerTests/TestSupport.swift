@@ -30,9 +30,22 @@ func eventually(_ limit: Duration = .seconds(3), _ condition: @escaping @Sendabl
     }
 }
 
+/// Runs a blocking `body` on a dispatch thread and waits for it without holding a cooperative one:
+/// the in-process mock a raw socket talks to needs the pool to answer (LESSONS.md 2026-11-22). The
+/// caller awaits it, so nothing else touches what `body` captures meanwhile.
+func offThePool<T>(_ body: @escaping () -> T) async -> T {
+    nonisolated(unsafe) let work = body
+    nonisolated(unsafe) var result: T?
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+        DispatchQueue.global().async { result = work(); continuation.resume() }
+    }
+    return result!
+}
+
 /// One raw RTSP exchange over a plain blocking BSD socket (2 s receive timeout), for checking the
-/// mock's exact reply bytes and for misbehaving on purpose (e.g. closing without TEARDOWN).
-final class RawRTSP {
+/// mock's exact reply bytes and for misbehaving on purpose (e.g. closing without TEARDOWN). The
+/// waiting `recv` runs on a dispatch thread (`offThePool`).
+final class RawRTSP: @unchecked Sendable {
     let fd: Int32
 
     init(port: UInt16) throws {
@@ -56,7 +69,11 @@ final class RawRTSP {
     }
 
     /// Sends `request` and returns the full reply (head and body), or nil on timeout or close.
-    func exchange(_ request: String) -> String? {
+    func exchange(_ request: String) async -> String? {
+        await offThePool { self.blockingExchange(request) }
+    }
+
+    func blockingExchange(_ request: String) -> String? {
         let bytes = Array(request.utf8)
         guard send(fd, bytes, bytes.count, 0) == bytes.count else { return nil }
         var data = Data()
@@ -69,7 +86,7 @@ final class RawRTSP {
                     .flatMap { Int($0.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)) } ?? 0
                 if data.count - end.upperBound >= length { return String(decoding: data, as: UTF8.self) }
             }
-            let count = recv(fd, &buffer, buffer.count, 0)
+            let count = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: run through offThePool
             guard count > 0 else { return nil }
             data.append(contentsOf: buffer[0..<count])
         }

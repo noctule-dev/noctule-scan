@@ -72,9 +72,9 @@ private func fakeApp(in directory: URL, name: String = "Noctule Scan.app") throw
 // MARK: - Python for make-dmg.sh
 
 /// The version of the Python at `path` ("3.12.4"), or nil if it isn't one.
-private func pythonVersion(_ path: String) -> (major: Int, minor: Int)? {
+private func pythonVersion(_ path: String) async -> (major: Int, minor: Int)? {
     guard FileManager.default.isExecutableFile(atPath: path),
-          let result = try? run(URL(fileURLWithPath: path), ["-c", "import sys; print(sys.version_info[0], sys.version_info[1])"]),
+          let result = try? await run(URL(fileURLWithPath: path), ["-c", "import sys; print(sys.version_info[0], sys.version_info[1])"]),
           result.status == 0 else { return nil }
     let parts = result.stdout.split(separator: " ").compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     return parts.count == 2 ? (parts[0], parts[1]) : nil
@@ -83,19 +83,24 @@ private func pythonVersion(_ path: String) -> (major: Int, minor: Int)? {
 /// A Python 3.10 or newer to run make-dmg.sh with: `NOCTULE_PYTHON` from this process's environment, else
 /// the first new enough of `python3` on `PATH`, Homebrew's, and `/usr/local`'s. The stock `/usr/bin/python3`
 /// is 3.9, so a Mac (or runner) without another one fails the tests that build images, with a message.
-private let newPython: String? = {
+/// Looked up once, by a task every caller awaits (a lazy global would block its callers' threads
+/// while the first one runs the probes).
+private let newPython = Task<String?, Never> {
     let environment = ProcessInfo.processInfo.environment
     var candidates: [String] = []
     if let chosen = environment["NOCTULE_PYTHON"], !chosen.isEmpty { candidates.append(chosen) }
     for directory in (environment["PATH"] ?? "").split(separator: ":") { candidates.append("\(directory)/python3") }
     candidates += ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
-    return candidates.first { path in pythonVersion(path).map { $0.major > 3 || ($0.major == 3 && $0.minor >= 10) } == true }
-}()
+    for path in candidates {
+        if let version = await pythonVersion(path), version.major > 3 || (version.major == 3 && version.minor >= 10) { return path }
+    }
+    return nil
+}
 
 /// The environment that lets make-dmg.sh build images: a Python 3.10+, and one virtual environment shared by
 /// the whole test run (dmgbuild is installed from PyPI once, not once per test).
-private func dmgEnvironment() throws -> [String: String] {
-    guard let python = newPython else {
+private func dmgEnvironment() async throws -> [String: String] {
+    guard let python = await newPython.value else {
         throw SkipReason("no Python 3.10 or newer found: install one (brew install python) or set NOCTULE_PYTHON")
     }
     return ["NOCTULE_PYTHON": python, "NOCTULE_DMG_VENV": sharedDMGVenv.path]
@@ -111,43 +116,68 @@ private let sharedDMGVenv: URL = {
     return directory.appending(path: "dmg-venv")
 }()
 
-/// Runs a tool or script and waits up to `limit` seconds for it.
+/// Runs a tool or script and waits up to `limit` seconds for it, suspended: a test that waits for
+/// a tool never holds a cooperative thread (IntegrationSupport.swift, "Waiting in these tests").
 @discardableResult
 func run(_ executable: URL, _ arguments: [String], environment: [String: String] = [:],
-                 currentDirectory: URL? = nil, limit: Double = 120, input: String? = nil) throws -> (status: Int32, stdout: String, stderr: String) {
+         currentDirectory: URL? = nil, limit: Double = 120, input: String? = nil) async throws -> (status: Int32, stdout: String, stderr: String) {
     let process = try Subprocess(executable, arguments, environment: environment, currentDirectory: currentDirectory, input: input)
-    if !waitFor(limit, { !process.process.isRunning }) { process.kill() }
-    return process.finish()
+    if !(await process.waitForExit(within: limit)) {
+        // Named, so a run that stalls says where (a release test failed on the runner with only its first
+        // stderr line to show; flake hunt hunt/flaky-1).
+        Issue.record("\(executable.lastPathComponent) \(arguments.joined(separator: " ")) still running after \(limit) s; killed. stderr so far: \(process.stderr)")
+        process.kill()
+    }
+    return await process.finish()
 }
 
 /// Runs `<root>/<relativePath>` (a script under `packaging/`) from a temporary directory.
 func runScript(_ relativePath: String, _ arguments: [String], environment: [String: String] = [:],
-                       root: URL? = nil, limit: Double = 120, input: String? = nil) throws -> (status: Int32, stdout: String, stderr: String) {
+               root: URL? = nil, limit: Double = 120, input: String? = nil) async throws -> (status: Int32, stdout: String, stderr: String) {
     let script = try (root ?? #require(packagingRoot)).appending(path: relativePath)
     // Scripts that make a disk image (make-dmg.sh, and release.sh through it) get the shared Python environment.
-    let defaults = (try? dmgEnvironment()) ?? [:]
+    let defaults = (try? await dmgEnvironment()) ?? [:]
     // The owner's config/branding.env must never reach a test: a script runs on the placeholder unless a test says otherwise.
     let base = defaults.merging(["NOCTULE_BRANDING_DIR": ""]) { _, new in new }
-    return try run(script, arguments, environment: base.merging(environment) { _, new in new },
-                   currentDirectory: FileManager.default.temporaryDirectory, limit: limit, input: input)
+    return try await run(script, arguments, environment: base.merging(environment) { _, new in new },
+                         currentDirectory: FileManager.default.temporaryDirectory, limit: limit, input: input)
 }
 
 func tool(_ name: String) -> URL { URL(fileURLWithPath: "/usr/bin/\(name)") }
 
 /// Mounts `dmg` read-only and out of the Finder's sight, runs `body` with the mount point, and
 /// always detaches it.
-private func withMountedImage(_ dmg: URL, _ body: (URL) throws -> Void) throws {
-    let attach = try run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
-    try #require(attach.status == 0, "hdiutil attach failed: \(attach.stderr)")
+///
+/// The attach is tried up to three times, two seconds apart: on a runner VM one failed with status 1
+/// and nothing but hdiutil's deprecation warning on stderr, right after `release.sh` had attached and
+/// force-detached the same image (flake hunt run 44979282952); a failed attempt is printed with its
+/// whole output and what `hdiutil info` showed attached, and the last one's goes in the failure.
+private func withMountedImage(_ dmg: URL, _ body: (URL) async throws -> Void) async throws {
+    var attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+    var attempts = 1
+    while attach.status != 0, attempts < 3 {
+        let attached = try? await run(tool("hdiutil"), ["info"], limit: 20)
+        print("withMountedImage: hdiutil attach \(dmg.lastPathComponent) attempt \(attempts) exited \(attach.status); stderr: \(attach.stderr) stdout: \(attach.stdout) attached: \(attached?.stdout ?? "?")")
+        try await Task.sleep(for: .seconds(2))
+        attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+        attempts += 1
+    }
+    try #require(attach.status == 0,
+                 "hdiutil attach failed \(attempts) times, last with status \(attach.status): stderr: \(attach.stderr) stdout: \(attach.stdout)")
     let plist = try PropertyListSerialization.propertyList(from: Data(attach.stdout.utf8), format: nil) as? [String: Any]
     let entities = (plist?["system-entities"] as? [[String: Any]]) ?? []
     let mountPoint = try #require(entities.compactMap { $0["mount-point"] as? String }.first)
-    defer { try? run(tool("hdiutil"), ["detach", "-force", mountPoint]) }
-    try body(URL(fileURLWithPath: mountPoint))
+    do {
+        try await body(URL(fileURLWithPath: mountPoint))
+    } catch {
+        _ = try? await run(tool("hdiutil"), ["detach", "-force", mountPoint])
+        throw error
+    }
+    _ = try? await run(tool("hdiutil"), ["detach", "-force", mountPoint])
 }
 
-private func imageFormat(_ dmg: URL) throws -> String? {
-    let info = try run(tool("hdiutil"), ["imageinfo", "-plist", dmg.path])
+private func imageFormat(_ dmg: URL) async throws -> String? {
+    let info = try await run(tool("hdiutil"), ["imageinfo", "-plist", dmg.path])
     let plist = try PropertyListSerialization.propertyList(from: Data(info.stdout.utf8), format: nil) as? [String: Any]
     return plist?["Format"] as? String
 }
@@ -160,20 +190,20 @@ private func imageFormat(_ dmg: URL) throws -> String? {
 
 extension DiskImageTests {
     @Suite(.timeLimit(.minutes(2))) struct MakeDMGTests {
-        private func makeDMG(_ arguments: [String], _ extra: [String: String] = [:]) throws
+        private func makeDMG(_ arguments: [String], _ extra: [String: String] = [:]) async throws
             -> (status: Int32, stdout: String, stderr: String) {
-            try runScript("packaging/dmg/make-dmg.sh", arguments, environment: extra, limit: 600)
+            try await runScript("packaging/dmg/make-dmg.sh", arguments, environment: extra, limit: 600)
         }
 
-        @Test func makesAnImageWithTheAppAndApplications() throws {
+        @Test func makesAnImageWithTheAppAndApplications() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let dmg = dir.appending(path: "Noctule Scan 0.1.0.dmg")
-            let result = try makeDMG([app.path, dmg.path])
+            let result = try await makeDMG([app.path, dmg.path])
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stdout == "dmg: \(dmg.path)\n")
-            #expect(try imageFormat(dmg) == "UDZO")
-            try withMountedImage(dmg) { volume in
+            #expect(try await imageFormat(dmg) == "UDZO")
+            try await withMountedImage(dmg) { volume in
                 #expect(volume.lastPathComponent == "Noctule Scan")
                 let names = try FileManager.default.contentsOfDirectory(atPath: volume.path).filter { !$0.hasPrefix(".") }
                 #expect(names.sorted() == ["Applications", "Noctule Scan.app"])
@@ -187,39 +217,39 @@ extension DiskImageTests {
             }
         }
 
-        @Test func usesThePlaceholderByDefault() throws {
+        @Test func usesThePlaceholderByDefault() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let dmg = dir.appending(path: "placeholder.dmg")
-            let result = try makeDMG([app.path, dmg.path])
+            let result = try await makeDMG([app.path, dmg.path])
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stderr.contains("branding: placeholder"), "\(result.stderr)")
             let want = try Data(contentsOf: repositoryFile("packaging/dmg/placeholder/background.tiff"))
-            try withMountedImage(dmg) { volume in
+            try await withMountedImage(dmg) { volume in
                 let got = try Data(contentsOf: volume.appending(path: ".background.tiff"))
                 #expect(got == want)
             }
         }
 
-        @Test func usesTheBrandingFolderWhenSet() throws {
+        @Test func usesTheBrandingFolderWhenSet() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let stub = try stubBrandingFolder(in: dir)
             let dmg = dir.appending(path: "branded.dmg")
-            let result = try makeDMG([app.path, dmg.path], ["NOCTULE_BRANDING_DIR": stub.path])
+            let result = try await makeDMG([app.path, dmg.path], ["NOCTULE_BRANDING_DIR": stub.path])
             #expect(result.status == 0, "\(result.stderr)")
             let want = try Data(contentsOf: stub.appending(path: "dmg/background.tiff"))
-            try withMountedImage(dmg) { volume in
+            try await withMountedImage(dmg) { volume in
                 let got = try Data(contentsOf: volume.appending(path: ".background.tiff"))
                 #expect(got == want)
             }
         }
 
-        @Test func prepareBuildsOnlyTheEnvironment() throws {
+        @Test func prepareBuildsOnlyTheEnvironment() async throws {
             let dir = try spacedDirectory()
-            let environment = try dmgEnvironment()
+            let environment = try await dmgEnvironment()
             let venv = try #require(environment["NOCTULE_DMG_VENV"])
-            let result = try makeDMG(["--prepare"])
+            let result = try await makeDMG(["--prepare"])
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stdout == "make-dmg: dmgbuild ready in \(venv)\n")
             #expect(FileManager.default.fileExists(atPath: URL(fileURLWithPath: venv).appending(path: "requirements.sha256").path))
@@ -228,24 +258,24 @@ extension DiskImageTests {
             #expect(found.isEmpty, "\(found)")
         }
 
-        @Test func prepareTakesNoOtherArguments() throws {
+        @Test func prepareTakesNoOtherArguments() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let dmg = dir.appending(path: "x.dmg")
             for arguments in [["--prepare", app.path], ["--prepare", app.path, dmg.path], ["--prepare", "extra"],
                               [app.path, "--prepare"], ["--prepare", "--prepare"]] {
-                let result = try makeDMG(arguments)
+                let result = try await makeDMG(arguments)
                 #expect(result.status == 2, "\(arguments)")
                 #expect(!FileManager.default.fileExists(atPath: dmg.path))
             }
         }
 
-        @Test func windowLayoutIsTheDesigns() throws {
+        @Test func windowLayoutIsTheDesigns() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let dmg = dir.appending(path: "out.dmg")
-            #expect(try makeDMG([app.path, dmg.path]).status == 0)
-            let venvPython = try dmgEnvironment()["NOCTULE_DMG_VENV"].map { $0 + "/bin/python" }
+            #expect(try await makeDMG([app.path, dmg.path]).status == 0)
+            let venvPython = try await dmgEnvironment()["NOCTULE_DMG_VENV"].map { $0 + "/bin/python" }
             let script = """
                 import json, sys
                 from ds_store import DSStore
@@ -260,8 +290,8 @@ extension DiskImageTests {
                         out[e.filename + ':' + e.code.decode()] = v
                 print(json.dumps(out))
                 """
-            try withMountedImage(dmg) { volume in
-                let read = try run(URL(fileURLWithPath: #require(venvPython)), ["-c", script, volume.path])
+            try await withMountedImage(dmg) { volume in
+                let read = try await run(URL(fileURLWithPath: #require(venvPython)), ["-c", script, volume.path])
                 try #require(read.status == 0, "\(read.stderr)")
                 let store = try #require(try JSONSerialization.jsonObject(with: Data(read.stdout.utf8)) as? [String: Any])
                 #expect(store["Noctule Scan.app:Iloc"] as? [Int] == [170, 214], "\(store)")
@@ -282,19 +312,19 @@ extension DiskImageTests {
 
         /// A release's app is signed and stapled before it goes into the image: the copy must still verify.
         /// (The marker is in Resources: codesign refuses a loose file in Contents.)
-        @Test func signedAppSurvivesTheCopy() throws {
+        @Test func signedAppSurvivesTheCopy() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let marker = Data("sealed \(UUID().uuidString)\n".utf8)
             try marker.write(to: app.appending(path: "Contents/Resources/marker"))
-            let sign = try run(tool("codesign"), ["--force", "--sign", "-", app.path])
+            let sign = try await run(tool("codesign"), ["--force", "--sign", "-", app.path])
             try #require(sign.status == 0, "codesign: \(sign.stderr)")
             let dmg = dir.appending(path: "out.dmg")
-            let result = try makeDMG([app.path, dmg.path])
+            let result = try await makeDMG([app.path, dmg.path])
             #expect(result.status == 0, "\(result.stderr)")
-            try withMountedImage(dmg) { volume in
+            try await withMountedImage(dmg) { volume in
                 let copy = volume.appending(path: "Noctule Scan.app")
-                let verify = try run(tool("codesign"), ["--verify", "--strict", copy.path])
+                let verify = try await run(tool("codesign"), ["--verify", "--strict", copy.path])
                 #expect(verify.status == 0, "codesign --verify --strict: \(verify.stderr)")
                 #expect(try Data(contentsOf: copy.appending(path: "Contents/Resources/marker")) == marker)
             }
@@ -302,17 +332,17 @@ extension DiskImageTests {
 
         /// dmgbuild runs `ditto` and ignores its exit status, so a copy that failed (here: a file the copy
         /// can't read) must be caught by make-dmg itself: exit 1, a clear message, and no image left behind.
-        @Test func aFailedCopyOfTheAppFailsTheBuild() throws {
+        @Test func aFailedCopyOfTheAppFailsTheBuild() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let marker = app.appending(path: "Contents/Resources/marker")
             try Data("sealed\n".utf8).write(to: marker)
-            let sign = try run(tool("codesign"), ["--force", "--sign", "-", app.path])
+            let sign = try await run(tool("codesign"), ["--force", "--sign", "-", app.path])
             try #require(sign.status == 0, "codesign: \(sign.stderr)")
             try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: marker.path)
             defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: marker.path) }
             let dmg = dir.appending(path: "out.dmg")
-            let result = try makeDMG([app.path, dmg.path])
+            let result = try await makeDMG([app.path, dmg.path])
             #expect(result.status == 1, "stdout: \(result.stdout) stderr: \(result.stderr)")
             #expect(result.stderr.contains("make-dmg: the app in the image isn't a faithful copy"), "\(result.stderr)")
             #expect(!result.stdout.contains("dmg:"), "\(result.stdout)")
@@ -321,14 +351,14 @@ extension DiskImageTests {
 
         /// make-dmg removes the environment directory when it must rebuild it, so it refuses a directory
         /// that isn't one.
-        @Test func refusesToRemoveADirectoryThatIsNotAVenv() throws {
+        @Test func refusesToRemoveADirectoryThatIsNotAVenv() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let notVenv = dir.appending(path: "projects")
             try FileManager.default.createDirectory(at: notVenv, withIntermediateDirectories: true)
             let keep = notVenv.appending(path: "keep.txt")
             try "precious".write(to: keep, atomically: true, encoding: .utf8)
-            let result = try makeDMG([app.path, dir.appending(path: "out.dmg").path], ["NOCTULE_DMG_VENV": notVenv.path])
+            let result = try await makeDMG([app.path, dir.appending(path: "out.dmg").path], ["NOCTULE_DMG_VENV": notVenv.path])
             #expect(result.status == 1, "\(result.stderr)")
             #expect(result.stderr.contains("isn't a virtual environment; not removing it"), "\(result.stderr)")
             #expect(try String(contentsOf: keep, encoding: .utf8) == "precious")
@@ -336,7 +366,7 @@ extension DiskImageTests {
         }
 
         /// The environment's Python runs isolated: a PYTHONPATH holding a broken `dmgbuild` can't take over.
-        @Test func pythonPathCannotBypassTheInstalledPackages() throws {
+        @Test func pythonPathCannotBypassTheInstalledPackages() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let fake = dir.appending(path: "fakepath/dmgbuild")
@@ -344,48 +374,48 @@ extension DiskImageTests {
             try "raise SystemExit('fake dmgbuild was used')\n".write(to: fake.appending(path: "__init__.py"), atomically: true, encoding: .utf8)
             try "raise SystemExit('fake dmgbuild was used')\n".write(to: fake.appending(path: "__main__.py"), atomically: true, encoding: .utf8)
             let dmg = dir.appending(path: "out.dmg")
-            let result = try makeDMG([app.path, dmg.path], ["PYTHONPATH": dir.appending(path: "fakepath").path])
+            let result = try await makeDMG([app.path, dmg.path], ["PYTHONPATH": dir.appending(path: "fakepath").path])
             #expect(result.status == 0, "\(result.stderr)")
             #expect(!result.stderr.contains("fake dmgbuild"), "\(result.stderr)")
-            #expect(try imageFormat(dmg) == "UDZO")
+            #expect(try await imageFormat(dmg) == "UDZO")
         }
 
-        @Test func aSecondRunReplacesTheImage() throws {
+        @Test func aSecondRunReplacesTheImage() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let dmg = dir.appending(path: "Noctule Scan 0.1.0.dmg")
-            #expect(try makeDMG([app.path, dmg.path]).status == 0)
+            #expect(try await makeDMG([app.path, dmg.path]).status == 0)
             try "x".write(to: app.appending(path: "Contents/Resources/extra"), atomically: true, encoding: .utf8)
-            let second = try makeDMG([app.path, dmg.path])
+            let second = try await makeDMG([app.path, dmg.path])
             #expect(second.status == 0, "\(second.stderr)")
-            try withMountedImage(dmg) { volume in
+            try await withMountedImage(dmg) { volume in
                 let names = try FileManager.default.contentsOfDirectory(atPath: volume.path).filter { !$0.hasPrefix(".") }
                 #expect(names.sorted() == ["Applications", "Noctule Scan.app"])
                 #expect(FileManager.default.fileExists(atPath: volume.appending(path: "Noctule Scan.app/Contents/Resources/extra").path))
             }
         }
 
-        @Test func buildFailureIsReported() throws {
+        @Test func buildFailureIsReported() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
-            let result = try makeDMG([app.path, dir.appending(path: "missing/out.dmg").path])
+            let result = try await makeDMG([app.path, dir.appending(path: "missing/out.dmg").path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("make-dmg: dmgbuild failed"), "\(result.stderr)")
         }
 
-        @Test func refusesWhatIsNotAnApp() throws {
+        @Test func refusesWhatIsNotAnApp() async throws {
             let dir = try spacedDirectory()
             let plain = dir.appending(path: "Plain")
             try FileManager.default.createDirectory(at: plain, withIntermediateDirectories: true)
             let dmg = dir.appending(path: "out.dmg")
             for arguments in [[plain.path, dmg.path], [dir.appending(path: "Missing.app").path, dmg.path], [dmg.path]] {
-                let result = try makeDMG(arguments)
+                let result = try await makeDMG(arguments)
                 #expect(result.status == 2, "\(arguments): \(result.stderr)")
                 #expect(!FileManager.default.fileExists(atPath: dmg.path))
             }
         }
 
-        @Test func oldPythonIsExplained() throws {
+        @Test func oldPythonIsExplained() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             // A stand-in for the stock 3.9.6 (the machine running the tests may have no such Python).
@@ -394,7 +424,7 @@ extension DiskImageTests {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: old.path)
             let venv = dir.appending(path: "venv")
             let dmg = dir.appending(path: "out.dmg")
-            let result = try makeDMG([app.path, dmg.path], ["NOCTULE_PYTHON": old.path, "NOCTULE_DMG_VENV": venv.path])
+            let result = try await makeDMG([app.path, dmg.path], ["NOCTULE_PYTHON": old.path, "NOCTULE_DMG_VENV": venv.path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("make-dmg: needs Python 3.10 or newer (found 3.9.6)"), "\(result.stderr)")
             #expect(result.stderr.contains("brew install python"), "\(result.stderr)")
@@ -402,11 +432,11 @@ extension DiskImageTests {
             #expect(!FileManager.default.fileExists(atPath: venv.path))
         }
 
-        @Test func missingPythonIsExplained() throws {
+        @Test func missingPythonIsExplained() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let venv = dir.appending(path: "venv")
-            let result = try makeDMG([app.path, dir.appending(path: "out.dmg").path],
+            let result = try await makeDMG([app.path, dir.appending(path: "out.dmg").path],
                                      ["NOCTULE_PYTHON": dir.appending(path: "none").path, "NOCTULE_DMG_VENV": venv.path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("make-dmg: needs Python 3.10 or newer (found none"), "\(result.stderr)")
@@ -414,7 +444,7 @@ extension DiskImageTests {
         }
 
         /// A probe that fails says why (a pyenv shim for a version that isn't installed prints its own error).
-        @Test func failedPythonProbeNamesItsReason() throws {
+        @Test func failedPythonProbeNamesItsReason() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let shim = dir.appending(path: "python3")
@@ -423,7 +453,7 @@ extension DiskImageTests {
             try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
             let venv = dir.appending(path: "venv")
             let dmg = dir.appending(path: "out.dmg")
-            let result = try makeDMG([app.path, dmg.path], ["NOCTULE_PYTHON": shim.path, "NOCTULE_DMG_VENV": venv.path])
+            let result = try await makeDMG([app.path, dmg.path], ["NOCTULE_PYTHON": shim.path, "NOCTULE_DMG_VENV": venv.path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("make-dmg: needs Python 3.10 or newer"), "\(result.stderr)")
             #expect(result.stderr.contains("pyenv: version '3.12.4' is not installed"), "\(result.stderr)")
@@ -435,7 +465,7 @@ extension DiskImageTests {
 
         /// The environment is rebuilt when requirements.txt changed (its recorded hash differs), and when it
         /// can't import dmgbuild. This test has its own environment: it breaks it twice.
-        @Test func changedRequirementsRebuildTheEnvironment() throws {
+        @Test func changedRequirementsRebuildTheEnvironment() async throws {
             let dir = try spacedDirectory()
             let app = try fakeApp(in: dir)
             let venv = dir.appending(path: "venv")
@@ -443,26 +473,26 @@ extension DiskImageTests {
             let installing = "make-dmg: installing dmgbuild into \(venv.path)"
             let hashFile = venv.appending(path: "requirements.sha256")
 
-            let first = try makeDMG([app.path, dir.appending(path: "one.dmg").path], extra)
+            let first = try await makeDMG([app.path, dir.appending(path: "one.dmg").path], extra)
             #expect(first.status == 0, "\(first.stderr)")
             #expect(first.stderr.contains(installing), "\(first.stderr)")
             let recorded = try String(contentsOf: hashFile, encoding: .utf8)
-            let wanted = try run(tool("shasum"), ["-a", "256", repositoryFile("packaging/dmg/requirements.txt").path])
+            let wanted = try await run(tool("shasum"), ["-a", "256", repositoryFile("packaging/dmg/requirements.txt").path])
                 .stdout.split(separator: " ").first.map(String.init)
             #expect(recorded.trimmingCharacters(in: .whitespacesAndNewlines) == wanted)
 
-            let reuse = try makeDMG([app.path, dir.appending(path: "two.dmg").path], extra)
+            let reuse = try await makeDMG([app.path, dir.appending(path: "two.dmg").path], extra)
             #expect(reuse.status == 0, "\(reuse.stderr)")
             #expect(!reuse.stderr.contains("installing"), "an unchanged environment is reused: \(reuse.stderr)")
 
             try "0\n".write(to: hashFile, atomically: true, encoding: .utf8)
-            let changed = try makeDMG([app.path, dir.appending(path: "three.dmg").path], extra)
+            let changed = try await makeDMG([app.path, dir.appending(path: "three.dmg").path], extra)
             #expect(changed.status == 0, "\(changed.stderr)")
             #expect(changed.stderr.contains(installing), "\(changed.stderr)")
             #expect(try String(contentsOf: hashFile, encoding: .utf8) == recorded)
 
             try FileManager.default.removeItem(at: venv.appending(path: "bin/python"))
-            let broken = try makeDMG([app.path, dir.appending(path: "four.dmg").path], extra)
+            let broken = try await makeDMG([app.path, dir.appending(path: "four.dmg").path], extra)
             #expect(broken.status == 0, "\(broken.stderr)")
             #expect(broken.stderr.contains(installing), "\(broken.stderr)")
             #expect(FileManager.default.isExecutableFile(atPath: venv.appending(path: "bin/python").path))
@@ -679,47 +709,47 @@ extension DiskImageTests {
         private let apiKey = ["NOCTULE_NOTARY_KEY": "/tmp/fake.p8", "NOCTULE_NOTARY_KEY_ID": "KEYID12345",
                               "NOCTULE_NOTARY_ISSUER": "issuer-0000"]
 
-        private func notarize(_ arguments: [String], _ stubs: StubTools, _ extra: [String: String] = [:]) throws
+        private func notarize(_ arguments: [String], _ stubs: StubTools, _ extra: [String: String] = [:]) async throws
             -> (status: Int32, stdout: String, stderr: String) {
-            try runScript("packaging/notarize.sh", arguments, environment: stubs.environment.merging(extra) { _, new in new })
+            try await runScript("packaging/notarize.sh", arguments, environment: stubs.environment.merging(extra) { _, new in new })
         }
 
-        @Test func checkFindsTheOneIdentity() throws {
+        @Test func checkFindsTheOneIdentity() async throws {
             let stubs = try StubTools()
-            let result = try notarize(["--check"], stubs)
+            let result = try await notarize(["--check"], stubs)
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stdout.contains("notarize: ready (keychain profile)"))
             #expect(stubs.calls() == ["security find-identity -v -p codesigning"])
         }
 
-        @Test func checkWithNoIdentity() throws {
+        @Test func checkWithNoIdentity() async throws {
             let stubs = try StubTools()
-            let result = try notarize(["--check"], stubs, ["STUB_IDENTITIES": "     0 valid identities found"])
+            let result = try await notarize(["--check"], stubs, ["STUB_IDENTITIES": "     0 valid identities found"])
             #expect(result.status == 1)
             #expect(result.stderr.contains(
                 "notarize: no Developer ID Application certificate in the keychain; see packaging/README.md (one-time setup)"))
         }
 
-        @Test func checkWithTwoIdentities() throws {
+        @Test func checkWithTwoIdentities() async throws {
             let stubs = try StubTools()
             let two = #"  1) \#(stubHash) "Developer ID Application: Test Person (TEAM123456)"\n"#
                 + #"  2) FEDCBA9876543210FEDCBA9876543210FEDCBA98 "Developer ID Application: Test Person (TEAM123456)"\n"#
                 + "     2 valid identities found"
-            let result = try notarize(["--check"], stubs, ["STUB_IDENTITIES": two])
+            let result = try await notarize(["--check"], stubs, ["STUB_IDENTITIES": two])
             #expect(result.status == 1)
             #expect(result.stderr.contains("notarize: several Developer ID Application certificates; set "
                 + "NOCTULE_SIGNING_IDENTITY to the SHA-1 of the one to use (security find-identity -v -p codesigning)"))
             let chosen = try StubTools()
-            let ok = try notarize(["--check"], chosen, ["STUB_IDENTITIES": two, "NOCTULE_SIGNING_IDENTITY": "ABC"])
+            let ok = try await notarize(["--check"], chosen, ["STUB_IDENTITIES": two, "NOCTULE_SIGNING_IDENTITY": "ABC"])
             #expect(ok.status == 0, "\(ok.stderr)")
             #expect(!chosen.calls().contains { $0.hasPrefix("security") })
         }
 
-        @Test func partialAPIKeyIsRefused() throws {
+        @Test func partialAPIKeyIsRefused() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
             for arguments in [["--check"], [app.path]] {
-                let result = try notarize(arguments, stubs, ["NOCTULE_NOTARY_KEY_ID": "KEYID12345"])
+                let result = try await notarize(arguments, stubs, ["NOCTULE_NOTARY_KEY_ID": "KEYID12345"])
                 #expect(result.status == 1)
                 #expect(result.stderr.contains("notarize: NOCTULE_NOTARY_KEY, NOCTULE_NOTARY_KEY_ID and "
                     + "NOCTULE_NOTARY_ISSUER go together; set all three or none"))
@@ -727,10 +757,10 @@ extension DiskImageTests {
             #expect(!stubs.calls().contains { $0.hasPrefix("xcrun") || $0.hasPrefix("codesign") })
         }
 
-        @Test func appIsSignedNotarizedAndStapled() throws {
+        @Test func appIsSignedNotarizedAndStapled() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
-            let result = try notarize([app.path], stubs)
+            let result = try await notarize([app.path], stubs)
             #expect(result.status == 0, "\(result.stderr)")
             let calls = stubs.calls()
             #expect(inOrder(calls, [
@@ -746,10 +776,10 @@ extension DiskImageTests {
         }
 
         /// The app gets the hardened runtime and its entitlements (audio input) in one `codesign`; the image gets neither.
-        @Test func notarizeSignsWithTheEntitlements() throws {
+        @Test func notarizeSignsWithTheEntitlements() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
-            let result = try notarize([app.path], stubs)
+            let result = try await notarize([app.path], stubs)
             #expect(result.status == 0, "\(result.stderr)")
             let signs = stubs.calls().filter { $0.hasPrefix("codesign --force ") }
             #expect(signs.count == 1, "\(signs)")
@@ -758,23 +788,23 @@ extension DiskImageTests {
             #expect(sign.hasSuffix("/Resources/NoctuleScan.entitlements --sign \(stubHash) \(app.path)"), "\(sign)")
         }
 
-        @Test func entitlementsFileMustExistBeforeAnythingIsSigned() throws {
+        @Test func entitlementsFileMustExistBeforeAnythingIsSigned() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
             let root = stubs.directory.appending(path: "bare-repo")
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: repositoryFile("packaging"), to: root.appending(path: "packaging"))
-            let result = try runScript("packaging/notarize.sh", [app.path], environment: stubs.environment, root: root)
+            let result = try await runScript("packaging/notarize.sh", [app.path], environment: stubs.environment, root: root)
             #expect(result.status == 1)
             #expect(result.stderr.contains("notarize: no entitlements file at "), "\(result.stderr)")
             #expect(!stubs.calls().contains { $0.hasPrefix("codesign") || $0.hasPrefix("xcrun") })
         }
 
-        @Test func dmgIsSignedWithoutRuntime() throws {
+        @Test func dmgIsSignedWithoutRuntime() async throws {
             let stubs = try StubTools()
             let dmg = stubs.directory.appending(path: "Noctule Scan 0.1.0.dmg")
-            #expect(try runScript("packaging/dmg/make-dmg.sh", [fakeApp(in: stubs.directory).path, dmg.path]).status == 0)
-            let result = try notarize([dmg.path], stubs)
+            #expect(try await runScript("packaging/dmg/make-dmg.sh", [fakeApp(in: stubs.directory).path, dmg.path]).status == 0)
+            let result = try await notarize([dmg.path], stubs)
             #expect(result.status == 0, "\(result.stderr)")
             let calls = stubs.calls()
             #expect(calls.contains("codesign --force --timestamp --sign \(stubHash) \(dmg.path)"), "\(calls)")
@@ -783,22 +813,22 @@ extension DiskImageTests {
             #expect(calls.contains("xcrun stapler staple \(dmg.path)"))
         }
 
-        @Test func apiKeyCredentialsAreUsed() throws {
+        @Test func apiKeyCredentialsAreUsed() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
-            let check = try notarize(["--check"], stubs, apiKey)
+            let check = try await notarize(["--check"], stubs, apiKey)
             #expect(check.stdout.contains("notarize: ready (API key)"))
-            let result = try notarize([app.path], stubs, apiKey)
+            let result = try await notarize([app.path], stubs, apiKey)
             #expect(result.status == 0, "\(result.stderr)")
             let submit = try #require(stubs.calls().first { $0.hasPrefix("xcrun notarytool submit") })
             #expect(submit.contains("--key /tmp/fake.p8 --key-id KEYID12345 --issuer issuer-0000"))
             #expect(!submit.contains("--keychain-profile"))
         }
 
-        @Test func rejectionPrintsTheLogAndStaplesNothing() throws {
+        @Test func rejectionPrintsTheLogAndStaplesNothing() async throws {
             let stubs = try StubTools()
             let app = try fakeApp(in: stubs.directory)
-            let result = try notarize([app.path], stubs, ["STUB_NOTARY_STATUS": "Invalid"])
+            let result = try await notarize([app.path], stubs, ["STUB_NOTARY_STATUS": "Invalid"])
             #expect(result.status == 1)
             let output = result.stdout + result.stderr
             #expect(output.contains("stub log for stub-1"))
@@ -808,37 +838,37 @@ extension DiskImageTests {
             #expect(!stubs.calls().contains { $0.hasPrefix("xcrun stapler") })
         }
 
-        @Test func failedSubmitPrintsApplesMessage() throws {
+        @Test func failedSubmitPrintsApplesMessage() async throws {
         let stubs = try StubTools()
         let app = try fakeApp(in: stubs.directory)
         let raw = #"{"message":"No Keychain password item found for profile: noctule-notary"}"#
-        let result = try notarize([app.path], stubs, ["STUB_NOTARY_RAW": raw, "STUB_NOTARY_EXIT": "69"])
+        let result = try await notarize([app.path], stubs, ["STUB_NOTARY_RAW": raw, "STUB_NOTARY_EXIT": "69"])
         #expect(result.status == 1)
         #expect(result.stderr.contains("No Keychain password item found for profile: noctule-notary"), "\(result.stderr)")
         #expect(result.stderr.contains("Apple answered nothing usable; nothing stapled"))
         #expect(!stubs.calls().contains { $0.hasPrefix("xcrun notarytool log") || $0.hasPrefix("xcrun stapler") })
     }
 
-    @Test func outputCarriesNoCredentials() throws {
+    @Test func outputCarriesNoCredentials() async throws {
             let scenarios: [[String: String]] = [[:], apiKey, ["STUB_NOTARY_STATUS": "Invalid"],
                                                  apiKey.merging(["STUB_NOTARY_STATUS": "Invalid"]) { _, new in new }]
             for extra in scenarios {
                 let stubs = try StubTools()
                 let app = try fakeApp(in: stubs.directory)
                 for arguments in [["--check"], [app.path]] {
-                    let result = try notarize(arguments, stubs, extra)
+                    let result = try await notarize(arguments, stubs, extra)
                     let output = result.stdout + result.stderr
                     for secret in secrets { #expect(!output.contains(secret), "\(extra) \(arguments) printed \(secret)") }
                 }
             }
         }
 
-        @Test func refusesOtherFiles() throws {
+        @Test func refusesOtherFiles() async throws {
             let stubs = try StubTools()
             let zip = stubs.directory.appending(path: "Noctule Scan.zip")
             try Data().write(to: zip)
             for arguments in [[zip.path], [stubs.directory.appending(path: "Missing.app").path], []] {
-                let result = try notarize(arguments, stubs)
+                let result = try await notarize(arguments, stubs)
                 #expect(result.status == 2, "\(arguments): \(result.stderr)")
             }
             #expect(!stubs.calls().contains { $0.hasPrefix("codesign") })
@@ -850,7 +880,7 @@ extension DiskImageTests {
 
 /// A git repository holding a copy of `packaging/`, `Resources/Info.plist` and the entitlements, and a stub
 /// `scripts/build-app.sh` that makes `build/Noctule Scan.app` the way the real one lays it out.
-func fakeRepository(in directory: URL) throws -> URL {
+func fakeRepository(in directory: URL) async throws -> URL {
     let repo = directory.appending(path: "repo")
     let files = FileManager.default
     try files.createDirectory(at: repo.appending(path: "Resources"), withIntermediateDirectories: true)
@@ -884,7 +914,7 @@ func fakeRepository(in directory: URL) throws -> URL {
                       ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                        "commit", "-q", "-m", "fixture"],
                       ["update-ref", "refs/remotes/origin/main", "HEAD"]] {
-        let git = try run(tool("git"), ["-C", repo.path] + arguments)
+        let git = try await run(tool("git"), ["-C", repo.path] + arguments)
         try #require(git.status == 0, "git \(arguments): \(git.stderr)")
     }
     return repo
@@ -892,8 +922,8 @@ func fakeRepository(in directory: URL) throws -> URL {
 
 /// A fake repository that is a clone of a bare `origin` (`origin.git` in `directory`), on `main`, with `tags`
 /// (annotated, on the one commit) pushed to it and also present locally, as after a release made from here.
-func releaseRepository(in directory: URL, tags: [String]) throws -> (repo: URL, origin: URL) {
-    let repo = try fakeRepository(in: directory)
+func releaseRepository(in directory: URL, tags: [String]) async throws -> (repo: URL, origin: URL) {
+    let repo = try await fakeRepository(in: directory)
     let origin = directory.appending(path: "origin.git")
     let identity = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid",
                     "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
@@ -906,20 +936,20 @@ func releaseRepository(in directory: URL, tags: [String]) throws -> (repo: URL, 
         steps.append(["-C", repo.path, "push", "-q", "origin", tag])
     }
     for arguments in steps {
-        let git = try run(tool("git"), arguments)
+        let git = try await run(tool("git"), arguments)
         try #require(git.status == 0, "git \(arguments): \(git.stderr)")
     }
     return (repo, origin)
 }
 
 /// Tags `HEAD` of `repo` (a lightweight tag, as `git tag` makes).
-func tagHead(_ repo: URL, _ name: String) throws {
-    let git = try run(tool("git"), ["-C", repo.path, "tag", name])
+func tagHead(_ repo: URL, _ name: String) async throws {
+    let git = try await run(tool("git"), ["-C", repo.path, "tag", name])
     try #require(git.status == 0, "git tag: \(git.stderr)")
 }
 
-func porcelain(_ repo: URL) throws -> String {
-    try run(tool("git"), ["-C", repo.path, "status", "--porcelain"]).stdout
+func porcelain(_ repo: URL) async throws -> String {
+    try await run(tool("git"), ["-C", repo.path, "status", "--porcelain"]).stdout
 }
 
 private func bundleVersions(_ app: URL) throws -> (short: String?, build: String?) {
@@ -930,87 +960,87 @@ private func bundleVersions(_ app: URL) throws -> (short: String?, build: String
 
 extension DiskImageTests {
     @Suite(.timeLimit(.minutes(1))) struct ReleaseTests {
-        private func release(_ arguments: [String], _ stubs: StubTools, _ repo: URL, _ extra: [String: String] = [:]) throws
+        private func release(_ arguments: [String], _ stubs: StubTools, _ repo: URL, _ extra: [String: String] = [:]) async throws
             -> (status: Int32, stdout: String, stderr: String) {
             // Every run has official (stub) art unless the test says otherwise, as the owner's would.
             let art = stubs.directory.appending(path: "stub-branding")
             if !FileManager.default.fileExists(atPath: art.path) { _ = try stubBrandingFolder(in: stubs.directory) }
             let environment = stubs.environment.merging(["NOCTULE_BRANDING_DIR": art.path]) { _, new in new }
-            return try runScript("packaging/release.sh", arguments,
+            return try await runScript("packaging/release.sh", arguments,
                                  environment: environment.merging(extra) { _, new in new }, root: repo)
         }
 
         // MARK: the official art
 
         /// The release job checks the art out to `branding/` in the work tree; the clean-tree check must not see it.
-        @Test func anIgnoredBrandingCheckoutDoesNotDirtyTheTree() throws {
+        @Test func anIgnoredBrandingCheckoutDoesNotDirtyTheTree() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
+            let repo = try await fakeRepository(in: stubs.directory)
             try String(contentsOf: repositoryFile(".gitignore"), encoding: .utf8)
                 .write(to: repo.appending(path: ".gitignore"), atomically: true, encoding: .utf8)
             for arguments in [["add", ".gitignore"],
                               ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                                "commit", "-q", "--amend", "--no-edit"]] {
-                let git = try run(tool("git"), ["-C", repo.path] + arguments)
+                let git = try await run(tool("git"), ["-C", repo.path] + arguments)
                 try #require(git.status == 0, "git \(arguments): \(git.stderr)")
             }
             let art = repo.appending(path: "branding/builds/noctule-scan")
             try FileManager.default.createDirectory(at: art, withIntermediateDirectories: true)
             try "x".write(to: art.appending(path: "placeholder.txt"), atomically: true, encoding: .utf8)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0"], stubs, repo)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
         }
 
-        @Test func releaseWithoutArtIsRefused() throws {
+        @Test func releaseWithoutArtIsRefused() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0"], stubs, repo, ["NOCTULE_BRANDING_DIR": ""])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0"], stubs, repo, ["NOCTULE_BRANDING_DIR": ""])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release: no official art: set NOCTULE_BRANDING_DIR (or config/branding.env) to the design-language repo's builds/noctule-scan folder"), "\(result.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
         }
 
-        @Test func malformedArtFolderIsRefused() throws {
+        @Test func malformedArtFolderIsRefused() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
             let empty = stubs.directory.appending(path: "empty-art")
             try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
-            let result = try release(["0.2.0"], stubs, repo, ["NOCTULE_BRANDING_DIR": empty.path])
+            let result = try await release(["0.2.0"], stubs, repo, ["NOCTULE_BRANDING_DIR": empty.path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("isn't a branding folder"), "\(result.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
         }
 
-        @Test func untaggedWithoutArtIsMarkedUnbranded() throws {
+        @Test func untaggedWithoutArtIsMarkedUnbranded() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            let result = try release(["0.2.0", "--untagged"], stubs, repo, ["NOCTULE_BRANDING_DIR": ""])
+            let repo = try await fakeRepository(in: stubs.directory)
+            let result = try await release(["0.2.0", "--untagged"], stubs, repo, ["NOCTULE_BRANDING_DIR": ""])
             #expect(result.status == 0, "\(result.stderr)")
             let build = repo.appending(path: "build")
             #expect(FileManager.default.fileExists(atPath: build.appending(path: "noctule-scan-0.2.0-untagged-unbranded.dmg").path))
             #expect(!FileManager.default.fileExists(atPath: build.appending(path: "noctule-scan-0.2.0-untagged.dmg").path))
         }
 
-        @Test func artIsPassedToTheBuild() throws {
+        @Test func artIsPassedToTheBuild() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             let art = stubs.directory.appending(path: "stub-branding").resolvingSymlinksInPath().path
             #expect(stubs.calls().contains("env NOCTULE_BRANDING_DIR=\(art)"), "\(stubs.calls())")
         }
 
         /// A malformed folder is a refusal even with `--untagged`: it must not fall through to an unbranded build.
-        @Test func malformedArtFolderIsRefusedEvenUntagged() throws {
+        @Test func malformedArtFolderIsRefusedEvenUntagged() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
+            let repo = try await fakeRepository(in: stubs.directory)
             let empty = stubs.directory.appending(path: "empty-art")
             try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
-            let result = try release(["0.2.0", "--untagged"], stubs, repo, ["NOCTULE_BRANDING_DIR": empty.path])
+            let result = try await release(["0.2.0", "--untagged"], stubs, repo, ["NOCTULE_BRANDING_DIR": empty.path])
             #expect(result.status == 1)
             #expect(result.stderr.contains("isn't a branding folder"), "\(result.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
@@ -1019,16 +1049,16 @@ extension DiskImageTests {
         }
 
         /// Art named only by `config/branding.env`, with the variable truly unset: release.sh must export it to the build.
-        @Test func artFromTheConfigFileReachesTheBuild() throws {
+        @Test func artFromTheConfigFileReachesTheBuild() async throws {
             let stubs = try StubTools()
             let art = try stubBrandingFolder(in: stubs.directory)
-            let repo = try fakeRepository(in: stubs.directory)
+            let repo = try await fakeRepository(in: stubs.directory)
             try FileManager.default.createDirectory(at: repo.appending(path: "config"), withIntermediateDirectories: true)
             try "NOCTULE_BRANDING_DIR=\(art.path)\n".write(to: repo.appending(path: "config/branding.env"),
                                                           atomically: true, encoding: .utf8)
-            try tagHead(repo, "v0.2.0")
-            let environment = ((try? dmgEnvironment()) ?? [:]).merging(stubs.environment) { _, new in new }
-            let result = try run(tool("env"), ["-u", "NOCTULE_BRANDING_DIR", repo.appending(path: "packaging/release.sh").path, "0.2.0",
+            try await tagHead(repo, "v0.2.0")
+            let environment = ((try? await dmgEnvironment()) ?? [:]).merging(stubs.environment) { _, new in new }
+            let result = try await run(tool("env"), ["-u", "NOCTULE_BRANDING_DIR", repo.appending(path: "packaging/release.sh").path, "0.2.0",
                                               "--allow-dirty"],
                                  environment: environment, currentDirectory: FileManager.default.temporaryDirectory, limit: 120)
             #expect(result.status == 0, "\(result.stderr)")
@@ -1036,47 +1066,47 @@ extension DiskImageTests {
         }
 
         /// The art folder as a git repository with one commit; returns its HEAD.
-        private func gitArt(in stubs: StubTools) throws -> String {
+        private func gitArt(in stubs: StubTools) async throws -> String {
             let art = stubs.directory.appending(path: "stub-branding")
             _ = try stubBrandingFolder(in: stubs.directory)
             for arguments in [["init", "-q", "-b", "main"], ["add", "-A"],
                               ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                                "commit", "-q", "-m", "art"]] {
-                let git = try run(tool("git"), ["-C", art.path] + arguments)
+                let git = try await run(tool("git"), ["-C", art.path] + arguments)
                 try #require(git.status == 0, "git \(arguments): \(git.stderr)")
             }
-            return try run(tool("git"), ["-C", art.path, "rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            return try await run(tool("git"), ["-C", art.path, "rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        @Test func releaseWarnsWhenTheArtIsntThePinnedCommit() throws {
+        @Test func releaseWarnsWhenTheArtIsntThePinnedCommit() async throws {
             let stubs = try StubTools()
-            let head = try gitArt(in: stubs)
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
+            let head = try await gitArt(in: stubs)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
             let pinned = String(repeating: "a", count: 40)
             try "\(pinned)\n".write(to: repo.appending(path: "packaging/branding-ref"), atomically: true, encoding: .utf8)
-            let result = try release(["0.2.0", "--allow-dirty"], stubs, repo)
+            let result = try await release(["0.2.0", "--allow-dirty"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stderr.contains("release: warning: the art at "), "\(result.stderr)")
             #expect(result.stderr.contains("is \(head), not packaging/branding-ref's \(pinned)"), "\(result.stderr)")
         }
 
-        @Test func noWarningWhenTheArtIsThePinnedCommit() throws {
+        @Test func noWarningWhenTheArtIsThePinnedCommit() async throws {
             let stubs = try StubTools()
-            let head = try gitArt(in: stubs)
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
+            let head = try await gitArt(in: stubs)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
             try "\(head)\n".write(to: repo.appending(path: "packaging/branding-ref"), atomically: true, encoding: .utf8)
-            let result = try release(["0.2.0", "--allow-dirty"], stubs, repo)
+            let result = try await release(["0.2.0", "--allow-dirty"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             #expect(!result.stderr.contains("warning: the art"), "\(result.stderr)")
         }
 
-        @Test func fullRunStampsSignsAndPackages() throws {
+        @Test func fullRunStampsSignsAndPackages() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.3.0-beta.1")
-            let result = try release(["0.3.0-beta.1", "--build", "7"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.3.0-beta.1")
+            let result = try await release(["0.3.0-beta.1", "--build", "7"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             let app = repo.appending(path: "build/Noctule Scan.app")
             let dmg = repo.appending(path: "build/noctule-scan-0.3.0-beta.1.dmg")
@@ -1100,10 +1130,10 @@ extension DiskImageTests {
                 "xcrun stapler validate \(dmg.path)",
                 "spctl --assess --type execute --verbose ",
             ]), "\(calls)")
-            let shasum = try run(tool("shasum"), ["-a", "256", dmg.path]).stdout.split(separator: " ").first.map(String.init)
+            let shasum = try await run(tool("shasum"), ["-a", "256", dmg.path]).stdout.split(separator: " ").first.map(String.init)
             #expect(result.stdout.contains("release: \(dmg.path)\n"))
             #expect(result.stdout.contains("sha256: \(try #require(shasum))\n"))
-            #expect(try porcelain(repo).isEmpty)
+            #expect(try await porcelain(repo).isEmpty)
         }
 
         // MARK: the version comes from a tag
@@ -1111,53 +1141,53 @@ extension DiskImageTests {
         private static let untaggedMessage =
             "release: HEAD isn't tagged v%@; cut releases with packaging/cut-release.sh (or pass --untagged to try a release locally)"
 
-        @Test func untaggedHeadIsRefused() throws {
+        @Test func untaggedHeadIsRefused() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            let result = try release(["0.2.0"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            let result = try await release(["0.2.0"], stubs, repo)
             #expect(result.status == 1)
             #expect(result.stderr.contains(String(format: Self.untaggedMessage, "0.2.0")), "\(result.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
         }
 
-        @Test func wrongTagIsRefused() throws {
+        @Test func wrongTagIsRefused() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.9")
-            let result = try release(["0.2.0"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.9")
+            let result = try await release(["0.2.0"], stubs, repo)
             #expect(result.status == 1)
             #expect(result.stderr.contains(String(format: Self.untaggedMessage, "0.2.0")), "\(result.stderr)")
             #expect(!stubs.calls().contains { $0.hasPrefix("build") })
         }
 
         /// The tag is the full version given: `v0.1.1`, or another beta's, doesn't release `0.1.1-beta.2`.
-        @Test func betaVersionNeedsItsOwnTag() throws {
+        @Test func betaVersionNeedsItsOwnTag() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.1")
-            try tagHead(repo, "v0.1.1-beta.1")
-            let refused = try release(["0.1.1-beta.2"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.1")
+            try await tagHead(repo, "v0.1.1-beta.1")
+            let refused = try await release(["0.1.1-beta.2"], stubs, repo)
             #expect(refused.status == 1)
             #expect(refused.stderr.contains(String(format: Self.untaggedMessage, "0.1.1-beta.2")), "\(refused.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
             // And the reverse: a longer tag on HEAD doesn't release the shorter version.
-            let longer = try fakeRepository(in: stubs.directory.appending(path: "longer"))
-            try tagHead(longer, "v0.1.1-beta.2")
-            let refusedShort = try release(["0.1.1"], stubs, longer)
+            let longer = try await fakeRepository(in: stubs.directory.appending(path: "longer"))
+            try await tagHead(longer, "v0.1.1-beta.2")
+            let refusedShort = try await release(["0.1.1"], stubs, longer)
             #expect(refusedShort.status == 1)
             #expect(refusedShort.stderr.contains(String(format: Self.untaggedMessage, "0.1.1")), "\(refusedShort.stderr)")
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
-            try tagHead(repo, "v0.1.1-beta.2")
-            let allowed = try release(["0.1.1-beta.2", "--build", "3"], stubs, repo)
+            try await tagHead(repo, "v0.1.1-beta.2")
+            let allowed = try await release(["0.1.1-beta.2", "--build", "3"], stubs, repo)
             #expect(allowed.status == 0, "\(allowed.stderr)")
             #expect(FileManager.default.fileExists(atPath: repo.appending(path: "build/noctule-scan-0.1.1-beta.2.dmg").path))
             #expect(try bundleVersions(repo.appending(path: "build/Noctule Scan.app")).short == "0.1.1")
         }
 
-        @Test func untaggedFlagMarksTheDMG() throws {
+        @Test func untaggedFlagMarksTheDMG() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            let result = try release(["0.2.0", "--untagged"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            let result = try await release(["0.2.0", "--untagged"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             let build = repo.appending(path: "build")
             #expect(FileManager.default.fileExists(atPath: build.appending(path: "noctule-scan-0.2.0-untagged.dmg").path))
@@ -1165,56 +1195,60 @@ extension DiskImageTests {
             #expect(result.stdout.contains("release: \(build.path)/noctule-scan-0.2.0-untagged.dmg\n"), "\(result.stdout)")
         }
 
-        @Test func versionInsideTheDMGIsChecked() throws {
+        @Test func versionInsideTheDMGIsChecked() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0", "--build", "12"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0", "--build", "12"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             let dmg = repo.appending(path: "build/noctule-scan-0.2.0.dmg")
-            try withMountedImage(dmg) { mount in
+            try await withMountedImage(dmg) { mount in
                 let versions = try bundleVersions(mount.appending(path: "Noctule Scan.app"))
                 #expect(versions.short == "0.2.0")
                 #expect(versions.build == "12")
             }
         }
 
-        @Test func wrongBuildInsideTheDMGFails() throws {
+        @Test func wrongBuildInsideTheDMGFails() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0", "--build", "12"], stubs, repo, ["STUB_PLUTIL_NOOP_KEY": "CFBundleVersion"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0", "--build", "12"], stubs, repo, ["STUB_PLUTIL_NOOP_KEY": "CFBundleVersion"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release: the app in the DMG says 0.2.0 (build 0), expected 0.2.0 (build 12)"), "\(result.stderr)")
             #expect(!result.stdout.contains("release: /"))
             #expect(!result.stdout.contains("sha256:"))
-            #expect(try !attachedImages(under: stubs.directory))
+            #expect(try await attachedImages(under: stubs.directory) == false)
         }
 
-        @Test func wrongVersionInsideTheDMGFails() throws {
+        @Test func wrongVersionInsideTheDMGFails() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.2.0")
-            let result = try release(["0.2.0", "--build", "12"], stubs, repo, ["STUB_PLUTIL_NOOP": "1"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.2.0")
+            let result = try await release(["0.2.0", "--build", "12"], stubs, repo, ["STUB_PLUTIL_NOOP": "1"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release: the app in the DMG says 0.0.0 (build 0), expected 0.2.0 (build 12)"), "\(result.stderr)")
             #expect(!result.stdout.contains("release: /"))
             #expect(!result.stdout.contains("sha256:"))
-            #expect(try !attachedImages(under: stubs.directory))
+            #expect(try await attachedImages(under: stubs.directory) == false)
         }
 
         /// Whether `hdiutil info` lists an image under `directory`.
-        private func attachedImages(under directory: URL) throws -> Bool {
-            try run(tool("hdiutil"), ["info"]).stdout.contains(directory.lastPathComponent)
+        /// Whether an image from this test's own directory is attached. The whole path, not its last
+        /// component, which every test's directory shares ("with space"): one image a killed run left
+        /// attached failed four tests at once (local sweep).
+        private func attachedImages(under directory: URL) async throws -> Bool {
+            let info = try await run(tool("hdiutil"), ["info"]).stdout
+            return [directory.path, directory.resolvingSymlinksInPath().path].contains { info.contains($0 + "/") }
         }
 
-        @Test func releaseChecksTheAppInsideTheDMG() throws {
+        @Test func releaseChecksTheAppInsideTheDMG() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
             let tmp = stubs.directory.appending(path: "tmp")
             try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-            let result = try release(["0.1.0"], stubs, repo, ["TMPDIR": tmp.path])
+            let result = try await release(["0.1.0"], stubs, repo, ["TMPDIR": tmp.path])
             #expect(result.status == 0, "\(result.stderr)")
             let leftover = (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
             #expect(leftover.filter { $0.hasPrefix("noctule-release-check.") }.isEmpty, "\(leftover)")
@@ -1225,34 +1259,34 @@ extension DiskImageTests {
                 .filter { !$0.contains(repo.appending(path: "build").path) }
             #expect(inside.count == 1, "\(calls)")
             #expect(inOrder(calls, ["xcrun stapler validate \(dmg.path)", inside.first ?? "?"]), "\(calls)")
-            #expect(try !attachedImages(under: stubs.directory))
+            #expect(try await attachedImages(under: stubs.directory) == false)
         }
 
-        @Test func failedCheckInsideTheDMGDetaches() throws {
+        @Test func failedCheckInsideTheDMGDetaches() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
-            let result = try release(["0.1.0"], stubs, repo, ["STUB_SPCTL_FAIL_MATCH": "noctule-release-check"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo, ["STUB_SPCTL_FAIL_MATCH": "noctule-release-check"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release: Gatekeeper (app in the DMG) check failed"), "\(result.stderr)")
             #expect(!result.stdout.contains("release: /"))
             #expect(!result.stdout.contains("sha256:"))
-            #expect(try !attachedImages(under: stubs.directory))
+            #expect(try await attachedImages(under: stubs.directory) == false)
         }
 
-        @Test func defaultBuildNumberIsZero() throws {
+        @Test func defaultBuildNumberIsZero() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
-            let result = try release(["0.1.0"], stubs, repo)
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo)
             #expect(result.status == 0, "\(result.stderr)")
             #expect(try bundleVersions(repo.appending(path: "build/Noctule Scan.app")).build == "0")
             #expect(FileManager.default.fileExists(atPath: repo.appending(path: "build/noctule-scan-0.1.0.dmg").path))
         }
 
-        @Test func badVersionsBuildNothing() throws {
+        @Test func badVersionsBuildNothing() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
+            let repo = try await fakeRepository(in: stubs.directory)
             let cases: [([String], String)] = [
                 (["v0.1.0"], "release: give the version without the v (0.1.0, not v0.1.0)"),
                 (["0.1"], "release: 0.1 isn't a version (1.2.3 or 1.2.3-beta.1)"),
@@ -1262,65 +1296,66 @@ extension DiskImageTests {
                 ([], "usage:"),
             ]
             for (arguments, message) in cases {
-                let result = try release(arguments, stubs, repo)
+                let result = try await release(arguments, stubs, repo)
                 #expect(result.status == 2, "\(arguments)")
                 #expect(result.stderr.contains(message), "\(arguments): \(result.stderr)")
             }
             #expect(stubs.calls().isEmpty, "\(stubs.calls())")
         }
 
-        @Test func dirtyTreeIsRefused() throws {
+        @Test func dirtyTreeIsRefused() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
             try "x".write(to: repo.appending(path: "untracked.txt"), atomically: true, encoding: .utf8)
-            let refused = try release(["0.1.0"], stubs, repo)
+            let refused = try await release(["0.1.0"], stubs, repo)
             #expect(refused.status == 1)
             #expect(refused.stderr.contains(
                 "release: the working tree has changes; commit them, or pass --allow-dirty to try a release locally"))
             #expect(!stubs.calls().contains { $0.hasPrefix("build") })
-            let allowed = try release(["0.1.0", "--allow-dirty"], stubs, repo)
+            let allowed = try await release(["0.1.0", "--allow-dirty"], stubs, repo)
             #expect(allowed.status == 0, "\(allowed.stderr)")
         }
 
-        @Test func missingCertificateStopsBeforeTheBuild() throws {
+        @Test func missingCertificateStopsBeforeTheBuild() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
-            let result = try release(["0.1.0"], stubs, repo, ["STUB_IDENTITIES": "     0 valid identities found"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo, ["STUB_IDENTITIES": "     0 valid identities found"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("no Developer ID Application certificate"))
             #expect(!stubs.calls().contains { $0.hasPrefix("build") })
         }
 
-        @Test func rejectedAppStopsTheRun() throws {
+        @Test func rejectedAppStopsTheRun() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
-            let result = try release(["0.1.0"], stubs, repo, ["STUB_NOTARY_STATUS": "Invalid"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo, ["STUB_NOTARY_STATUS": "Invalid"])
             #expect(result.status == 1)
             #expect(!FileManager.default.fileExists(atPath: repo.appending(path: "build/noctule-scan-0.1.0.dmg").path))
             #expect(!result.stdout.contains("sha256:"))
-            #expect(try porcelain(repo).isEmpty)
+            #expect(try await porcelain(repo).isEmpty)
         }
 
-        @Test func gatekeeperOutputCarriesNoIdentity() throws {
-        let stubs = try StubTools()
-        let repo = try fakeRepository(in: stubs.directory)
-        try tagHead(repo, "v0.1.0")
-        for extra in [[:], ["STUB_SPCTL_STATUS": "3"]] {
-            let result = try release(["0.1.0"], stubs, repo, extra)
+        /// One release per case, each with its own time limit: the two in one test came within the
+        /// suite's minute on a loaded machine (two whole release builds; LESSONS.md 2026-11-22).
+        @Test(arguments: [[:], ["STUB_SPCTL_STATUS": "3"]] as [[String: String]])
+        func gatekeeperOutputCarriesNoIdentity(_ extra: [String: String]) async throws {
+            let stubs = try StubTools()
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo, extra)
             let output = result.stdout + result.stderr
             #expect(output.contains("source=Notarized Developer ID"), "\(extra)")
             #expect(!output.contains("Test Person") && !output.contains("TEAM123456"), "\(extra): \(output)")
         }
-    }
 
-    @Test func failedGatekeeperCheckFailsTheRun() throws {
+    @Test func failedGatekeeperCheckFailsTheRun() async throws {
             let stubs = try StubTools()
-            let repo = try fakeRepository(in: stubs.directory)
-            try tagHead(repo, "v0.1.0")
-            let result = try release(["0.1.0"], stubs, repo, ["STUB_SPCTL_STATUS": "3"])
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
+            let result = try await release(["0.1.0"], stubs, repo, ["STUB_SPCTL_STATUS": "3"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("check failed"))
             #expect(!result.stdout.contains("sha256:"))
@@ -1343,22 +1378,22 @@ extension DiskImageTests {
             let keyCopy: URL
             let art: URL
 
-            init() throws {
+            init() async throws {
                 stubs = try StubTools()
-                repo = try fakeRepository(in: stubs.directory)
+                repo = try await fakeRepository(in: stubs.directory)
                 runnerTemp = stubs.directory.appending(path: "runner temp")
                 try FileManager.default.createDirectory(at: runnerTemp, withIntermediateDirectories: true)
                 keyCopy = stubs.directory.appending(path: "key-copy")
                 art = try stubBrandingFolder(in: stubs.directory)
             }
 
-            func run(_ arguments: [String], _ extra: [String: String] = [:]) throws -> Result {
+            func run(_ arguments: [String], _ extra: [String: String] = [:]) async throws -> Result {
                 let secrets = ["NOCTULE_NOTARY_KEY_P8": ReleaseFromTagTests.keyBase64, "NOCTULE_NOTARY_KEY_ID": "KEYID12345",
                                "NOCTULE_NOTARY_ISSUER": "issuer-0000", "GH_TOKEN": "gh-token-secret",
                                "RUNNER_TEMP": runnerTemp.path, "STUB_KEY_COPY": keyCopy.path,
                                "NOCTULE_BRANDING_DIR": art.path]
                 let environment = stubs.environment.merging(secrets) { _, new in new }.merging(extra) { _, new in new }
-                return try runScript("packaging/ci/release-from-tag.sh", arguments, environment: environment,
+                return try await runScript("packaging/ci/release-from-tag.sh", arguments, environment: environment,
                                      root: repo, limit: 600)
             }
 
@@ -1370,18 +1405,18 @@ extension DiskImageTests {
             func dmg(_ version: String) -> URL { repo.appending(path: "build/noctule-scan-\(version).dmg") }
         }
 
-        private func sha(_ file: URL) throws -> String {
-            try #require(run(tool("shasum"), ["-a", "256", file.path]).stdout.split(separator: " ").first.map(String.init))
+        private func sha(_ file: URL) async throws -> String {
+            try #require(await run(tool("shasum"), ["-a", "256", file.path]).stdout.split(separator: " ").first.map(String.init))
         }
 
-        @Test func draftReleaseForAFinalVersion() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"])
+        @Test func draftReleaseForAFinalVersion() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"])
             #expect(result.status == 0, "\(result.stderr)")
             let dmg = rig.dmg("0.2.0")
             let checksum = rig.repo.appending(path: "build/noctule-scan-0.2.0.dmg.sha256")
-            let hex = try sha(dmg)
+            let hex = try await sha(dmg)
             let notes = "Draft made by the release workflow (run 12). SHA-256 of noctule-scan-0.2.0.dmg: \(hex). "
                 + "Write the notes, then publish."
             let key = "\(rig.runnerTemp.path)/"
@@ -1424,10 +1459,10 @@ extension DiskImageTests {
             #expect(result.stdout.contains("release-from-tag: draft release v0.2.0 created\n"))
         }
 
-        @Test func preReleaseForASuffix() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0-beta.1")
-            let result = try rig.run(["v0.2.0-beta.1", "3"])
+        @Test func preReleaseForASuffix() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0-beta.1")
+            let result = try await rig.run(["v0.2.0-beta.1", "3"])
             #expect(result.status == 0, "\(result.stderr)")
             let create = try #require(rig.calls.first { $0.hasPrefix("gh release create ") })
             #expect(create.contains(" \(rig.dmg("0.2.0-beta.1").path) \(rig.dmg("0.2.0-beta.1").path).sha256 "), "\(create)")
@@ -1436,21 +1471,21 @@ extension DiskImageTests {
             #expect(try bundleVersions(rig.repo.appending(path: "build/Noctule Scan.app")).short == "0.2.0")
         }
 
-        @Test func existingReleaseStopsBeforeApple() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"], ["STUB_GH_VIEW_STATUS": "0"])
+        @Test func existingReleaseStopsBeforeApple() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"], ["STUB_GH_VIEW_STATUS": "0"])
             #expect(result.status == 1)
             #expect(result.stderr.contains(
                 "release-from-tag: a release for v0.2.0 already exists; delete it or push a new tag"), "\(result.stderr)")
             for prefix in ["security", "build", "xcrun", "gh release create"] { #expect(!rig.called(prefix), "\(rig.calls)") }
         }
 
-        @Test func ghFailureStopsBeforeApple() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
+        @Test func ghFailureStopsBeforeApple() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
             let line = "HTTP 401: Bad credentials (https://api.github.com/graphql)"
-            let result = try rig.run(["v0.2.0", "12"], ["STUB_GH_VIEW_STATUS": "1", "STUB_GH_VIEW_STDERR": "\(line)\nsecond line"])
+            let result = try await rig.run(["v0.2.0", "12"], ["STUB_GH_VIEW_STATUS": "1", "STUB_GH_VIEW_STDERR": "\(line)\nsecond line"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: couldn't ask GitHub about releases: \(line)\n"), "\(result.stderr)")
             #expect(!result.stderr.contains("second line"))
@@ -1458,106 +1493,106 @@ extension DiskImageTests {
             #expect(rig.leftovers.isEmpty, "\(rig.leftovers)")
         }
 
-        @Test func missingGhStopsBeforeApple() throws {
+        @Test func missingGhStopsBeforeApple() async throws {
             guard !FileManager.default.fileExists(atPath: "/usr/bin/gh"), !FileManager.default.fileExists(atPath: "/bin/gh") else {
                 Issue.record("skipped: a real gh is in /usr/bin or /bin, so it can't be left off PATH")
                 return
             }
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
             let bin = rig.stubs.directory.appending(path: "bin")
             try FileManager.default.removeItem(at: bin.appending(path: "gh"))
-            let result = try rig.run(["v0.2.0", "12"], ["PATH": "\(bin.path):/usr/bin:/bin"])
+            let result = try await rig.run(["v0.2.0", "12"], ["PATH": "\(bin.path):/usr/bin:/bin"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: couldn't ask GitHub about releases"), "\(result.stderr)")
             for prefix in ["security", "build", "xcrun"] { #expect(!rig.called(prefix), "\(rig.calls)") }
             #expect(rig.leftovers.isEmpty, "\(rig.leftovers)")
         }
 
-        private func preflight(_ rig: Rig, _ arguments: [String], _ extra: [String: String] = [:]) throws -> Result {
+        private func preflight(_ rig: Rig, _ arguments: [String], _ extra: [String: String] = [:]) async throws -> Result {
             let blank = ["NOCTULE_NOTARY_KEY_P8": "", "NOCTULE_NOTARY_KEY_ID": "", "NOCTULE_NOTARY_ISSUER": ""]
             var environment = rig.stubs.environment.merging(["GH_TOKEN": "gh-token-secret", "STUB_KEY_COPY": rig.keyCopy.path]) { _, n in n }
             environment = environment.merging(blank) { _, n in n }.merging(extra) { _, n in n }
-            return try runScript("packaging/ci/release-from-tag.sh", arguments, environment: environment, root: rig.repo, limit: 600)
+            return try await runScript("packaging/ci/release-from-tag.sh", arguments, environment: environment, root: rig.repo, limit: 600)
         }
 
-        @Test func preflightNeedsNoAppleSecrets() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try preflight(rig, ["--preflight", "v0.2.0"])
+        @Test func preflightNeedsNoAppleSecrets() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await preflight(rig, ["--preflight", "v0.2.0"])
             #expect(result.status == 0, "\(result.stderr)")
             #expect(result.stdout.contains("release-from-tag: v0.2.0 can be released\n"), "\(result.stdout)")
             #expect(rig.calls == ["gh release view v0.2.0"], "\(rig.calls)")
         }
 
-        @Test func preflightRefusesATagNotOnMain() throws {
-            let rig = try Rig()
+        @Test func preflightRefusesATagNotOnMain() async throws {
+            let rig = try await Rig()
             for arguments in [["checkout", "-q", "-b", "side"],
                               ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                                "commit", "-q", "--allow-empty", "-m", "side"]] {
-                let git = try run(tool("git"), ["-C", rig.repo.path] + arguments)
+                let git = try await run(tool("git"), ["-C", rig.repo.path] + arguments)
                 try #require(git.status == 0, "\(git.stderr)")
             }
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try preflight(rig, ["--preflight", "v0.2.0"])
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await preflight(rig, ["--preflight", "v0.2.0"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: v0.2.0 isn't on main; tag a commit that is"), "\(result.stderr)")
             #expect(rig.calls.isEmpty, "\(rig.calls)")
         }
 
-        @Test func preflightRefusesAnExistingRelease() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try preflight(rig, ["--preflight", "v0.2.0"], ["STUB_GH_VIEW_STATUS": "0"])
+        @Test func preflightRefusesAnExistingRelease() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await preflight(rig, ["--preflight", "v0.2.0"], ["STUB_GH_VIEW_STATUS": "0"])
             #expect(result.status == 1)
             #expect(result.stderr.contains(
                 "release-from-tag: a release for v0.2.0 already exists; delete it or push a new tag"), "\(result.stderr)")
             #expect(!result.stdout.contains("can be released"))
         }
 
-        @Test func preflightRefusesOtherArguments() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
+        @Test func preflightRefusesOtherArguments() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
             for arguments in [["--preflight"], ["--preflight", "v0.2.0", "extra"], ["--preflight", "0.2.0"]] {
-                let result = try preflight(rig, arguments)
+                let result = try await preflight(rig, arguments)
                 #expect(result.status == 2, "\(arguments)")
                 #expect(result.stderr.contains("usage:"), "\(arguments): \(result.stderr)")
             }
             #expect(rig.calls.isEmpty, "\(rig.calls)")
         }
 
-        @Test func tagNotOnMainIsRefused() throws {
-            let rig = try Rig()
+        @Test func tagNotOnMainIsRefused() async throws {
+            let rig = try await Rig()
             for arguments in [["checkout", "-q", "-b", "side"],
                               ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
                                "commit", "-q", "--allow-empty", "-m", "side"]] {
-                let git = try run(tool("git"), ["-C", rig.repo.path] + arguments)
+                let git = try await run(tool("git"), ["-C", rig.repo.path] + arguments)
                 try #require(git.status == 0, "\(git.stderr)")
             }
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"])
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: v0.2.0 isn't on main; tag a commit that is"), "\(result.stderr)")
             #expect(rig.calls.isEmpty, "\(rig.calls)")
         }
 
-        @Test func missingOriginMainIsExplained() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let git = try run(tool("git"), ["-C", rig.repo.path, "update-ref", "-d", "refs/remotes/origin/main"])
+        @Test func missingOriginMainIsExplained() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let git = try await run(tool("git"), ["-C", rig.repo.path, "update-ref", "-d", "refs/remotes/origin/main"])
             try #require(git.status == 0, "\(git.stderr)")
-            let result = try rig.run(["v0.2.0", "12"])
+            let result = try await rig.run(["v0.2.0", "12"])
             #expect(result.status == 1)
             #expect(result.stderr.contains(
                 "release-from-tag: origin/main isn't there; fetch it (actions/checkout with fetch-depth: 0)"), "\(result.stderr)")
             #expect(rig.calls.isEmpty, "\(rig.calls)")
         }
 
-        @Test func missingSecretIsNamed() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
+        @Test func missingSecretIsNamed() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
             for name in ["NOCTULE_NOTARY_KEY_P8", "NOCTULE_NOTARY_KEY_ID", "NOCTULE_NOTARY_ISSUER", "GH_TOKEN"] {
-                let result = try rig.run(["v0.2.0", "12"], [name: ""])
+                let result = try await rig.run(["v0.2.0", "12"], [name: ""])
                 #expect(result.status == 1, "\(name)")
                 let message = name == "GH_TOKEN" ? "release-from-tag: GH_TOKEN is empty"
                     : "release-from-tag: the secret \(name) is empty or not visible to this repository"
@@ -1567,54 +1602,54 @@ extension DiskImageTests {
             #expect(rig.calls.allSatisfy { $0 == "gh release view v0.2.0" }, "\(rig.calls)")
         }
 
-        @Test func badBase64KeyStopsTheRun() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"], ["NOCTULE_NOTARY_KEY_P8": "not base64!!"])
+        @Test func badBase64KeyStopsTheRun() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"], ["NOCTULE_NOTARY_KEY_P8": "not base64!!"])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: NOCTULE_NOTARY_KEY_P8 isn't base64"), "\(result.stderr)")
             #expect(!rig.called("build"))
             #expect(rig.leftovers.isEmpty, "\(rig.leftovers)")
         }
 
-        @Test func notAKeyStopsTheRun() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"], ["NOCTULE_NOTARY_KEY_P8": Data("hello".utf8).base64EncodedString()])
+        @Test func notAKeyStopsTheRun() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"], ["NOCTULE_NOTARY_KEY_P8": Data("hello".utf8).base64EncodedString()])
             #expect(result.status == 1)
             #expect(result.stderr.contains("release-from-tag: NOCTULE_NOTARY_KEY_P8 isn't a .p8 key"), "\(result.stderr)")
             #expect(!rig.called("build"))
             #expect(rig.leftovers.isEmpty, "\(rig.leftovers)")
         }
 
-        @Test func keyFileIsRemovedOnFailure() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"], ["STUB_NOTARY_STATUS": "Invalid"])
+        @Test func keyFileIsRemovedOnFailure() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"], ["STUB_NOTARY_STATUS": "Invalid"])
             #expect(result.status == 1)
             #expect(!rig.called("gh release create"))
             #expect(rig.leftovers.isEmpty, "\(rig.leftovers)")
         }
 
-        @Test func failedCreateFailsTheRun() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
-            let result = try rig.run(["v0.2.0", "12"], ["STUB_GH_CREATE_STATUS": "1"])
+        @Test func failedCreateFailsTheRun() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
+            let result = try await rig.run(["v0.2.0", "12"], ["STUB_GH_CREATE_STATUS": "1"])
             #expect(result.status == 1)
             #expect(rig.called("gh release create"))
             #expect(!result.stdout.contains("created"))
         }
 
-        @Test func outputCarriesNoSecrets() throws {
+        @Test func outputCarriesNoSecrets() async throws {
             let forbidden = ["KEYID12345", "issuer-0000", "fake-key-body", Self.keyBase64, "gh-token-secret",
                              "Test Person", "TEAM123456"]
             let scenarios: [[String: String]] = [[:], ["STUB_NOTARY_STATUS": "Invalid"], ["STUB_GH_VIEW_STATUS": "0"],
                                                  ["NOCTULE_NOTARY_KEY_P8": "not base64!!"],
                                                  ["NOCTULE_NOTARY_KEY_P8": Data("hello".utf8).base64EncodedString()]]
             for extra in scenarios {
-                let rig = try Rig()
-                try tagHead(rig.repo, "v0.2.0")
-                let result = try rig.run(["v0.2.0", "12"], extra)
+                let rig = try await Rig()
+                try await tagHead(rig.repo, "v0.2.0")
+                let result = try await rig.run(["v0.2.0", "12"], extra)
                 let output = result.stdout + result.stderr
                 for secret in forbidden {
                     #expect(!output.contains(secret), "\(extra.keys): output shows a secret")
@@ -1622,11 +1657,11 @@ extension DiskImageTests {
             }
         }
 
-        @Test func refusesBadArguments() throws {
-            let rig = try Rig()
-            try tagHead(rig.repo, "v0.2.0")
+        @Test func refusesBadArguments() async throws {
+            let rig = try await Rig()
+            try await tagHead(rig.repo, "v0.2.0")
             for arguments in [["0.2.0", "12"], ["vfoo", "12"], ["v0.2.0"], ["v0.2.0", "x"], []] {
-                let result = try rig.run(arguments)
+                let result = try await rig.run(arguments)
                 #expect(result.status == 2, "\(arguments)")
                 #expect(result.stderr.contains("usage:"), "\(arguments): \(result.stderr)")
             }
@@ -1699,10 +1734,10 @@ extension DiskImageTests {
         #expect(amber == 0, "\(amber) pixels with red well above blue")
     }
 
-    @Test func rendererReproducesTheCommittedImage() throws {
+    @Test func rendererReproducesTheCommittedImage() async throws {
         let out = try temporaryDirectory().appending(path: "again.tiff")
         let script = try repositoryFile("packaging/dmg/placeholder/render-placeholder-background.swift")
-        let result = try run(URL(fileURLWithPath: "/usr/bin/swift"), [script.path, out.path],
+        let result = try await run(URL(fileURLWithPath: "/usr/bin/swift"), [script.path, out.path],
                              currentDirectory: FileManager.default.temporaryDirectory, limit: 300)
         try #require(result.status == 0, "\(result.stderr)")
         let got = try images(at: out), want = try images(at: repositoryFile(Self.committed))
@@ -1718,7 +1753,8 @@ extension DiskImageTests {
 
 // MARK: - signing-keychain.sh
 
-@Suite(.timeLimit(.minutes(1))) struct SigningKeychainTests {
+// One test at a time: each runs tools (IntegrationSupport.swift, "Waiting in these tests").
+@Suite(.serialized, .timeLimit(.minutes(1))) struct SigningKeychainTests {
     private static let password = "p12-secret-pw"
     private static let p12 = Data("fake-p12".utf8).base64EncodedString()
     private typealias Result = (status: Int32, stdout: String, stderr: String)
@@ -1736,12 +1772,12 @@ extension DiskImageTests {
         }
 
         /// Runs the script with both secrets set, then `extra` (an empty value is set empty).
-        func run(_ arguments: [String], _ extra: [String: String] = [:]) throws -> Result {
+        func run(_ arguments: [String], _ extra: [String: String] = [:]) async throws -> Result {
             let secrets = ["NOCTULE_DEVELOPER_ID_P12": SigningKeychainTests.p12,
                            "NOCTULE_DEVELOPER_ID_P12_PASSWORD": SigningKeychainTests.password]
             let environment = stubs.environment.merging(["RUNNER_TEMP": runnerTemp.path]) { _, new in new }
                 .merging(secrets) { _, new in new }.merging(extra) { _, new in new }
-            return try runScript("packaging/ci/signing-keychain.sh", arguments, environment: environment)
+            return try await runScript("packaging/ci/signing-keychain.sh", arguments, environment: environment)
         }
 
         var leftovers: [String] {
@@ -1763,9 +1799,9 @@ extension DiskImageTests {
         for secret in forbidden { #expect(!output.contains(secret), "output shows a secret") }
     }
 
-    @Test func createImportsTheCertificateAndTheIntermediate() throws {
+    @Test func createImportsTheCertificateAndTheIntermediate() async throws {
         let rig = try Rig()
-        let result = try rig.run(["create"])
+        let result = try await rig.run(["create"])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("signing-keychain: \(rig.keychain)"))
         #expect(result.stdout.contains("signing-keychain: ready"))
@@ -1792,9 +1828,9 @@ extension DiskImageTests {
         noSecrets(rig, result)
     }
 
-    @Test func aFailedImportLeavesNoP12() throws {
+    @Test func aFailedImportLeavesNoP12() async throws {
         let rig = try Rig()
-        let result = try rig.run(["create"], ["STUB_SECURITY_FAIL": "import"])
+        let result = try await rig.run(["create"], ["STUB_SECURITY_FAIL": "import"])
         #expect(result.status == 1)
         #expect(rig.leftovers.isEmpty, "left \(rig.leftovers)")
         noSecrets(rig, result)
@@ -1803,12 +1839,12 @@ extension DiskImageTests {
     /// A `.p12` exported with its certificate chain already holds Apple's G2 intermediate, and
     /// importing it a second time fails ("The specified item already exists in the keychain"), as
     /// the first real release run did (2026-11-15).
-    @Test func aP12WithItsChainSkipsTheIntermediate() throws {
+    @Test func aP12WithItsChainSkipsTheIntermediate() async throws {
         let rig = try Rig()
         let intermediate = try repositoryFile("packaging/ci/DeveloperIDG2CA.cer")
         let sha1 = Insecure.SHA1.hash(data: try Data(contentsOf: intermediate)).map { String(format: "%02X", $0) }.joined()
         let holdsBoth = stubCertificateListing + #"\nSHA-256 hash: \#(sha1)\#(sha1.prefix(24))\nSHA-1 hash: \#(sha1)\n    "labl"<blob>="Developer ID Certification Authority""#
-        let result = try rig.run(["create"], ["STUB_KEYCHAIN_CERTIFICATES": holdsBoth])
+        let result = try await rig.run(["create"], ["STUB_KEYCHAIN_CERTIFICATES": holdsBoth])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("signing-keychain: the .p12 already holds Apple's Developer ID G2 intermediate"), "\(result.stdout)")
         #expect(result.stdout.contains("signing-keychain: ready"))
@@ -1823,32 +1859,32 @@ extension DiskImageTests {
     /// Only the G2 intermediate itself counts: any other certificate in the keychain (the signing
     /// certificate, an older intermediate of the same name) leaves the import in, even one whose
     /// SHA-1 differs from the intermediate's in its last digit only.
-    @Test func anotherCertificateDoesNotStandInForTheIntermediate() throws {
+    @Test func anotherCertificateDoesNotStandInForTheIntermediate() async throws {
         let rig = try Rig()
         let intermediate = try repositoryFile("packaging/ci/DeveloperIDG2CA.cer")
         let sha1 = Insecure.SHA1.hash(data: try Data(contentsOf: intermediate)).map { String(format: "%02X", $0) }.joined()
         let other = sha1.dropLast() + (sha1.hasSuffix("0") ? "1" : "0")
         let listing = stubCertificateListing + #"\nSHA-1 hash: \#(other)\n    "labl"<blob>="Developer ID Certification Authority""#
-        let result = try rig.run(["create"], ["STUB_KEYCHAIN_CERTIFICATES": listing])
+        let result = try await rig.run(["create"], ["STUB_KEYCHAIN_CERTIFICATES": listing])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(rig.stubs.calls().contains("security import \(intermediate.path) -k \(rig.keychain)"), "\(rig.stubs.calls())")
     }
 
     /// If the keychain can't be listed, the intermediate is imported as before.
-    @Test func anUnlistableKeychainStillGetsTheIntermediate() throws {
+    @Test func anUnlistableKeychainStillGetsTheIntermediate() async throws {
         let rig = try Rig()
         let intermediate = try repositoryFile("packaging/ci/DeveloperIDG2CA.cer")
-        let result = try rig.run(["create"], ["STUB_SECURITY_FAIL": "find-certificate"])
+        let result = try await rig.run(["create"], ["STUB_SECURITY_FAIL": "find-certificate"])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(rig.stubs.calls().contains("security import \(intermediate.path) -k \(rig.keychain)"), "\(rig.stubs.calls())")
         #expect(result.stdout.contains("signing-keychain: ready"))
     }
 
     /// What `find-certificate` prints (the certificates' names and hashes) never reaches the log.
-    @Test func theKeychainListingIsNeverPrinted() throws {
+    @Test func theKeychainListingIsNeverPrinted() async throws {
         for extra in [[:], ["STUB_KEYCHAIN_CERTIFICATES": stubCertificateListing + #"\nSHA-1 hash: \#(String(repeating: "B", count: 40))"#]] {
             let rig = try Rig()
-            let result = try rig.run(["create"], extra)
+            let result = try await rig.run(["create"], extra)
             let output = result.stdout + result.stderr
             for shown in ["Test Person", stubHash, "SHA-1 hash", String(repeating: "B", count: 40)] {
                 #expect(!output.contains(shown), "output shows \(shown)")
@@ -1856,18 +1892,18 @@ extension DiskImageTests {
         }
     }
 
-    @Test func aSecretWrappedOverSeveralLinesIsAccepted() throws {
+    @Test func aSecretWrappedOverSeveralLinesIsAccepted() async throws {
         let rig = try Rig()
         let wrapped = "\(Self.p12.prefix(4))\n\(Self.p12.dropFirst(4))\n"
-        let result = try rig.run(["create"], ["NOCTULE_DEVELOPER_ID_P12": wrapped])
+        let result = try await rig.run(["create"], ["NOCTULE_DEVELOPER_ID_P12": wrapped])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(rig.stubs.calls().contains { $0.hasPrefix("security import ") })
     }
 
-    @Test func missingSecretsAreNamed() throws {
+    @Test func missingSecretsAreNamed() async throws {
         for name in ["NOCTULE_DEVELOPER_ID_P12", "NOCTULE_DEVELOPER_ID_P12_PASSWORD"] {
             let rig = try Rig()
-            let result = try rig.run(["create"], [name: ""])
+            let result = try await rig.run(["create"], [name: ""])
             #expect(result.status == 1, "\(name) empty")
             #expect(result.stderr.contains("signing-keychain: the secret \(name) is empty or not visible to this repository"),
                     "\(result.stderr)")
@@ -1878,7 +1914,7 @@ extension DiskImageTests {
             var environment = rig.stubs.environment.merging(["RUNNER_TEMP": rig.runnerTemp.path,
                 "NOCTULE_DEVELOPER_ID_P12": Self.p12, "NOCTULE_DEVELOPER_ID_P12_PASSWORD": Self.password]) { _, new in new }
             environment.removeValue(forKey: name)
-            let unset = try run(tool("env"), ["-u", name, script.path, "create"], environment: environment)
+            let unset = try await run(tool("env"), ["-u", name, script.path, "create"], environment: environment)
             #expect(unset.status == 1, "\(name) unset")
             #expect(unset.stderr.contains("signing-keychain: the secret \(name) is empty or not visible to this repository"),
                     "\(unset.stderr)")
@@ -1886,10 +1922,10 @@ extension DiskImageTests {
         }
     }
 
-    @Test func badBase64IsRefused() throws {
+    @Test func badBase64IsRefused() async throws {
         for bad in ["not base64!!", "QUJDR", "QUJD===="] {
             let rig = try Rig()
-            let result = try rig.run(["create"], ["NOCTULE_DEVELOPER_ID_P12": bad])
+            let result = try await rig.run(["create"], ["NOCTULE_DEVELOPER_ID_P12": bad])
             #expect(result.status == 1, "\(bad)")
             #expect(result.stderr.contains("signing-keychain: NOCTULE_DEVELOPER_ID_P12 isn't base64"), "\(result.stderr)")
             #expect(rig.stubs.calls().isEmpty, "\(bad): \(rig.stubs.calls())")
@@ -1897,63 +1933,63 @@ extension DiskImageTests {
         }
     }
 
-    @Test func deleteRemovesTheKeychain() throws {
+    @Test func deleteRemovesTheKeychain() async throws {
         let rig = try Rig()
         try "x".write(toFile: rig.keychain, atomically: true, encoding: .utf8)
-        let result = try rig.run(["delete"])
+        let result = try await rig.run(["delete"])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("signing-keychain: deleted"))
         #expect(rig.stubs.calls() == ["security delete-keychain \(rig.keychain)"])
     }
 
-    @Test func deleteWithNoKeychainIsFine() throws {
+    @Test func deleteWithNoKeychainIsFine() async throws {
         let rig = try Rig()
-        let result = try rig.run(["delete"])
+        let result = try await rig.run(["delete"])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(result.stdout.contains("signing-keychain: nothing to delete"))
         #expect(rig.stubs.calls().isEmpty)
     }
 
-    @Test func createReplacesAKeychainAlreadyThere() throws {
+    @Test func createReplacesAKeychainAlreadyThere() async throws {
         let rig = try Rig()
         try "x".write(toFile: rig.keychain, atomically: true, encoding: .utf8)
-        let result = try rig.run(["create"])
+        let result = try await rig.run(["create"])
         #expect(result.status == 0, "\(result.stderr)")
         #expect(inOrder(rig.stubs.calls(), ["security delete-keychain \(rig.keychain)", "security create-keychain"]))
     }
 
-    @Test func aFailedCreateDeletesItsKeychain() throws {
+    @Test func aFailedCreateDeletesItsKeychain() async throws {
         for step in ["import", "set-key-partition-list", "list-keychains"] {
             let rig = try Rig()
-            let result = try rig.run(["create"], ["STUB_SECURITY_FAIL": step])
+            let result = try await rig.run(["create"], ["STUB_SECURITY_FAIL": step])
             #expect(result.status == 1, "\(step)")
             #expect(rig.stubs.calls().last == "security delete-keychain \(rig.keychain)", "\(step): \(rig.stubs.calls())")
             #expect(rig.leftovers.isEmpty, "left \(rig.leftovers)")
         }
     }
 
-    @Test func aFinishedCreateKeepsItsKeychain() throws {
+    @Test func aFinishedCreateKeepsItsKeychain() async throws {
         let rig = try Rig()
-        let result = try rig.run(["create"])
+        let result = try await rig.run(["create"])
         #expect(result.status == 0)
         #expect(!rig.stubs.calls().contains { $0.hasPrefix("security delete-keychain") })
     }
 
-    @Test func outputCarriesNoSecrets() throws {
+    @Test func outputCarriesNoSecrets() async throws {
         var runs: [(Rig, Result)] = []
-        func record(_ extra: [String: String], _ arguments: [String] = ["create"], keychainFile: Bool = false) throws {
+        func record(_ extra: [String: String], _ arguments: [String] = ["create"], keychainFile: Bool = false) async throws {
             let rig = try Rig()
             if keychainFile { try "x".write(toFile: rig.keychain, atomically: true, encoding: .utf8) }
-            runs.append((rig, try rig.run(arguments, extra)))
+            runs.append((rig, try await rig.run(arguments, extra)))
         }
-        try record([:])
-        try record(["STUB_SECURITY_FAIL": "import"])
-        try record(["STUB_SECURITY_FAIL": "set-key-partition-list"])
-        try record(["NOCTULE_DEVELOPER_ID_P12": "not base64!!"])
-        try record(["NOCTULE_DEVELOPER_ID_P12": ""])
-        try record(["NOCTULE_DEVELOPER_ID_P12_PASSWORD": ""])
-        try record([:], ["delete"], keychainFile: true)
-        try record([:], ["delete"])
+        try await record([:])
+        try await record(["STUB_SECURITY_FAIL": "import"])
+        try await record(["STUB_SECURITY_FAIL": "set-key-partition-list"])
+        try await record(["NOCTULE_DEVELOPER_ID_P12": "not base64!!"])
+        try await record(["NOCTULE_DEVELOPER_ID_P12": ""])
+        try await record(["NOCTULE_DEVELOPER_ID_P12_PASSWORD": ""])
+        try await record([:], ["delete"], keychainFile: true)
+        try await record([:], ["delete"])
         for (rig, result) in runs { noSecrets(rig, result) }
     }
 
@@ -1963,10 +1999,10 @@ extension DiskImageTests {
         #expect(hash == "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a")
     }
 
-    @Test func refusesOtherArguments() throws {
+    @Test func refusesOtherArguments() async throws {
         for arguments in [[], ["make"], ["create", "delete"]] as [[String]] {
             let rig = try Rig()
-            let result = try rig.run(arguments)
+            let result = try await rig.run(arguments)
             #expect(result.status == 2, "\(arguments)")
             #expect(rig.stubs.calls().isEmpty)
         }
@@ -2020,14 +2056,14 @@ extension DiskImageTests {
     }
 
     /// `release.sh` refuses a dirty tree, so the folder the art is checked out to must be ignored.
-    @Test func theBrandingCheckoutPathIsIgnored() throws {
+    @Test func theBrandingCheckoutPathIsIgnored() async throws {
         let w = try Workflow()
         let step = try #require(w.steps.first { $0.contains("name: Check out the branding") })
         let line = try #require(step.components(separatedBy: "\n").first { $0.trimmingCharacters(in: .whitespaces).hasPrefix("path:") })
         let path = line.trimmingCharacters(in: .whitespaces).dropFirst("path:".count).trimmingCharacters(in: .whitespaces)
         #expect(!path.isEmpty)
         let root = try repositoryFile("")
-        let git = try run(tool("git"), ["-C", root.path, "check-ignore", "-q", "--no-index", path + "/builds/noctule-scan/x"])
+        let git = try await run(tool("git"), ["-C", root.path, "check-ignore", "-q", "--no-index", path + "/builds/noctule-scan/x"])
         #expect(git.status == 0, "\(path) isn't ignored by .gitignore: release.sh would see it as an untracked change")
     }
 
@@ -2044,7 +2080,7 @@ extension DiskImageTests {
 
     @Test func runnerAndXcodeArePinned() throws {
         let w = try Workflow()
-        #expect(w.header.contains("    runs-on: xcode-27"))
+        #expect(w.header.contains("    runs-on: xcode-27-xlarge"))
         #expect(w.header.contains("    timeout-minutes: 180"))
         let xcode = try #require(w.stepIndex(containing: "sudo xcode-select -s /Applications/Xcode_27.2.app"))
         #expect(w.steps[xcode].contains("xcodebuild -version"))

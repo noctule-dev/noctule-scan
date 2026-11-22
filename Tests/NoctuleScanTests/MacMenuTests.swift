@@ -10,7 +10,7 @@ import Testing
 
 /// The Mac-style menu's view logic (remote menus design §5.3-§5.5), without any views: the local
 /// selection and entry draft, the pending confirmation, and the text.
-@MainActor @Suite struct MacMenuTests {
+@MainActor @Suite(.timeLimit(.minutes(3))) struct MacMenuTests {
     private func screen(_ xml: String) throws -> MenuScreen {
         try MenuScreen(xml: NoctuleKit.XMLNode.parse(Data(xml.utf8)))
     }

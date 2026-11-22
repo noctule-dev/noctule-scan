@@ -48,7 +48,7 @@ private func failure(_ factory: StationTransportFactory, _ connection: StationCo
     }
 }
 
-@Suite struct StationTransportFactoryTests {
+@Suite(.timeLimit(.minutes(3))) struct StationTransportFactoryTests {
     @Test func factoryNetwork() async throws {
         let factory = StationTransportFactory(ports: FakePorts([]))
         var connection = StationConnection()

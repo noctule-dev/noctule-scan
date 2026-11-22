@@ -4,7 +4,7 @@
 import Testing
 @testable import NoctuleKit
 
-@Suite struct ScannerModelTests {
+@Suite(.timeLimit(.minutes(3))) struct ScannerModelTests {
     @Test func normalizesReportedModels() {
         #expect(ScannerModel(reported: "SDS200") == .sds200)
         #expect(ScannerModel(reported: " sds150gbt ") == .sds150)

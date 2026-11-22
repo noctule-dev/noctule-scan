@@ -22,17 +22,14 @@ enum PrivateWords {
 
 @Suite(.timeLimit(.minutes(1))) struct PrivateWordsTests {
     @Test(.enabled(if: PrivateWords.list != nil, "config/private-words.txt is absent"))
-    func noPrivateWordsInTrackedFiles() throws {
+    func noPrivateWordsInTrackedFiles() async throws {
         let list = try #require(PrivateWords.list)
         let root = try #require(RealNames.repositoryRoot)
-        let files = RealNames.trackedTextFiles(root: root)
+        let files = await RealNames.trackedTextFiles(root: root)
         #expect(files.count > 50, "found only \(files.count) files under \(root.path)")
-        for file in files {
-            guard let data = try? Data(contentsOf: file) else { continue }
-            let count = RealNames.hits(in: String(decoding: data, as: UTF8.self), list: list).count
-            // Report the count, never the words: the failure output must not repeat them (so the
-            // expectation is on a number, not on the hits array, which Swift Testing would print).
-            #expect(count == 0, "\(file.path.dropFirst(root.path.count + 1)) contains \(count) private word(s)")
+        for (file, hits) in await RealNames.hits(in: files, list: list) {
+            // Report the count, never the words: the failure output must not repeat them.
+            Issue.record("\(file.path.dropFirst(root.path.count + 1)) contains \(hits.count) private word(s)")
         }
     }
 }

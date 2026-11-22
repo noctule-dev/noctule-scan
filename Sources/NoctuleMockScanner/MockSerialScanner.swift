@@ -30,8 +30,9 @@ public enum MockSerialScannerError: Error, Equatable {
 ///   or an unplugged mock's) is replaced; anything else there fails `start()`/`replug()` with
 ///   `.linkPathOccupied` and is never touched. The link is removed only while it still points at
 ///   this mock's pty.
-/// - `unplug()` (or `MockFaults.unplugAfter`) removes the link and closes the pty: the client reads
-///   end of file, as when the cable is pulled. `replug()` (or `replugAfter`) opens a new pty behind
+/// - `unplug()` (or `MockFaults.unplugAfter`, counted from `start()`, or with
+///   `unplugCountsFromFirstPSI` from the first subscribing `PSI`) removes the link and closes the
+///   pty: the client reads end of file, as when the cable is pulled. `replug()` (or `replugAfter`) opens a new pty behind
 ///   the same link. The scenario runs on through both, on the same clock.
 /// - Faults: `dropNextReply`, `dropNextRequest`, `rejectNext` and `stallPSIAfter` as on the UDP
 ///   mock, plus `unplugAfter`/`replugAfter` (real time, like the UDP mock's timed faults),
@@ -86,6 +87,9 @@ public actor MockSerialScanner {
     private var phase = Phase.idle
     private var stoppedSubscribers: Int?
     private var faultTask: Task<Void, Never>?
+    /// Set as `stop()` begins: an unplug clock that a `PSI` just before the stop queued on the
+    /// actor doesn't start (review N15).
+    private var stopping = false
     // Plugging and unplugging await, so they take turns (a timed fault can race a test's call).
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -115,6 +119,7 @@ public actor MockSerialScanner {
     /// the pty's slave path. Arms the timed faults. Once started, it does what `replug()` does.
     public func start() async throws -> String {
         await takeTurn()
+        stopping = false
         let first: Bool
         switch phase {
         case .idle: first = true
@@ -138,7 +143,9 @@ public actor MockSerialScanner {
     /// Unplugs, if plugged in, and stops for good: no thread, task or descriptor of the mock's
     /// outlives it. `activeSubscribers` keeps the count at this moment.
     public func stop() async {
+        stopping = true
         faultTask?.cancel()
+        core.sync { $0.nextSubscription = nil }
         await takeTurn()
         if case .stopped = phase {
             endTurn()
@@ -195,6 +202,7 @@ public actor MockSerialScanner {
             endpoint.splitWrites = faults.splitWrites
         }
         let timed = previous.unplugAfter != faults.unplugAfter || previous.replugAfter != faults.replugAfter
+            || previous.unplugCountsFromFirstPSI != faults.unplugCountsFromFirstPSI
         if timed, case .plugged = phase { armTimedFaults() }
     }
 
@@ -284,7 +292,21 @@ public actor MockSerialScanner {
     private func armTimedFaults() {
         faultTask?.cancel()
         faultTask = nil
-        guard let unplugAfter = faults.unplugAfter else { return }
+        core.sync { $0.nextSubscription = nil }
+        guard faults.unplugAfter != nil else { return }
+        if faults.unplugCountsFromFirstPSI {
+            // The clock starts at the first subscribing `PSI`: "connected and going, then the
+            // cable goes", however long the client took to get there.
+            core.sync { core in
+                core.nextSubscription = { [weak self] in Task { await self?.startUnplugClock() } }
+            }
+        } else {
+            startUnplugClock()
+        }
+    }
+
+    private func startUnplugClock() {
+        guard !stopping, faultTask == nil, case .plugged = phase, let unplugAfter = faults.unplugAfter else { return }
         let replugAfter = faults.replugAfter
         faultTask = Task { [weak self] in
             do {

@@ -10,6 +10,8 @@ public enum ScannerClientError: Error, Equatable {
     case rejected(command: String, response: String)
     case unexpectedResponse(command: String)
     case invalidArgument(String)
+    /// The caller's `onlyIf` said no once the request held the slot: nothing was sent.
+    case withheld(command: String)
 }
 
 /// One pushed `ScannerInfo` and when the client received it.
@@ -33,6 +35,16 @@ public struct PushUpdate: Sendable {
 /// A request with no matching response within `commandTimeout` throws `timeout` and frees the slot.
 /// Responses are matched to requests by command name only (the protocol has no request IDs), so
 /// a late reply after a timeout can satisfy the next request with the same name.
+///
+/// **Decided at the slot** (`onlyIf`). A request can wait for the slot for up to a command timeout (behind a
+/// read whose reply was lost), and what made its caller send it may have changed meanwhile. A request given
+/// `onlyIf` evaluates it once it holds the slot, in the task that writes it, just before the write, and writes
+/// nothing unless it returns true: it then throws `withheld` and frees the slot at once. Nothing in the client
+/// suspends between that call and the transport's `send`, but that `send` is one hop onto the transport's actor,
+/// which can wait when that actor or the thread pool is busy: a caller that clears its flag (synchronously, from
+/// any thread) before the guard runs sends nothing; one that clears it after can still see the bytes go out a
+/// moment later. State-changing commands that a user's action
+/// sends take one (`setListKey`, `setSystemKey`, `setDepartmentKey`, `press`, `setMenuValue`).
 ///
 /// If the transport's `responses` stream ends without `disconnect()`, the client tears down to
 /// the disconnected state (no `PSI,0`, since the link is gone): pending and queued requests and
@@ -264,7 +276,10 @@ public actor ScannerClient {
 
     // MARK: Requests
 
-    public func send(_ command: ScannerCommand) async throws -> ScannerResponse {
+    /// Sends `command` and waits for its reply (see the type's comment). With `onlyIf`, it is written only if
+    /// `onlyIf` returns true once the request holds the slot; else nothing is sent and it throws `withheld`.
+    public func send(_ command: ScannerCommand,
+                     onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws -> ScannerResponse {
         guard isConnected else { throw ScannerClientError.notConnected }
         await acquireSlot()
         defer { releaseSlot() }
@@ -279,9 +294,15 @@ public actor ScannerClient {
         let transport = self.transport
         let timeout = commandTimeout
         let sentAt = ContinuousClock.now
-        CommandTrace.log("send \(CommandTrace.describe(command))")
         let response = try await withThrowingTaskGroup(of: ScannerResponse.self) { group in
             group.addTask {
+                // Decided here, holding the slot: nothing in the client suspends between it and the transport's
+                // `send` (one hop onto the transport's actor, which then writes).
+                if let proceed, !proceed() {
+                    CommandTrace.log("withheld \(command.name) at the slot")
+                    throw ScannerClientError.withheld(command: command.name)
+                }
+                CommandTrace.log("send \(CommandTrace.describe(command))")
                 try await transport.send(command)
                 return try await self.awaitReply(id: id)
             }
@@ -339,9 +360,9 @@ public actor ScannerClient {
 
     /// `MSV,,<value>` (the reserved field left empty): on a list, an item index; on an entry
     /// screen, the whole text. Never sent with a comma, CR or LF in the value. A state-changing
-    /// command: callers must not resend it after a timeout.
-    public func setMenuValue(_ value: String) async throws {
-        try await expectOK(ScannerCommand("MSV", "", value))
+    /// command: callers must not resend it after a timeout. `onlyIf`: see `send(_:onlyIf:)`.
+    public func setMenuValue(_ value: String, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(ScannerCommand("MSV", "", value), onlyIf: proceed)
     }
 
     public func displayStatus() async throws -> DisplayStatus {
@@ -400,23 +421,26 @@ public actor ScannerClient {
 
     /// `FQK` with 100 values, "0" everywhere but `key`. A state-changing command: never resent, even
     /// after a timeout (a lost reply looks like a lost request; re-read to see whether it took effect).
-    /// A key outside 0 to 99 throws `invalidArgument` before anything is sent.
-    public func setListKey(_ key: Int, on: Bool) async throws {
+    /// A key outside 0 to 99 throws `invalidArgument` before anything is sent. `onlyIf`: see `send(_:onlyIf:)`.
+    public func setListKey(_ key: Int, on: Bool, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
         let values = QuickKeyStates.setting(try checkedKey(key), on: on)
-        try await expectOK(try ScannerCommand("FQK", arguments: values))
+        try await expectOK(try ScannerCommand("FQK", arguments: values), onlyIf: proceed)
     }
 
     /// `SQK,<list key>` with 100 values. Same rules as `setListKey`.
-    public func setSystemKey(_ key: Int, inList listKey: Int, on: Bool) async throws {
+    public func setSystemKey(_ key: Int, inList listKey: Int, on: Bool,
+                             onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
         let values = QuickKeyStates.setting(try checkedKey(key), on: on)
-        try await expectOK(try ScannerCommand("SQK", arguments: [String(try checkedKey(listKey))] + values))
+        try await expectOK(try ScannerCommand("SQK", arguments: [String(try checkedKey(listKey))] + values),
+                           onlyIf: proceed)
     }
 
     /// `DQK,<list key>,<system key>` with 100 values. Same rules as `setListKey`.
-    public func setDepartmentKey(_ key: Int, inList listKey: Int, system systemKey: Int, on: Bool) async throws {
+    public func setDepartmentKey(_ key: Int, inList listKey: Int, system systemKey: Int, on: Bool,
+                                 onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
         let values = QuickKeyStates.setting(try checkedKey(key), on: on)
         let prefix = [String(try checkedKey(listKey)), String(try checkedKey(systemKey))]
-        try await expectOK(try ScannerCommand("DQK", arguments: prefix + values))
+        try await expectOK(try ScannerCommand("DQK", arguments: prefix + values), onlyIf: proceed)
     }
 
     private func checkedKey(_ key: Int) throws -> Int {
@@ -445,8 +469,9 @@ public actor ScannerClient {
         return states
     }
 
-    public func press(_ key: FrontPanelKey) async throws {
-        try await expectOK(ScannerCommand("KEY", key.rawValue, "P"))
+    /// `KEY,<key>,P`. A state-changing command: never resent. `onlyIf`: see `send(_:onlyIf:)`.
+    public func press(_ key: FrontPanelKey, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(ScannerCommand("KEY", key.rawValue, "P"), onlyIf: proceed)
     }
 
     private func firstField(of command: ScannerCommand) async throws -> String {
@@ -464,8 +489,8 @@ public actor ScannerClient {
         return value
     }
 
-    private func expectOK(_ command: ScannerCommand) async throws {
-        guard try await send(command).status == .ok else {
+    private func expectOK(_ command: ScannerCommand, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        guard try await send(command, onlyIf: proceed).status == .ok else {
             throw ScannerClientError.unexpectedResponse(command: command.name)
         }
     }
@@ -772,6 +797,10 @@ public actor ScannerClient {
     }
 
     // MARK: Slot
+
+    /// Requests (and keep-alive writes) waiting for the slot, the one holding it not counted. For tests: one that
+    /// holds the slot with a read the mock never answers can wait for another request to queue behind it.
+    var requestsWaitingForTheSlot: Int { slotWaiters.count }
 
     private func acquireSlot() async {
         guard slotBusy else {

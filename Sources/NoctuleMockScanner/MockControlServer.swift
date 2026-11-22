@@ -178,6 +178,9 @@ final class ControlCore: @unchecked Sendable {
     var pushBeforeStop = false
     var rebootHandler: (@Sendable (MockRebootPhase) async -> Void)?
     var commandObserver: (@Sendable (String) -> Void)?
+    /// Called once, at the next subscribing `PSI` (any but `PSI,0`), then cleared: the serial
+    /// mock's `unplug-after-psi` starts its clock here.
+    var nextSubscription: (@Sendable () -> Void)?
     var menu = MockMenu()
     var favorites = MockFavorites.default
     var dropReply: String?
@@ -242,6 +245,10 @@ final class ControlCore: @unchecked Sendable {
     func receive(_ command: String, from peer: ControlPeer) {
         log.append(command)
         commandObserver?(command)
+        if let subscribed = nextSubscription, command.uppercased().hasPrefix("PSI,"), command.uppercased() != "PSI,0" {
+            nextSubscription = nil
+            subscribed()
+        }
         guard answering, !rebooting else { return }
         let parts = command.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         let name = parts[0].uppercased()

@@ -209,11 +209,15 @@ func withSession(_ setup: Setup = Setup(), _ body: (Rig) async throws -> Void) a
     return outcome
 }
 
-/// A UDP port with nothing listening: bound, read back, then closed.
-func closedUDPPort() throws -> UInt16 {
+/// A loopback UDP port that never answers: a socket bound to it and held, never read, until the
+/// test process exits. Binding a port and closing it again (as this helper used to) left the port
+/// free for a mock starting at the same moment to bind and answer: CI run 44958491347 saw
+/// `StationEditorModelTests.testConnectionNoAnswer` get `.ok(SDS200)` from such a port. A
+/// datagram to a held port is queued and ignored, so a request times out, as it would at a closed
+/// port (where an ICMP refusal also ends in a timeout).
+func silentUDPPort() throws -> UInt16 {
     let fd = socket(AF_INET, SOCK_DGRAM, 0)
-    try #require(fd >= 0)
-    defer { close(fd) }
+    try #require(fd >= 0)  // held until the process exits: see above
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_addr.s_addr = inet_addr("127.0.0.1")

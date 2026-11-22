@@ -6,7 +6,7 @@ import Testing
 import NoctuleKit
 @testable import NoctuleStore
 
-@Suite struct LineInSettingsTests {
+@Suite(.timeLimit(.minutes(3))) struct LineInSettingsTests {
     private let killSwitch = "NOCTULE_NO_USB_DETECTION"
     private let testKey = "NOCTULE_TEST_LINE_IN"
 

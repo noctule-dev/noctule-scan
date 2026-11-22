@@ -11,7 +11,7 @@ import Testing
 
 /// The Mac-style menu's entry field (fix round 2): what it shows is always the sanitized draft,
 /// whatever is typed or pasted, while its field editor is active.
-@MainActor @Suite(.serialized) struct MenuEntryFieldTests {
+@MainActor @Suite(.serialized, .timeLimit(.minutes(3))) struct MenuEntryFieldTests {
     private let number = MenuScreen.InputRules(maxLength: 5, allowedCharacters: "0123456789.", addedInformation: "(mile)")
     private let name = MenuScreen.InputRules(maxLength: 12, allowedCharacters: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ,")
 

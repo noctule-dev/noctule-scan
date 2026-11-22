@@ -7,6 +7,20 @@ import Testing
 
 private func tempStore() -> InMemoryRTSPCooldownStore { InMemoryRTSPCooldownStore() }
 
+private func seconds(_ d: Duration) -> Double {
+    Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
+}
+
+/// The gate counts from its own now, which a slow runner reaches a while after the test stamped its
+/// closes: the remaining time is at most `expected` (as of `stamped`) and at least `expected` less the
+/// time that has passed since. A fixed second each way failed on a runner VM (run 45019776194).
+private func expectRemaining(_ r: Duration, _ expected: Double, since stamped: Date,
+                             sourceLocation: SourceLocation = #_sourceLocation) {
+    let elapsed = Date().timeIntervalSince(stamped)
+    #expect(seconds(r) <= expected + 0.05 && seconds(r) >= expected - elapsed - 0.05,
+            "\(r) remaining, \(expected) s expected as of \(elapsed) s ago", sourceLocation: sourceLocation)
+}
+
 @Test func remainingIsNilWithoutRecord() async {
     let r = await RTSPCooldownGate.remaining(store: tempStore(), host: "127.0.0.1", cooldown: .seconds(120))
     #expect(r == nil)
@@ -16,11 +30,11 @@ private func tempStore() -> InMemoryRTSPCooldownStore { InMemoryRTSPCooldownStor
     let store = tempStore()
     let keys = await RTSPClient.cooldownKeys(for: "localhost")
     try #require(keys.count >= 2)
-    await store.recordClosed(host: keys[0], at: Date().addingTimeInterval(-100))
-    await store.recordClosed(host: keys[1], at: Date().addingTimeInterval(-30))
+    let now = Date()
+    await store.recordClosed(host: keys[0], at: now.addingTimeInterval(-100))
+    await store.recordClosed(host: keys[1], at: now.addingTimeInterval(-30))
     let r = try #require(await RTSPCooldownGate.remaining(store: store, host: "localhost", cooldown: .seconds(120)))
-    let seconds = Double(r.components.seconds) + Double(r.components.attoseconds) / 1e18
-    #expect(abs(seconds - 90) <= 1)
+    expectRemaining(r, 90, since: now)
 }
 
 @Test func zeroCooldownIsNil() async {
@@ -38,58 +52,60 @@ private func tempStore() -> InMemoryRTSPCooldownStore { InMemoryRTSPCooldownStor
 
 // MARK: Policy (Plan 5 Task 1)
 
-private func seconds(_ d: Duration) -> Double {
-    Double(d.components.seconds) + Double(d.components.attoseconds) / 1e18
-}
 
 @Test func gateUsesTheCleanValueAfterACleanClose() async throws {
+    let now = Date()
     let store = tempStore()
-    await store.recordClosed(host: "127.0.0.1", at: Date().addingTimeInterval(-10), clean: true)
+    await store.recordClosed(host: "127.0.0.1", at: now.addingTimeInterval(-10), clean: true)
     let policy = RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .seconds(30))
     let r = try #require(await RTSPCooldownGate.remaining(store: store, host: "127.0.0.1", policy: policy))
-    #expect(abs(seconds(r) - 20) <= 1, "\(r)")
+    expectRemaining(r, 20, since: now)
     #expect(await RTSPCooldownGate.remaining(store: store, host: "127.0.0.1",
                                             policy: RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .zero)) == nil)
 }
 
 @Test func gateUsesTheFullValueAfterAnUncleanClose() async throws {
+    let now = Date()
     let store = tempStore()
-    await store.recordClosed(host: "127.0.0.1", at: Date().addingTimeInterval(-10), clean: false)
+    await store.recordClosed(host: "127.0.0.1", at: now.addingTimeInterval(-10), clean: false)
     let policy = RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .zero)
     let r = try #require(await RTSPCooldownGate.remaining(store: store, host: "127.0.0.1", policy: policy))
-    #expect(abs(seconds(r) - 110) <= 1, "\(r)")
+    expectRemaining(r, 110, since: now)
 }
 
 @Test func gateTakesTheLatestKeyAndItsFlag() async throws {
+    let now = Date()
     let store = tempStore()
     let keys = await RTSPClient.cooldownKeys(for: "localhost")
     try #require(keys.count >= 2)
     let policy = RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .zero)
     // Older unclean, later clean: the unclean one still holds the full cooldown (QA I2).
-    await store.recordClosed(host: keys[0], at: Date().addingTimeInterval(-100), clean: false)
-    await store.recordClosed(host: keys[1], at: Date().addingTimeInterval(-30), clean: true)
+    await store.recordClosed(host: keys[0], at: now.addingTimeInterval(-100), clean: false)
+    await store.recordClosed(host: keys[1], at: now.addingTimeInterval(-30), clean: true)
     let held = try #require(await RTSPCooldownGate.remaining(store: store, host: "localhost", policy: policy))
-    #expect(abs(seconds(held) - 20) <= 1, "\(held)")
+    expectRemaining(held, 20, since: now)
     // Equal times: unclean wins.
-    let t = Date().addingTimeInterval(-30)
+    let t = now.addingTimeInterval(-30)
     await store.recordClosed(host: keys[0], at: t, clean: false)
     await store.recordClosed(host: keys[1], at: t, clean: true)
     let r = try #require(await RTSPCooldownGate.remaining(store: store, host: "localhost", policy: policy))
-    #expect(abs(seconds(r) - 90) <= 1, "\(r)")
+    expectRemaining(r, 90, since: now)
 }
 
 @Test func gateWaitsTheFullCooldownAfterAnEarlierUncleanClose() async throws {
+    let now = Date()
     let store = tempStore()
     let keys = await RTSPClient.cooldownKeys(for: "localhost")
     try #require(keys.count >= 2)
     let policy = RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .zero)
-    await store.recordClosed(host: keys[0], at: Date().addingTimeInterval(-1), clean: false)
-    await store.recordClosed(host: keys[1], at: Date(), clean: true)
+    await store.recordClosed(host: keys[0], at: now.addingTimeInterval(-1), clean: false)
+    await store.recordClosed(host: keys[1], at: now, clean: true)
     let r = try #require(await RTSPCooldownGate.remaining(store: store, host: "localhost", policy: policy))
-    #expect(abs(seconds(r) - 119) <= 1, "\(r)")
+    expectRemaining(r, 119, since: now)
     // A clean close stamped in the future counts as an unclean close now.
     let other = tempStore()
-    await other.recordClosed(host: "127.0.0.1", at: Date().addingTimeInterval(600), clean: true)
+    await other.recordClosed(host: "127.0.0.1", at: now.addingTimeInterval(600), clean: true)
+    let asked = Date()
     let f = try #require(await RTSPCooldownGate.remaining(store: other, host: "127.0.0.1", policy: policy))
-    #expect(abs(seconds(f) - 120) <= 1, "\(f)")
+    expectRemaining(f, 120, since: asked)
 }

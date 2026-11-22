@@ -6,49 +6,32 @@ import Foundation
 import Testing
 import NoctuleMockScanner
 
-/// A running `noctule` subprocess. Every wait is bounded; `kill()` (SIGKILL) is the cleanup path.
-private final class Noctule: @unchecked Sendable {
-    let process = Process()
-    private let out = Pipe()
-    private let err = Pipe()
+/// A running `noctule` subprocess. Every wait is bounded and suspends; `kill()` (SIGKILL) is the
+/// cleanup path.
+private final class Noctule: Sendable {
+    private let process: Subprocess
     let started = Date()
 
     init(_ arguments: [String]) throws {
-        process.executableURL = try noctuleBinary()
-        process.arguments = arguments
-        process.standardOutput = out
-        process.standardError = err
-        process.standardInput = FileHandle.nullDevice
-        try process.run()
+        process = try Subprocess(try noctuleBinary(), arguments, environment: noctuleTestEnvironment)
     }
 
     /// Waits at most `seconds` for the process to exit. Returns false if it's still running.
-    func waitForExit(within seconds: Double) async -> Bool {
-        let deadline = Date().addingTimeInterval(seconds)
-        while process.isRunning, Date() < deadline {
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-        return !process.isRunning
+    func waitForExit(within seconds: Double) async -> Bool { await process.waitForExit(within: seconds) }
+
+    /// Waits at most `seconds` for `condition` on the stderr output so far.
+    func waitForStderr(within seconds: Double, _ condition: (String) -> Bool) async -> Bool {
+        await process.waitForStderr(within: seconds, condition)
     }
 
-    func interrupt() { if process.isRunning { Darwin.kill(process.processIdentifier, SIGINT) } }
+    func interrupt() { process.interrupt() }
 
-    func kill() {
-        if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
-    }
+    func kill() { process.kill() }
 
-    /// After exit: status and both outputs. Polls `isRunning` for at most 10 s (-1 if it is still
-    /// running) instead of `waitUntilExit()`, which, called from a test's cooperative thread, can
-    /// hang after the child has exited (LESSONS.md 2026-11-12); it held this suite past its time
-    /// limit once in a background-priority sweep (LESSONS.md 2026-11-20).
-    func finish() -> (status: Int32, stdout: String, stderr: String) {
-        let deadline = Date().addingTimeInterval(10)
-        while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
-        guard !process.isRunning else { return (-1, "", "") }
-        let stdout = out.fileHandleForReading.readDataToEndOfFile()
-        let stderr = err.fileHandleForReading.readDataToEndOfFile()
-        return (process.terminationStatus, String(decoding: stdout, as: UTF8.self), String(decoding: stderr, as: UTF8.self))
-    }
+    /// After exit: status and both outputs (`Subprocess.finish()`: suspended, bounded, never
+    /// `waitUntilExit()`, which held this suite past its time limit once (LESSONS.md 2026-11-12,
+    /// 2026-11-20); -1 if the process is somehow still running).
+    func finish() async -> (status: Int32, stdout: String, stderr: String) { await process.finish() }
 }
 
 /// A fake scanner audio server (RTSP plus RTP) on loopback, a temp directory, and the arguments
@@ -60,8 +43,9 @@ private struct ListenFixture {
     let directory: URL
     let controlPort: UInt16
 
-    static func make(running: Bool = true, script: FakeRTSPServer.Script = .scannerLike) async throws -> ListenFixture {
-        let server = FakeRTSPServer(script: script)
+    static func make(running: Bool = true, script: FakeRTSPServer.Script = .scannerLike,
+                     behavior: FakeRTSPServer.Behavior = .init()) async throws -> ListenFixture {
+        let server = FakeRTSPServer(script: script, behavior: behavior)
         let sender = FakeRTPSender()
         await server.attach(sender)
         let port = try await server.start()
@@ -69,7 +53,7 @@ private struct ListenFixture {
         let directory = FileManager.default.temporaryDirectory.appending(path: "noctule-listen-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return ListenFixture(server: server, sender: sender, rtspPort: port, directory: directory,
-                             controlPort: try deadPort())
+                             controlPort: try silentUDPPort())
     }
 
     func arguments(_ extra: [String], cooldown: String = "0.3") -> [String] {
@@ -98,10 +82,23 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
     @Test func listenSecondsRecordsAndTearsDown() async throws {
         let fixture = try await ListenFixture.make()
         let wav = fixture.directory.appending(path: "out.wav")
-        let noctule = try Noctule(fixture.arguments(["--seconds", "2", "--record", wav.path]))
-        let exited = await noctule.waitForExit(within: 15)
+        let noctule = try Noctule(fixture.arguments(["--seconds", "4", "--record", wav.path]))
+        _ = await noctule.waitForStderr(within: 15) { $0.contains("audio: streaming") }
+        let streamingSeen = Date()
+        let exited = await noctule.waitForExit(within: 20)
+        let exitSeen = Date()
+        // `--seconds` runs from when streaming starts. Each time here is seen at or after its
+        // event, so the run measured from before the launch can only be longer than the real
+        // one (a `listen` that stopped early still fails), and the run measured from when
+        // "streaming" was seen can only be shorter, except for the lateness of seeing the exit
+        // (a `listen` that ran on past its seconds still fails). The 3.5 s allows about 1 s for
+        // listen's own shutdown (TEARDOWN, the 500 ms close linger, the drain) plus late wakeups
+        // (up to 1.4 s on the CI runner); a doubled timer exits about 9 s after streaming and
+        // still fails.
+        let ran = exitSeen.timeIntervalSince(noctule.started)
+        let ranSinceStreaming = exitSeen.timeIntervalSince(streamingSeen)
         noctule.kill()
-        let result = noctule.finish()
+        let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
         defer { Task { await fixture.cleanUp() } }
         #expect(exited)
@@ -120,17 +117,32 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let dataSize = Int(le32(data, at: 40))
         #expect(dataSize == data.count - 44)
         #expect(Int(le32(data, at: 4)) == dataSize + 36)
-        #expect((25_600...38_400).contains(dataSize), "data size \(dataSize)")
+        // The recording holds the packets `listen` received, not a count a fixed window promises:
+        // the fake sender paces 25 packets a second with its own sleeps, and a slow machine sends
+        // fewer within `--seconds` (CI run 44958491347: 22 packets in 2 s, 14,080 bytes, against a
+        // 25,600-byte floor). Each 320-byte μ-law packet records as 640 bytes, every received
+        // packet is recorded (none is lost or reordered on loopback, and the shutdown drains the
+        // chunks before the WAV is closed), and at least 10 prove a recording, not a stub.
+        #expect(ran >= 4, "listen exited \(ran) s after its launch, before its --seconds 4")
+        #expect(ranSinceStreaming < 7.5, "listen exited \(ranSinceStreaming) s after streaming began, well past its --seconds 4")
+        let packets = result.stdout.split(separator: "\n").first { $0.hasPrefix("packets ") }
+            .flatMap { $0.split(separator: " ").dropFirst().first }.flatMap { Int($0) }
+        let received = try #require(packets, "no packets line: \(result.stdout)")
+        #expect(received >= 10, "only \(received) packets in 4 s")
+        #expect(dataSize == received * 640, "data size \(dataSize) for \(received) packets")
     }
 
     @Test func listenSigintTearsDown() async throws {
         let fixture = try await ListenFixture.make()
         let noctule = try Noctule(fixture.arguments([]))
-        try await Task.sleep(for: .seconds(1))
+        // Interrupted while streaming, which a fixed second after launch doesn't promise on a busy
+        // machine (an interrupt before that is "stopped before streaming started", with no stats).
+        let streaming = await noctule.waitForStderr(within: 15) { $0.contains("audio: streaming") }
+        #expect(streaming)
         noctule.interrupt()
         let exited = await noctule.waitForExit(within: 10)
         noctule.kill()
-        let result = noctule.finish()
+        let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
         await fixture.cleanUp()
         #expect(exited)
@@ -142,16 +154,22 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         #expect(result.stdout.contains("packets "))
     }
 
+    /// The second signal must come while the close is under way. A fixed 150 ms after the first came
+    /// too late under a one-thread pool, where the test's own sleep woke after the close had ended
+    /// (sweep, 2026-11-22). The fake server now sends it the moment the TEARDOWN arrives, from its own
+    /// queue, and holds the TEARDOWN's reply a second, so the close is certainly still under way.
     @Test func secondSigintKeepsClosing() async throws {
-        let fixture = try await ListenFixture.make()
+        let fixture = try await ListenFixture.make(behavior: .init(replyDelays: ["TEARDOWN": .seconds(1)]))
         let noctule = try Noctule(fixture.arguments([]))
-        try await Task.sleep(for: .seconds(1))
-        noctule.interrupt()
-        try await Task.sleep(for: .milliseconds(150))
+        await fixture.server.setEventHandler { event in
+            if event == .request(method: "TEARDOWN") { noctule.interrupt() }
+        }
+        let streaming = await noctule.waitForStderr(within: 15) { $0.contains("audio: streaming") }
+        #expect(streaming)
         noctule.interrupt()
         let exited = await noctule.waitForExit(within: 10)
         noctule.kill()
-        let result = noctule.finish()
+        let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
         await fixture.cleanUp()
         #expect(exited)
@@ -167,7 +185,7 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let exited = await noctule.waitForExit(within: 5)
         let seconds = Date().timeIntervalSince(noctule.started)
         noctule.kill()
-        let result = noctule.finish()
+        let result = await noctule.finish()
         await fixture.cleanUp()
         #expect(exited)
         #expect(seconds < 5)
@@ -186,7 +204,7 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let noctule = try Noctule(fixture.arguments(["--seconds", "1"]))
         let exited = await noctule.waitForExit(within: 15)
         noctule.kill()
-        let result = noctule.finish()
+        let result = await noctule.finish()
         let methods = await fixture.server.receivedMethods
         await fixture.cleanUp()
         #expect(exited)
@@ -203,12 +221,12 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let first = try Noctule(fixture.arguments(["--seconds", "1"], cooldown: "5"))
         let firstExited = await first.waitForExit(within: 10)
         first.kill()
-        let firstResult = first.finish()
+        let firstResult = await first.finish()
 
         let second = try Noctule(fixture.arguments(["--seconds", "1"], cooldown: "5"))
         let secondExited = await second.waitForExit(within: 20)
         second.kill()
-        let secondResult = second.finish()
+        let secondResult = await second.finish()
 
         let accepted = await fixture.server.connectionsAcceptedAt
         let ends = await fixture.server.connectionEnds
@@ -245,7 +263,7 @@ private func le16(_ data: Data, at offset: Int) -> UInt16 {
         let exitedA = await first.waitForExit(within: 30)
         let exitedB = await second.waitForExit(within: 30)
         first.kill(); second.kill()
-        let a = first.finish(), b = second.finish()
+        let a = await first.finish(), b = await second.finish()
         let accepted = await fixture.server.connectionsAcceptedAt
         let ends = await fixture.server.connectionEnds
         #expect(exitedA && exitedB)

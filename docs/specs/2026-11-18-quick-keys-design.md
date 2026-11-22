@@ -640,7 +640,14 @@ to the owner.
   `.sharedSystemKey(k)`, `.sharedListKey(k)`, `.checkingOtherLists` (since 2026-11-19, "Late replies" above),
   `.inMenu`, `.unavailable` or `.busy`. The model also hears the menu
   model's reads (`MenuModel.onInMenuChanged`), so a menu entered from the app stops switching before the next push says
-  so.
+  so. **Decided at the slot (2026-11-22, flaky-sweep review I2). (builder's call)** That last evaluation came before
+  the set waited for the client's request slot, which it shares with the display's `STS`, the menu's reads and the
+  session's, so behind a lost reply the set could go out up to a command timeout after the pop-over closed or the
+  scanner entered a menu (QA saw an `FQK` set 2.1 s after `close()` on both mocks). Now the set carries a `SendPermit`
+  that `close()`, `detach()` (every stop of the run) and a menu revoke synchronously, and `ScannerClient` writes it
+  only if the permit holds once the set has the slot (`send(_:onlyIf:)`; else `withheld`, nothing sent, no error, no
+  re-read). A stop detaches the quick keys and the menu before its first await (`StationSession.halt`). The menu
+  model's `KEY` and `MSV` carry their run's permit the same way, revoked on detach.
 - **Lists sharing a quick key (final review I1). (builder's call, open to the owner)** `SQK,<k>` and `DQK,<k>,<s>` are
   addressed by the list's key, so when two lists hold the same key they can't tell the lists apart: the first build let
   a click on one list's system switch the other's (on the mock, which answers from the first list in `GLT` order). Now,
