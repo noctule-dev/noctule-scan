@@ -93,16 +93,28 @@ import Testing
             var onBuffer: (@Sendable (AVAudioPCMBuffer, ContinuousClock.Instant) -> Void)?
             var stopped = false
             var rate = 0.0
+            var watched = false
         }
         private let state = Mutex(State())
         private unowned let owner: Engines
-        let configurationChanges: AsyncStream<Void>
+        private let changeStream: AsyncStream<Void>
         private let changes: AsyncStream<Void>.Continuation
 
         init(owner: Engines) {
             self.owner = owner
-            (configurationChanges, changes) = AsyncStream.makeStream(of: Void.self)
+            (changeStream, changes) = AsyncStream.makeStream(of: Void.self)
         }
+
+        /// Read by the source only once it has armed its capture for this engine's format, so
+        /// `watched` says buffers pushed now are taken, not dropped (a capture drops what comes before
+        /// its arm, by design).
+        var configurationChanges: AsyncStream<Void> {
+            state.withLock { $0.watched = true }
+            return changeStream
+        }
+
+        /// The source armed its capture for this engine and watches it.
+        var watched: Bool { state.withLock { $0.watched } }
 
         func start(
             deviceUID: String, onBuffer: @escaping @Sendable (AVAudioPCMBuffer, ContinuousClock.Instant) -> Void
@@ -361,7 +373,9 @@ import Testing
             if n > 0 { try await Task.sleep(for: .milliseconds(40)) }
             try #require(rig.engines.latest).changeConfiguration()
         }
-        try await waitUntil("a restart") { rig.engines.starts.count == 2 }
+        // Started is not enough: the source arms its capture after the start returns, and a buffer
+        // pushed between the two is dropped (the chunks never came under load; local sweep).
+        try await waitUntil("a restart") { rig.engines.starts.count == 2 && rig.engines.latest?.watched == true }
         #expect(first.stopped)
         try await Task.sleep(for: .milliseconds(600))
         #expect(rig.engines.starts.count == 2)
@@ -387,7 +401,9 @@ import Testing
 
         rig.engines.setNextRate(44_100)
         try #require(rig.engines.latest).changeConfiguration()
-        try await waitUntil("a restart") { rig.engines.starts.count == 2 }
+        // Started is not enough: the source arms its capture after the start returns, and a buffer
+        // pushed between the two is dropped (the chunks never came under load; local sweep).
+        try await waitUntil("a restart") { rig.engines.starts.count == 2 && rig.engines.latest?.watched == true }
         #expect(rig.engines.latest?.rate == 44_100)
         try await feed(rig, seconds: 0.5, from: start + .seconds(2))
 
