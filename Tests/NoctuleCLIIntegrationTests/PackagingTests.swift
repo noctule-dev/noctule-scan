@@ -2056,7 +2056,7 @@ extension DiskImageTests {
 
     @Test func runnerAndXcodeArePinned() throws {
         let w = try Workflow()
-        #expect(w.header.contains("    runs-on: xcode-27"))
+        #expect(w.header.contains("    runs-on: xcode-27-xlarge"))
         #expect(w.header.contains("    timeout-minutes: 180"))
         let xcode = try #require(w.stepIndex(containing: "sudo xcode-select -s /Applications/Xcode_27.2.app"))
         #expect(w.steps[xcode].contains("xcodebuild -version"))
