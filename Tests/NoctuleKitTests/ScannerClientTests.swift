@@ -2,6 +2,7 @@
 // Copyright 2026 Sean Foley and the Noctule Scan contributors
 
 import Foundation
+import Synchronization
 import Testing
 import NoctuleKitTestSupport
 @testable import NoctuleKit
@@ -290,6 +291,72 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         await #expect(throws: CancellationError.self) { _ = try await pending.value }
         #expect(try await c.firmwareVersion() == "1.24.00")
         #expect(ContinuousClock.now - start < .seconds(1))
+    }
+
+    // MARK: onlyIf: decided at the slot (flaky-sweep review I2)
+
+    @Test func onlyIfIsDecidedOnceTheRequestHoldsTheSlot() async throws {
+        let t = SimulatedScannerTransport { _ in [] }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let wanted = Mutex(true)
+        let asked = Mutex(0)
+        let model = Task { try await c.modelInfo().reported }
+        #expect(await eventually { await t.sentCommands.count == 1 })
+        let set = Task {
+            try await c.setListKey(3, on: true, onlyIf: {
+                asked.withLock { $0 += 1 }
+                return wanted.withLock { $0 }
+            })
+        }
+        #expect(await eventually { await c.requestsWaitingForTheSlot == 1 })
+        // Asked nothing while it waits; the caller changes its mind meanwhile.
+        #expect(asked.withLock { $0 } == 0)
+        wanted.withLock { $0 = false }
+        await t.emit(reply(to: await t.sentCommands[0]))
+        #expect(try await model.value == "SDS200")
+        await #expect(throws: ScannerClientError.withheld(command: "FQK")) { try await set.value }
+        #expect(asked.withLock { $0 } == 1, "asked once, holding the slot")
+        #expect(await t.sentCommands.map(\.name) == ["MDL"], "nothing written for the withheld set")
+        // The slot is free again at once.
+        let version = Task { try await c.firmwareVersion() }
+        #expect(await eventually { await t.sentCommands.count == 2 })
+        await t.emit(reply(to: await t.sentCommands[1]))
+        #expect(try await version.value == "1.24.00")
+    }
+
+    @Test func onlyIfStillWantedSendsTheCommandOnce() async throws {
+        let t = SimulatedScannerTransport { command in
+            command.name == "FQK" ? [.fields(command: "FQK", fields: ["OK"])] : []
+        }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let asked = Mutex(0)
+        let model = Task { try await c.modelInfo().reported }
+        #expect(await eventually { await t.sentCommands.count == 1 })
+        let set = Task { try await c.setListKey(3, on: true, onlyIf: { asked.withLock { $0 += 1 }; return true }) }
+        #expect(await eventually { await c.requestsWaitingForTheSlot == 1 })
+        await t.emit(reply(to: await t.sentCommands[0]))
+        _ = try await model.value
+        try await set.value
+        #expect(asked.withLock { $0 } == 1)
+        let sent = await t.sentCommands
+        #expect(sent.map(\.name) == ["MDL", "FQK"])
+        #expect(sent.last?.arguments.count == 100)
+    }
+
+    @Test func everyStateChangingCallTakesOnlyIf() async throws {
+        let t = SimulatedScannerTransport { _ in [] }
+        let c = ScannerClient(transport: t, commandTimeout: .seconds(5)); try await c.connect()
+        let no: @Sendable () -> Bool = { false }
+        await #expect(throws: ScannerClientError.withheld(command: "FQK")) { try await c.setListKey(1, on: true, onlyIf: no) }
+        await #expect(throws: ScannerClientError.withheld(command: "SQK")) {
+            try await c.setSystemKey(1, inList: 2, on: false, onlyIf: no)
+        }
+        await #expect(throws: ScannerClientError.withheld(command: "DQK")) {
+            try await c.setDepartmentKey(1, inList: 2, system: 3, on: true, onlyIf: no)
+        }
+        await #expect(throws: ScannerClientError.withheld(command: "KEY")) { try await c.press(.menu, onlyIf: no) }
+        await #expect(throws: ScannerClientError.withheld(command: "MSV")) { try await c.setMenuValue("4", onlyIf: no) }
+        #expect(await t.sentCommands.isEmpty)
     }
 
     @Test func pushStreamReceivesPushes() async throws {

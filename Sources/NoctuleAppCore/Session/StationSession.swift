@@ -1379,8 +1379,12 @@ public final class StationSession {
     /// `stop()` without forgetting a wake or a restart in flight: ends retries, then the shared
     /// single-flight teardown.
     private func halt() async {
-        // First, before any await: no queued key goes out once a stop has begun.
+        // First, before any await: no queued key goes out once a stop has begun, nor a quick-key set or a menu
+        // command still waiting for the client's request slot (detaching revokes their permits; `performStop`'s
+        // phase change, a task hop later, would detach them again). The quick keys first, as in `phase`.
         stopKeyQueue()
+        quickKeys.detach()
+        menu.detach()
         haltCount += 1
         cancelRetries()
         if let stopTask {

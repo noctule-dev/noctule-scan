@@ -168,8 +168,9 @@ public enum QuickKeySwitchState: Equatable, Sendable {
 ///
 /// **One command at a time.** Everything goes through the attached client (`control`, the runner's
 /// `control()`) from one loop, so this model never has two commands in flight: `GLT`, `FQK`, `SQK` and
-/// `DQK` reads, and the one set of each `toggle`. Nothing is sent unless the model is both attached and
-/// open. After a failed read the background reads (the keypad, a list, the polls) rest for `pollInterval`;
+/// `DQK` reads, and the one set of each `toggle`. No set is sent unless the model is both attached and open
+/// when the set holds the client's request slot (see Switching); a read is started only then too, but one already
+/// waiting for the slot can still go out after a close or a detach (read-only; `quiesce()` waits for it). After a failed read the background reads (the keypad, a list, the polls) rest for `pollInterval`;
 /// two timeouts in a row set `isScannerAnswering` false (true again on the next answer).
 ///
 /// **Late replies** (final review C1; design §10). Replies are matched to requests by command name only
@@ -282,7 +283,13 @@ public enum QuickKeySwitchState: Equatable, Sendable {
 /// sent."), and a read unanswered or refused leaves it ("The scanner didn't answer; nothing was sent."). These
 /// reads aren't retried in place. A tile's set needs no check: its address, the list key from `GLT,FL`, is global.
 /// After the check, the row is checked again, and exactly one set naming only that key is sent (`setListKey`,
-/// `setSystemKey` or `setDepartmentKey`: "0", leave alone, for every other key), and it is **never resent**. Its reply
+/// `setSystemKey` or `setDepartmentKey`: "0", leave alone, for every other key), and it is **never resent**. The set
+/// is **decided at the request slot** (flaky-sweep review I2, 2026-11-22): it can wait there behind another reader's
+/// command (the display's `STS`, the menu's `GSI`) for up to a command timeout, so it carries a `SendPermit` that
+/// every stop of the run (`close()`, `detach()`) and a menu (`isInMenu` turning true) revoke synchronously, and the
+/// client writes it only if the permit still holds once it has the slot (`ScannerClient.send(_:onlyIf:)`). Withheld,
+/// nothing was sent: no error, no re-read. What remains is the moment between that check and the write: no
+/// suspension in the client, one hop onto the transport's actor. Its reply
 /// can be `OK`, `NG`, nothing (a timeout), or a stray (a late reply to an earlier read of the same command,
 /// which answers by name): anything but `OK` leaves the outcome unknown, and `lastError` says "The scanner
 /// didn't confirm the change". Either way the scope is then read again and shows what the scanner holds.
@@ -453,6 +460,9 @@ public final class QuickKeysModel {
     @ObservationIgnored private var changeError: String?
     /// Clicks waiting for the loop, oldest first.
     @ObservationIgnored private var actions: [Action] = []
+    /// The permit of the set waiting for (or holding) the client's request slot; revoked by every stop of the run and
+    /// by a menu, so a set still queued then writes nothing.
+    @ObservationIgnored private var setPermit: SendPermit?
     /// The loop's idle sleep, cancelled to wake it for a click.
     @ObservationIgnored private var sleeper: Task<Void, Never>?
 
@@ -553,6 +563,8 @@ public final class QuickKeysModel {
     private func updateInMenu() {
         let wasInMenu = isInMenu
         let inMenu = (lastInfo?.isMenu ?? false) || menuReadInMenu
+        // A set still waiting for the slot is withheld: nothing switches in a menu.
+        if inMenu { revokeSetPermit() }
         if inMenu != wasInMenu { isInMenu = inMenu }
         if wasInMenu, !inMenu, isOpen { recheckAll() }
     }
@@ -740,12 +752,21 @@ public final class QuickKeysModel {
         }
         // Checked again once the client is in hand, just before the set: a menu push may have come meanwhile.
         guard let control, let client = await control(), isAlive(generation), stillSwitchable() else { return }
+        // And decided again once the set holds the client's slot: it may wait there for a command timeout behind
+        // another reader's command, and a close, a detach or a menu meanwhile revokes this permit.
+        let permit = SendPermit()
+        setPermit = permit
         var confirmed = false
         let request = Self.traceName(action.address, on: action.on)
         do {
-            try await set(client, action.address, on: action.on)
+            defer { if setPermit === permit { setPermit = nil } }
+            try await set(client, action.address, on: action.on, onlyIf: permit.check)
             confirmed = true
             CommandTrace.log("quickkeys: set \(request) -> OK")
+        } catch ScannerClientError.withheld {
+            // Nothing was sent, so nothing is unconfirmed and there is nothing to re-read.
+            CommandTrace.log("quickkeys: set \(request) withheld at the slot; nothing sent")
+            return
         } catch {
             CommandTrace.log("quickkeys: set \(request) -> \(error)")
             // NG, no reply, a stray reply, or the link going: whether it took effect is unknown. Never resent;
@@ -904,15 +925,22 @@ public final class QuickKeysModel {
         }
     }
 
-    private func set(_ client: ScannerClient, _ address: Address, on: Bool) async throws {
+    private func set(_ client: ScannerClient, _ address: Address, on: Bool,
+                     onlyIf proceed: @escaping @Sendable () -> Bool) async throws {
         switch address {
         case .list(let key):
-            try await client.setListKey(key, on: on)
+            try await client.setListKey(key, on: on, onlyIf: proceed)
         case .system(let listKey, let key):
-            try await client.setSystemKey(key, inList: listKey, on: on)
+            try await client.setSystemKey(key, inList: listKey, on: on, onlyIf: proceed)
         case .child(let pair, let key):
-            try await client.setDepartmentKey(key, inList: pair.list, system: pair.system, on: on)
+            try await client.setDepartmentKey(key, inList: pair.list, system: pair.system, on: on, onlyIf: proceed)
         }
+    }
+
+    /// The set waiting for (or holding) the client's slot, if any, writes nothing from now on.
+    private func revokeSetPermit() {
+        setPermit?.revoke()
+        setPermit = nil
     }
 
     /// The read of a scope's states: `FQK`, `SQK,<list key>` or `DQK,<list key>,<system key>`.
@@ -951,13 +979,15 @@ public final class QuickKeysModel {
     /// `quiesce()` waits for it.
     private func stopRun() {
         generation += 1
+        // A set already waiting for the client's slot writes nothing (`perform`).
+        revokeSetPermit()
         if let task { retired.append(task) }
         task = nil
         keypadRead = nil
         queue = []
         nextPoll = nil
         restUntil = nil
-        // Clicks still waiting send nothing; one under way finishes its command and stops (`perform`).
+        // Clicks still waiting send nothing; one under way finishes a command already written and stops (`perform`).
         let waiting = actions
         actions = []
         for action in waiting {
