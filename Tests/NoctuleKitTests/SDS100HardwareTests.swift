@@ -59,7 +59,10 @@ enum SDS100HardwareGate {
 
 /// The SDS100 over USB serial (design §5.6): the opt-in hardware suites, and the same checks on
 /// the mock. One serialized suite, so no two of its hardware suites ever hold the port at once.
-@Suite(.serialized, .timeLimit(.minutes(3))) struct SDS100HardwareTests {
+// Ten minutes: the opt-in keep-alive checks hold 240 s on a real radio (plus the port, the
+// quiet-port check and PSI,0), and Swift Testing applies the shortest limit on the way down, so a
+// three-minute limit here would cancel them at 180 s. The mock sub-suites carry three minutes.
+@Suite(.serialized, .timeLimit(.minutes(10))) struct SDS100HardwareTests {
     /// The owner's SDS100, read-only (H1). Opt-in: `NOCTULE_SDS100_HARDWARE_TESTS=1` (never with
     /// `NOCTULE_NO_USB_DETECTION` set). Sends `MDL` (an SDS100, else nothing more), then `VER`,
     /// `VOL`, `SQL`, `GSI`, `STS`, one each; never `GCS`, `PSI`, `KAL`, `KEY`, `MSV`, `MSM` or `POF`.
@@ -164,7 +167,7 @@ private func expectNothingForbidden(_ commands: [String], sourceLocation: Source
 
 extension SDS100HardwareTests {
     /// The checks on the mock SDS100: exactly what each sends, and `PSI,0` on every path.
-    @Suite struct OnTheMock {
+    @Suite(.timeLimit(.minutes(3))) struct OnTheMock {
         @Test func readOnlySendsExactlyTheSixReads() async throws {
             let mock = try await withMockHandheld(personality: .sds100) { path in
                 let report = try await HandheldHardwareChecks.readOnly(
@@ -324,7 +327,7 @@ private final class SwallowingRenewalTransport: ScannerTransport {
 extension SDS100HardwareTests {
     /// The keep-alive check on the mock SDS100 (real clock, short durations): exactly `MDL`, the
     /// `PSI` and its renewals, and `PSI,0`; never `KAL`.
-    @Suite struct KeepAliveOnTheMock {
+    @Suite(.timeLimit(.minutes(3))) struct KeepAliveOnTheMock {
         // Unskipped 2026-11-22: the mock's strict push timer (2026-11-20) delivers every push, and
         // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
         @Test
@@ -458,7 +461,7 @@ extension SDS100HardwareTests {
 extension SDS100HardwareTests {
     /// Which port a hardware suite opens: the configured path as written, else the one port whose
     /// USB product name names the model. Nothing here is opened.
-    @Suite struct Ports {
+    @Suite(.timeLimit(.minutes(3))) struct Ports {
         private func port(_ path: String, _ productName: String?) -> SerialPortInfo {
             SerialPortInfo(path: path, productName: productName, vendorID: SerialPort.unidenVendorID,
                            productID: 0x001A, serialNumber: nil)
@@ -516,7 +519,7 @@ extension SDS100HardwareTests {
     }
 
     /// The gates are decided from the environment alone, before any port is resolved or opened.
-    @Suite struct Gates {
+    @Suite(.timeLimit(.minutes(3))) struct Gates {
         @Test func offByDefault() {
             #expect(!SDS100HardwareGate.readOnlyEnabled([:]))
             #expect(!SDS100HardwareGate.pushEnabled([:]))

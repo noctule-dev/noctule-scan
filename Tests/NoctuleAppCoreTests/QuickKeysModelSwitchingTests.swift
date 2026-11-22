@@ -792,9 +792,12 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
     }
 
     /// The click waits behind a poll held up by two unanswered `FQK`s; the close must come while it
-    /// still waits. With 300 ms timeouts that window was 600 ms, which a slow runner overran: the poll
-    /// had ended, the click had (rightly) sent its set, and only then did the close come
-    /// (flake hunt on hunt/flaky-1). Two-second timeouts hold the click for about four seconds.
+    /// is still queued, which is all this pins: a click still queued at the close sends nothing. (One
+    /// already past `perform`'s last check, waiting for the client's request slot, can still send its
+    /// set after the close; that gap is the product's, open in its own pull request.) With 300 ms
+    /// timeouts the window was 600 ms, which a slow runner overran: the poll had ended, the click had
+    /// sent its set while the pop-over was open, and only then did the close come (flake hunt on
+    /// hunt/flaky-1). Two-second timeouts keep the click queued for about four seconds.
     @Test func aClickStillWaitingWhenThePopoverClosesSendsNothing() async throws {
         try await onBothMocks(commandTimeout: .seconds(2)) { rig in
             let model = makeModel(rig)
