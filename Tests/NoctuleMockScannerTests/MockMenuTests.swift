@@ -245,9 +245,9 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
         var failure: (any Error)?
         do {
             for command in ["KEY,M,P", "MSV,,2", "MSV,,0", "MSV,,0", "MSV,,0"] {
-                #expect(socket.exchange(command) != nil)
+                #expect(await socket.exchange(command) != nil)
             }
-            let reply = try #require(socket.exchange("STS"))
+            let reply = try #require(await socket.exchange("STS"))
             let glyphs: [UInt8] = [0xC8, 0xC8, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD, 0xCE, 0x20, 0xD8, 0xD0, 0xD9, 0xDA,
                                    0xDB, 0xDC, 0xDD, 0xDE, 0xDF, 0xD0, 0x20, 0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5,
                                    0xD6, 0xD6, 0xD6]
@@ -515,7 +515,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
 }
 
 /// One UDP socket to the mock's control port, for checking exact reply bytes.
-private final class RawUDP {
+private final class RawUDP: @unchecked Sendable {
     let fd: Int32
 
     init(port: UInt16) throws {
@@ -536,12 +536,17 @@ private final class RawUDP {
         }
     }
 
-    /// Sends `command` and returns the one reply datagram, or nil on timeout.
-    func exchange(_ command: String) -> Data? {
+    /// Sends `command` and returns the one reply datagram, or nil on timeout. The waiting `recv`
+    /// runs on a dispatch thread (`offThePool`): the in-process mock needs the pool to answer.
+    func exchange(_ command: String) async -> Data? {
+        await offThePool { self.blockingExchange(command) }
+    }
+
+    private func blockingExchange(_ command: String) -> Data? {
         let bytes = Array((command + "\r").utf8)
         guard send(fd, bytes, bytes.count, 0) == bytes.count else { return nil }
         var buffer = [UInt8](repeating: 0, count: 65536)
-        let count = recv(fd, &buffer, buffer.count, 0)
+        let count = recv(fd, &buffer, buffer.count, 0)  // off the cooperative pool: run through offThePool
         return count > 0 ? Data(buffer[0..<count]) : nil
     }
 

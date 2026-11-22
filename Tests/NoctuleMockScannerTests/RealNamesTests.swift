@@ -55,7 +55,15 @@ enum RealNames {
     /// Every file `git ls-files` lists that decodes as UTF-8 (so `.github/`, `packaging/`, the root
     /// files and the screenshots' text too). `config/` holds the deny-lists themselves and only its
     /// tracked templates are listed. Falls back to walking the usual directories if git fails.
-    static func trackedTextFiles(root: URL) -> [URL] {
+    /// The listing waits for `git` on a dispatch thread, never a cooperative one (LESSONS.md
+    /// 2026-11-22).
+    static func trackedTextFiles(root: URL) async -> [URL] {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { continuation.resume(returning: blockingTrackedTextFiles(root: root)) }
+        }
+    }
+
+    private static func blockingTrackedTextFiles(root: URL) -> [URL] {
         if let listed = gitTrackedFiles(root: root) {
             return listed.filter { url in
                 guard let data = try? Data(contentsOf: url) else { return false }
@@ -73,8 +81,9 @@ enum RealNames {
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()  // off the cooperative pool: a dispatch thread
+        // Not `waitUntilExit()`, which can hang after the child has gone (LESSONS.md 2026-11-12).
+        for _ in 0..<1000 where process.isRunning { usleep(10_000) }  // off the cooperative pool: a dispatch thread
         guard process.terminationStatus == 0 else { return nil }
         let paths = String(decoding: data, as: UTF8.self).split(separator: "\0").map(String.init)
         guard !paths.isEmpty else { return nil }
@@ -101,10 +110,10 @@ enum RealNames {
 
 @Suite(.timeLimit(.minutes(1))) struct RealNamesTests {
     @Test(.enabled(if: RealNames.list != nil, "config/real-names.txt is absent"))
-    func noRealNamesInTrackedFiles() throws {
+    func noRealNamesInTrackedFiles() async throws {
         let list = try #require(RealNames.list)
         let root = try #require(RealNames.repositoryRoot)
-        let files = RealNames.trackedTextFiles(root: root)
+        let files = await RealNames.trackedTextFiles(root: root)
         #expect(files.count > 50, "found only \(files.count) files under \(root.path)")
         for file in files {
             guard let data = try? Data(contentsOf: file) else { continue }
@@ -114,9 +123,9 @@ enum RealNames {
     }
 
     /// The scan covers the app bundle's files and the build script too (final review M2).
-    @Test func scanCoversScriptsAndResources() throws {
+    @Test func scanCoversScriptsAndResources() async throws {
         let root = try #require(RealNames.repositoryRoot)
-        let files = Set(RealNames.trackedTextFiles(root: root).map { $0.standardizedFileURL.path })
+        let files = Set(await RealNames.trackedTextFiles(root: root).map { $0.standardizedFileURL.path })
         for path in ["scripts/build-app.sh", "Resources/Info.plist", "ACKNOWLEDGMENTS.md", "docs/uniden/README.md",
                      "Resources/Placeholder/AppIcon.icon/icon.json", "Resources/Placeholder/AppIcon.icon/Assets/01-signal.svg",
                      "scripts/compile-app-icon.sh"] {

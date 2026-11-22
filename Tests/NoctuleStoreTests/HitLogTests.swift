@@ -464,29 +464,31 @@ import NoctuleKit
 
     /// Opens `url` from `count` `HitLog`s on as many threads at once, and returns each open's
     /// error, or nil for an open that succeeded.
-    private func openAtOnce(_ url: URL, count: Int) -> [String?] {
+    /// The test waits for them without blocking its own (cooperative) thread: the opens retry a
+    /// busy file for up to 5 s each (LESSONS.md 2026-11-22).
+    private func openAtOnce(_ url: URL, count: Int) async -> [String?] {
         let results = Mutex([String?](repeating: nil, count: count))
-        let go = DispatchSemaphore(value: 0), done = DispatchGroup()
+        let go = DispatchSemaphore(value: 0), done = DispatchGroup()  // off the cooperative pool: the threads below wait on them
         for i in 0..<count {
             done.enter()
             Thread {
-                go.wait()
+                go.wait()  // off the cooperative pool: its own Thread
                 do { _ = try HitLog(url: url) } catch { results.withLock { $0[i] = "\(error)" } }
                 done.leave()
             }.start()
         }
         for _ in 0..<count { go.signal() }  // release them together
-        done.wait()
+        await withCheckedContinuation { continuation in done.notify(queue: .global()) { continuation.resume() } }
         return results.withLock { $0 }
     }
 
     /// The session and the hit-log window (or `noctule hits` and the app) can open a version 1
     /// log at the same moment: every open must succeed, and the file is migrated once.
-    @Test func concurrentOpensMigrateVersionOneOnce() throws {
+    @Test func concurrentOpensMigrateVersionOneOnce() async throws {
         for _ in 0..<30 {
             let (dir, url) = tempDB(); defer { try? FileManager.default.removeItem(at: dir) }
             try makeVersionOneFile(at: url, hitID: UUID())
-            let errors = openAtOnce(url, count: 4).compactMap { $0 }
+            let errors = await openAtOnce(url, count: 4).compactMap { $0 }
             #expect(errors.isEmpty, "\(errors)")
             #expect(userVersion(of: url) == "2")
             if !errors.isEmpty { return }
@@ -494,10 +496,10 @@ import NoctuleKit
     }
 
     /// The same for a brand-new file: one open creates the schema, the others find it there.
-    @Test func concurrentOpensCreateANewLogOnce() throws {
+    @Test func concurrentOpensCreateANewLogOnce() async throws {
         for _ in 0..<30 {
             let (dir, url) = tempDB(); defer { try? FileManager.default.removeItem(at: dir) }
-            let errors = openAtOnce(url, count: 4).compactMap { $0 }
+            let errors = await openAtOnce(url, count: 4).compactMap { $0 }
             #expect(errors.isEmpty, "\(errors)")
             #expect(userVersion(of: url) == "2")
             if !errors.isEmpty { return }

@@ -22,10 +22,10 @@ enum PrivateWords {
 
 @Suite(.timeLimit(.minutes(1))) struct PrivateWordsTests {
     @Test(.enabled(if: PrivateWords.list != nil, "config/private-words.txt is absent"))
-    func noPrivateWordsInTrackedFiles() throws {
+    func noPrivateWordsInTrackedFiles() async throws {
         let list = try #require(PrivateWords.list)
         let root = try #require(RealNames.repositoryRoot)
-        let files = RealNames.trackedTextFiles(root: root)
+        let files = await RealNames.trackedTextFiles(root: root)
         #expect(files.count > 50, "found only \(files.count) files under \(root.path)")
         for file in files {
             guard let data = try? Data(contentsOf: file) else { continue }

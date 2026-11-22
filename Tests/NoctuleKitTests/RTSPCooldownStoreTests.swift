@@ -40,11 +40,13 @@ private func removeStoreDirectory(_ url: URL) {
 
 /// The pid of a child that has already exited (and been reaped). Pid reuse before the test
 /// reads it is astronomically unlikely.
-private func exitedPID() throws -> Int32 {
+private func exitedPID() async throws -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
     try process.run()
-    process.waitUntilExit()
+    // Suspends between looks: `waitUntilExit()` blocked a cooperative thread (LESSONS.md 2026-11-22).
+    for _ in 0..<1000 where process.isRunning { try await Task.sleep(for: .milliseconds(10)) }
+    try #require(!process.isRunning, "/usr/bin/true still running after 10 s")
     return process.processIdentifier
 }
 
@@ -57,9 +59,10 @@ private final class LiveChild: @unchecked Sendable {
         try process.run()
     }
     var pid: Int32 { process.processIdentifier }
+    /// SIGKILLs the child without waiting for it (Foundation reaps it): a wait here blocked the
+    /// test's cooperative thread, and no test reads the child after its stop.
     func stop() {
-        if process.isRunning { process.terminate() }
-        process.waitUntilExit()
+        if process.isRunning { kill(process.processIdentifier, SIGKILL) }
     }
 }
 
@@ -77,7 +80,7 @@ private func seconds(_ d: Duration) -> Double {
 
 @Test func deadLeaseForcesCooldown() async throws {
     let url = try temporaryStoreURL(); defer { removeStoreDirectory(url) }
-    let deadPID = try exitedPID()
+    let deadPID = try await exitedPID()
     let store = FileRTSPCooldownStore(url: url)
     // A crashed process: its last recorded close is long past, and its lease never cleared.
     await store.recordClosed(host: "127.0.0.1", at: Date(timeIntervalSinceNow: -3_600))
@@ -240,7 +243,7 @@ private func seconds(_ d: Duration) -> Double {
     let store = InMemoryRTSPCooldownStore()
     let old = Date(timeIntervalSince1970: 1_000)
     // Dead owner: forced to "closed at discovery", persisted (a second read returns the same time).
-    let deadPID = try exitedPID()
+    let deadPID = try await exitedPID()
     await store.recordClosed(host: "192.0.2.1", at: old)
     await store.recordOpened(host: "192.0.2.1", at: Date(), pid: deadPID)
     let before = Date()
@@ -685,7 +688,7 @@ private func bothStores(_ url: URL) -> [any RTSPCooldownStore] {
 
 @Test func deadLeaseIsAnUncleanClose() async throws {
     let url = try temporaryStoreURL(); defer { removeStoreDirectory(url) }
-    let deadPID = try exitedPID()
+    let deadPID = try await exitedPID()
     let policy = RTSPCooldownPolicy(full: .seconds(120), afterCleanClose: .zero)
     for store in bothStores(url) {
         let host = "192.0.2.\(store is FileRTSPCooldownStore ? 1 : 2)"
@@ -823,7 +826,7 @@ private func expectWait(_ claim: RTSPCooldownClaim, atLeast: Duration, _ note: S
 /// QA probe P2: a future-stamped clean close must not hide a dead lease (a crash).
 @Test func futureCleanCloseDoesNotHideADeadLease() async throws {
     let url = try temporaryStoreURL(); defer { removeStoreDirectory(url) }
-    let deadPID = try exitedPID()
+    let deadPID = try await exitedPID()
     for store in bothStores(url) {
         let host = "192.0.2.\(store is FileRTSPCooldownStore ? 1 : 2)"
         await store.recordClosed(host: host, at: Date(timeIntervalSinceNow: 600), clean: true)

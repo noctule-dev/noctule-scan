@@ -37,12 +37,12 @@ import Testing
                 s.waitingOn = s.gate
                 return s.gate
             }
-            gate?.wait()
+            gate?.wait()  // off the cooperative pool: a held listing, by design (one test, about 100 ms)
             return state.withLock { $0.devices }
         }
 
         func set(_ new: [AudioInputDevice]) { state.withLock { $0.devices = new } }
-        func hold() { state.withLock { $0.gate = DispatchSemaphore(value: 0) } }
+        func hold() { state.withLock { $0.gate = DispatchSemaphore(value: 0) } }  // off the cooperative pool: the hold, released by the test
         /// Whether an `inputs()` call is waiting on `hold()`.
         var isHeld: Bool { state.withLock { $0.waitingOn != nil } }
         func release() {
@@ -191,6 +191,16 @@ import Testing
     }
 
     // MARK: - Helpers
+
+    /// Runs a blocking `body` on a dispatch thread and waits for it without holding a cooperative
+    /// one (LESSONS.md 2026-11-22). The caller awaits it, so nothing else touches what `body`
+    /// captures meanwhile.
+    private func offThePool(_ body: @escaping () -> Void) async {
+        nonisolated(unsafe) let work = body
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { work(); continuation.resume() }
+        }
+    }
 
     /// Polls `condition` until it holds, failing the test after `timeout`.
     private func waitUntil(
@@ -477,7 +487,14 @@ import Testing
     /// A stop that arrives while the source is deciding to start (here, a slow device listing after
     /// the device came back) wins: no engine is started, so the microphone is never opened after the
     /// user stopped.
-    @Test func stopWhileDecidingNeverStartsTheEngine() async throws {
+    /// The held listing blocks the source's own task, which runs on the cooperative pool (it calls
+    /// the listing synchronously, as Core Audio is called), so the stop needs another thread to
+    /// arrive: it can't run in a one-thread pool (`LIBDISPATCH_COOPERATIVE_POOL_STRICT=1`, where it
+    /// deadlocked the whole product). The release comes from a dispatch thread, so the blocked
+    /// pool thread is let go even when the pool is busy (LESSONS.md 2026-11-22).
+    @Test(.disabled(if: ProcessInfo.processInfo.environment["LIBDISPATCH_COOPERATIVE_POOL_STRICT"] == "1",
+                    "needs a second cooperative thread for the stop to arrive"))
+    func stopWhileDecidingNeverStartsTheEngine() async throws {
         let rig = makeRig(inputs: [])
         await rig.source.start()
         try await waitUntil("missing") { rig.states.items.last == .missing(deviceName: Self.savedName) }
@@ -491,9 +508,10 @@ import Testing
             await source.stop()
             stopped.withLock { $0 = true }
         }
-        // Let the stop's cancellation land, then let the listing answer with the device present.
-        try await Task.sleep(for: .milliseconds(100))
-        rig.inputs.release()
+        // Let the stop's cancellation land, then let the listing answer with the device present,
+        // released from a dispatch thread (the waiting listing holds a cooperative one).
+        let inputs = rig.inputs
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(100)) { inputs.release() }
         try await waitUntil("stop() to return", timeout: .seconds(1)) { stopped.withLock { $0 } }
         #expect(rig.engines.made.isEmpty)
         #expect(rig.engines.starts.isEmpty)
@@ -528,19 +546,20 @@ import Testing
         /// Pushes 70 blocks while the processing queue is held: the ring (64 slots) keeps 64 and
         /// drops 6 (3072 frames, 512 samples at 8 kHz), which the next block written carries.
         func overflow() {
-            let held = DispatchSemaphore(value: 0)
-            let holding = DispatchSemaphore(value: 0)
-            processing.async { holding.signal(); held.wait() }
-            holding.wait()
+            let held = DispatchSemaphore(value: 0)  // off the cooperative pool: held on the processing queue
+            let holding = DispatchSemaphore(value: 0)  // off the cooperative pool: released at once by that queue
+            processing.async { holding.signal(); held.wait() }  // off the cooperative pool: the processing queue
+            holding.wait()  // off the cooperative pool: until the processing queue takes the block, an instant
             push(blocks: 70)
             held.signal()
         }
 
-        // 64 blocks are 5461 samples at 8 kHz: 17 chunks.
-        overflow()
+        // 64 blocks are 5461 samples at 8 kHz: 17 chunks. `overflow()` blocks (on the held
+        // queue, then pushing), so it runs on a dispatch thread, not the test's cooperative one.
+        await offThePool(overflow)
         try await waitUntil("the first 17 chunks") { rig.chunks.items.count >= 17 }
         // One chunk lost (512 samples), 192 samples carried; 17 more chunks.
-        overflow()
+        await offThePool(overflow)
         try await waitUntil("34 chunks") { rig.chunks.items.count >= 34 }
         // 192 + 512 = 704 samples: two chunks lost, 64 carried; 10 blocks are 2 more chunks.
         push(blocks: 10)
