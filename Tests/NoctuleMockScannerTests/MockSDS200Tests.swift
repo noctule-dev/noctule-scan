@@ -102,6 +102,15 @@ private final class ChunkLog: Sendable {
     }
 
     var count: Int { chunks.withLock { $0.count } }
+    /// The first chunk from `start` on whose loudest sample is above `level` (or, `quiet`, at most it).
+    func first(from start: Int, quiet: Bool = false, level: Int = 8) -> Int? {
+        chunks.withLock { chunks in
+            chunks.indices.dropFirst(start).first { index in
+                let peak = chunks[index].samples.map { abs(Int($0)) }.max() ?? 0
+                return quiet ? peak <= level : peak > level
+            }
+        }
+    }
     func samples(from start: Int) -> [Int16] { chunks.withLock { $0.dropFirst(start).flatMap(\.samples) } }
     func cancel() { task.withLock { $0?.cancel() } }
 }
@@ -232,17 +241,21 @@ private func isFailed(_ state: AudioSessionState) -> Bool {
             #expect(abs(hz - second.toneHz) <= second.toneHz * 0.05, "measured \(hz) Hz, want \(second.toneHz)")
 
             // Between transmissions: still 25 packets/s (continuous), but silent.
+            // Measured from the first chunk that shows the change, plus one (a chunk may straddle it):
+            // a fixed three chunks after the clock moved still held the tone under load (local sweep).
             rig.clock.set(second.end + 0.5)
-            let mark = chunks.count + 3
-            try await eventually { chunks.count >= mark + 10 }
+            let silenceFrom = chunks.count
+            try await eventually { chunks.first(from: silenceFrom, quiet: true).map { chunks.count >= $0 + 11 } ?? false }
+            let mark = try #require(chunks.first(from: silenceFrom, quiet: true)) + 1
             let quiet = chunks.samples(from: mark)
             #expect(quiet.allSatisfy { abs(Int($0)) <= 8 }, "max \(quiet.map { abs(Int($0)) }.max() ?? 0)")
 
             // Another transmission: its own tone.
             let third = MockScenario.default.transmissions[2]
             rig.clock.set(third.at + 0.5)
-            let next = chunks.count + 3
-            try await eventually { chunks.count >= next + 15 }
+            let toneFrom = chunks.count
+            try await eventually { chunks.first(from: toneFrom).map { chunks.count >= $0 + 16 } ?? false }
+            let next = try #require(chunks.first(from: toneFrom)) + 1
             let thirdHz = zeroCrossingHz(chunks.samples(from: next))
             #expect(abs(thirdHz - third.toneHz) <= third.toneHz * 0.05, "measured \(thirdHz) Hz, want \(third.toneHz)")
             await session.stop()
