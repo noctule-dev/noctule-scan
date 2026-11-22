@@ -48,7 +48,7 @@ The app icon and the installer background are brand art and aren't in this repos
 
 ## Downloads
 
-Signed, notarized DMGs are on the [Releases](https://github.com/noctule-dev/noctule-scan/releases) page, once there is one.
+Signed, notarized DMGs are on the [Releases](https://github.com/noctule-dev/noctule-scan/releases) page. The current ones are betas.
 
 ## Where to read
 
