@@ -1234,8 +1234,12 @@ extension DiskImageTests {
         }
 
         /// Whether `hdiutil info` lists an image under `directory`.
+        /// Whether an image from this test's own directory is attached. The whole path, not its last
+        /// component, which every test's directory shares ("with space"): one image a killed run left
+        /// attached failed four tests at once (local sweep).
         private func attachedImages(under directory: URL) async throws -> Bool {
-            try await run(tool("hdiutil"), ["info"]).stdout.contains(directory.lastPathComponent)
+            let info = try await run(tool("hdiutil"), ["info"]).stdout
+            return [directory.path, directory.resolvingSymlinksInPath().path].contains { info.contains($0 + "/") }
         }
 
         @Test func releaseChecksTheAppInsideTheDMG() async throws {
