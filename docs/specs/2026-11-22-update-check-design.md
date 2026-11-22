@@ -159,3 +159,7 @@ The General tab is a fixed 600 × 420 today; it grows to fit.
 - The `User-Agent` string (something like `NoctuleScan/<version>`), `Accept: application/vnd.github+json` and the `X-GitHub-Api-Version` header.
 - How much Markdown the notes render (§6.1), within "no web view, no remote content".
 - Exact wording of the stderr reasons.
+
+## 9. What was built
+
+Plan 22 (`2026-11-22-plan-22-update-check.md`) built §§5–7 as designed. `UpdateChecker` (an `@MainActor @Observable` object the `AppDelegate` owns), the feed parser, version ordering and all copy (`UpdateText`) are in `NoctuleAppCore`, so iOS can reuse them; the Software Update window is an `NSWindow` the app's `UpdateWindowController` owns (ordered front without becoming key for an automatic check, §6.1), the menu item sits under About, and Settings › General › Updates holds the switch, "Last checked" and Check Now (§6.4). The 24-hour timer sleeps on `SuspendingClock`. Both test overrides are honoured only with a private `NOCTULE_SETTINGS_DIR`. The hand checks on the mocks are scripted in a git-ignored launcher; the one end-to-end check against GitHub waits for 1.0.0 to be published (§7).

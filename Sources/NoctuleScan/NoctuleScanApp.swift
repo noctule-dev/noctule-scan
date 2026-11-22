@@ -45,7 +45,8 @@ struct NoctuleScanApp: App {
 
         Settings {
             SettingsView(directory: appDelegate.directory, settings: appDelegate.settings,
-                         registry: appDelegate.registry, recordingsRoot: appDelegate.recordingsRoot)
+                         registry: appDelegate.registry, recordingsRoot: appDelegate.recordingsRoot,
+                         updates: appDelegate.updates)
         }
         .commands {
             UpdateCommands(updates: appDelegate.updates)

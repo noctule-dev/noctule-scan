@@ -16,12 +16,13 @@ struct SettingsView: View {
     let settings: any SettingsStore
     let registry: SessionRegistry
     let recordingsRoot: URL
+    let updates: UpdateChecker
     @State private var tab = "general"
 
     var body: some View {
         TabView(selection: $tab) {
             Tab("General", systemImage: "gearshape", value: "general") {
-                GeneralSettingsTab(directory: directory, settings: settings)
+                GeneralSettingsTab(directory: directory, settings: settings, updates: updates)
             }
             Tab("Stations", systemImage: "antenna.radiowaves.left.and.right", value: "stations") {
                 StationsSettingsTab(directory: directory, settings: settings, registry: registry,
@@ -36,12 +37,14 @@ struct SettingsView: View {
 
 struct GeneralSettingsTab: View {
     let directory: StationDirectory
+    let updates: UpdateChecker
     @State private var model: AppSettingsModel
     @State private var pendingImport: PendingImport?
     @State private var message: SettingsMessage?
 
-    init(directory: StationDirectory, settings: any SettingsStore) {
+    init(directory: StationDirectory, settings: any SettingsStore, updates: UpdateChecker) {
         self.directory = directory
+        self.updates = updates
         _model = State(initialValue: AppSettingsModel(settings: settings))
     }
 
@@ -73,9 +76,23 @@ struct GeneralSettingsTab: View {
                 Text("The file holds every station and its settings, but not hit logs, recordings or this Mac's recordings folders.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Toggle(UpdateText.automaticToggle, isOn: Binding(
+                    get: { updates.checksAutomatically },
+                    set: { on in Task { await updates.setChecksAutomatically(on) } }))
+                LabeledContent(UpdateText.lastChecked(updates.lastChecked, now: .now)) {
+                    Button("Check Now") { Task { await updates.checkNow() } }
+                        .disabled(updates.isChecking)
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text(UpdateText.settingsFooter)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 600, height: 420)
+        .frame(width: 600, height: 560)
         .sheet(item: $pendingImport) { pending in
             ImportOptionsSheet(pending: pending) { replace in
                 pendingImport = nil

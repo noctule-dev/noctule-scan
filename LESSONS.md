@@ -135,6 +135,9 @@ Things learned while building Noctule Scan, so neither of us relearns them the h
 
 ## Project and tooling
 
+- **2026-11-22: Two clock traps in the update check (Plan 22).** (1) `DateFormatter.doesRelativeDateFormatting` ("Today", "Yesterday") compares against the real clock, not any `now` we pass, so a test of "Last checked" with an injected `now` printed the wrong word whenever the real date differed; format the relative part ourselves from the injected `now`. (2) `Task.sleep` on the continuous clock keeps counting through system sleep, so a 24-hour timer fires at wake, not 24 hours of awake time later, and a test that steps a clock can't see it; the checker sleeps on `SuspendingClock` instead.
+  - What to do: inject the clock for every date-dependent string and timer, and check what a formatter or sleep reads underneath before trusting a fake `now`.
+
 - **2026-11-22: CI and releases moved to the larger `xcode-27-xlarge` runner.** The timing-sensitive tests flaked on the free `xcode-27` runner (an M1 VM, 3 cores, 7.5 GB): in a hunt across VMs about 2 in 5 failed. On `xcode-27-xlarge` (an Apple M2 Pro VM, 5 cores, 14 GB, billed per minute) all 4 passes of a two-VM hunt passed. The maintainer accepted the cost, and both `ci.yml` and `release.yml` now use it (`CIWorkflowTests` pins that they match). Outside contributors' pull requests need the maintainer's approval before CI runs, so the bill stays bounded. `.skippedOnCIRunner` still applies (`NOCTULE_CI_RUNNER` is still set). A self-hosted runner is planned.
   - What to do: when a test flakes only on CI, count failures across several VMs before changing the test or the runner; a few passes on one VM prove little. Keep the two workflows on one runner label.
 
