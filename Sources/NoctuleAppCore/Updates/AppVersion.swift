@@ -29,6 +29,8 @@ public struct AppVersion: Comparable, Hashable, Sendable, CustomStringConvertibl
             for part in parts {
                 guard !part.isEmpty, part.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") })
                 else { return nil }
+                // SemVer §9: an all-digit identifier has no leading zero.
+                if Self.isNumeric(part), part != "0", part.hasPrefix("0") { return nil }
                 identifiers.append(String(part))
             }
         }
@@ -70,8 +72,7 @@ public struct AppVersion: Comparable, Hashable, Sendable, CustomStringConvertibl
         switch (xNumeric, yNumeric) {
         case (true, true):
             // By length then text, so a long run of digits can't overflow.
-            let a = x.drop { $0 == "0" }, b = y.drop { $0 == "0" }
-            return a.count != b.count ? a.count < b.count : a < b
+            return x.count != y.count ? x.count < y.count : x < y
         case (true, false): return true
         case (false, true): return false
         case (false, false): return x.utf8.lexicographicallyPrecedes(y.utf8)

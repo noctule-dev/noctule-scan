@@ -22,7 +22,7 @@ import Testing
         #expect(try #require(AppVersion("1.0.0")).isFinal)
     }
 
-    @Test(arguments: ["", "1.2", "1.2.3.4", "01.2.3", "1.2.3-", "1.2.3+meta", "1.2.3-beta..1", "v", " 1.2.3", "latest"])
+    @Test(arguments: ["", "1.2", "1.2.3.4", "01.2.3", "1.2.3-", "1.2.3+meta", "1.2.3-beta..1", "v", " 1.2.3", "latest", "1.0.0-01", "99999999999999999999.0.0"])
     func refuses(text: String) {
         #expect(AppVersion(text) == nil)
     }
@@ -37,6 +37,7 @@ import Testing
             }
         }
         #expect(try #require(AppVersion("1.0.0-1")) < #require(AppVersion("1.0.0-a")))
+        #expect(try #require(AppVersion("1.0.0-99999999999999999999")) < #require(AppVersion("1.0.0-100000000000000000000")))
         #expect(AppVersion("v1.0.0") == AppVersion("1.0.0"))
     }
 
