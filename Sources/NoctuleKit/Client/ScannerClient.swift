@@ -39,9 +39,11 @@ public struct PushUpdate: Sendable {
 /// **Decided at the slot** (`onlyIf`). A request can wait for the slot for up to a command timeout (behind a
 /// read whose reply was lost), and what made its caller send it may have changed meanwhile. A request given
 /// `onlyIf` evaluates it once it holds the slot, in the task that writes it, just before the write, and writes
-/// nothing unless it returns true: it then throws `withheld` and frees the slot at once. Nothing suspends between
-/// that call and the transport's `send`, so a caller that clears its flag (synchronously, from any thread) before
-/// the guard runs sends nothing; one that clears it after can still see the bytes go out a moment later. State-changing commands that a user's action
+/// nothing unless it returns true: it then throws `withheld` and frees the slot at once. Nothing in the client
+/// suspends between that call and the transport's `send`, but that `send` is one hop onto the transport's actor,
+/// which can wait when that actor or the thread pool is busy: a caller that clears its flag (synchronously, from
+/// any thread) before the guard runs sends nothing; one that clears it after can still see the bytes go out a
+/// moment later. State-changing commands that a user's action
 /// sends take one (`setListKey`, `setSystemKey`, `setDepartmentKey`, `press`, `setMenuValue`).
 ///
 /// If the transport's `responses` stream ends without `disconnect()`, the client tears down to
@@ -294,7 +296,8 @@ public actor ScannerClient {
         let sentAt = ContinuousClock.now
         let response = try await withThrowingTaskGroup(of: ScannerResponse.self) { group in
             group.addTask {
-                // Decided here, holding the slot, with nothing that suspends between it and the write.
+                // Decided here, holding the slot: nothing in the client suspends between it and the transport's
+                // `send` (one hop onto the transport's actor, which then writes).
                 if let proceed, !proceed() {
                     CommandTrace.log("withheld \(command.name) at the slot")
                     throw ScannerClientError.withheld(command: command.name)

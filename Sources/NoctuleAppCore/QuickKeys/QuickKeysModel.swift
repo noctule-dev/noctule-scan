@@ -168,8 +168,9 @@ public enum QuickKeySwitchState: Equatable, Sendable {
 ///
 /// **One command at a time.** Everything goes through the attached client (`control`, the runner's
 /// `control()`) from one loop, so this model never has two commands in flight: `GLT`, `FQK`, `SQK` and
-/// `DQK` reads, and the one set of each `toggle`. Nothing is sent unless the model is both attached and
-/// open. After a failed read the background reads (the keypad, a list, the polls) rest for `pollInterval`;
+/// `DQK` reads, and the one set of each `toggle`. No set is sent unless the model is both attached and open
+/// when the set holds the client's request slot (see Switching); a read is started only then too, but one already
+/// waiting for the slot can still go out after a close or a detach (read-only; `quiesce()` waits for it). After a failed read the background reads (the keypad, a list, the polls) rest for `pollInterval`;
 /// two timeouts in a row set `isScannerAnswering` false (true again on the next answer).
 ///
 /// **Late replies** (final review C1; design §10). Replies are matched to requests by command name only
@@ -287,8 +288,8 @@ public enum QuickKeySwitchState: Equatable, Sendable {
 /// command (the display's `STS`, the menu's `GSI`) for up to a command timeout, so it carries a `SendPermit` that
 /// every stop of the run (`close()`, `detach()`) and a menu (`isInMenu` turning true) revoke synchronously, and the
 /// client writes it only if the permit still holds once it has the slot (`ScannerClient.send(_:onlyIf:)`). Withheld,
-/// nothing was sent: no error, no re-read. What remains is the moment between that check and the write, with no
-/// suspension between them. Its reply
+/// nothing was sent: no error, no re-read. What remains is the moment between that check and the write: no
+/// suspension in the client, one hop onto the transport's actor. Its reply
 /// can be `OK`, `NG`, nothing (a timeout), or a stray (a late reply to an earlier read of the same command,
 /// which answers by name): anything but `OK` leaves the outcome unknown, and `lastError` says "The scanner
 /// didn't confirm the change". Either way the scope is then read again and shows what the scanner holds.

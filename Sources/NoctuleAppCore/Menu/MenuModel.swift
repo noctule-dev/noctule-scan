@@ -130,6 +130,8 @@ public final class MenuModel {
     }
 
     @ObservationIgnored private var link: Link?
+    /// Between `attach` and `detach` (tests: a stop detaches before its first await).
+    var isAttached: Bool { link != nil }
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
     /// The cancelled loop of the last detach, for `quiesce()`.
