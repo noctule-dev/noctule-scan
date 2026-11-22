@@ -60,8 +60,11 @@ public enum MenuActionError: Error, Equatable, Sendable {
 /// **Lifecycle.** `attach(control:)` on `.connected`; `detach()` on any other phase (stop,
 /// suspend, a restart, a failed run) clears `content` and the breadcrumb, cancels the refresh
 /// loop and makes every action in flight throw `.notConnected` at its next step, so nothing more
-/// is sent. The client comes only from `control` (the runner's `control()`, nil once its stop
-/// begins).
+/// is sent. That includes a `KEY` or `MSV` already waiting for the client's request slot (behind
+/// another reader's command, for up to a command timeout): each carries its run's `SendPermit`,
+/// which `detach()` revokes, and the client writes it only if the permit still holds once it has
+/// the slot (`ScannerClient.send(_:onlyIf:)`; flaky-sweep review I2, 2026-11-22). The client
+/// comes only from `control` (the runner's `control()`, nil once its stop begins).
 @MainActor @Observable
 public final class MenuModel {
     /// nil: the scanner is not in a menu (or the session isn't connected).
@@ -96,6 +99,8 @@ public final class MenuModel {
     private struct Link {
         let control: @Sendable () async -> ScannerClient?
         let generation: Int
+        /// Revoked by `detach()`: a command of this run still waiting for the slot then writes nothing.
+        let permit = SendPermit()
     }
 
     /// The part of `ScannerInfo` that says which menu screen is showing.
@@ -164,6 +169,7 @@ public final class MenuModel {
     /// Stops following: clears the menu state and the loop; actions in flight throw `.notConnected`.
     func detach() {
         generation += 1
+        link?.permit.revoke()
         link = nil
         if let refreshTask {
             refreshTask.cancel()
@@ -245,7 +251,7 @@ public final class MenuModel {
                 self.apply(snapshot)
                 return snapshot.content
             }
-            return try await self.command(link) { try await $0.press(.menu) }
+            return try await self.command(link) { try await $0.press(.menu, onlyIf: $1) }
         }
     }
 
@@ -266,7 +272,7 @@ public final class MenuModel {
                 try await self.rereadAfterMismatch(link)
                 throw MenuActionError.menuChanged
             }
-            return try await self.command(link) { try await $0.setMenuValue(String(item.index)) }
+            return try await self.command(link) { try await $0.setMenuValue(String(item.index), onlyIf: $1) }
         }
     }
 
@@ -292,7 +298,7 @@ public final class MenuModel {
                 self.show(Self.content(for: current), title: current.title, menuIndex: current.menuIndex)
                 throw MenuActionError.invalidValue
             }
-            return try await self.command(link) { try await $0.setMenuValue(text) }
+            return try await self.command(link) { try await $0.setMenuValue(text, onlyIf: $1) }
         }
     }
 
@@ -300,7 +306,7 @@ public final class MenuModel {
     @discardableResult
     public func back() async throws -> MenuContent? {
         try await perform(inMenu: true) { link in
-            try await self.command(link) { try await $0.press(.menu) }
+            try await self.command(link) { try await $0.press(.menu, onlyIf: $1) }
         }
     }
 
@@ -317,7 +323,7 @@ public final class MenuModel {
                 self.apply(Snapshot(info: info, content: nil))
                 return nil
             }
-            return try await self.command(link) { try await $0.press(.avoid) }
+            return try await self.command(link) { try await $0.press(.avoid, onlyIf: $1) }
         }
     }
 
@@ -346,7 +352,7 @@ public final class MenuModel {
                     }
                 }
             }
-            return try await self.command(link) { try await $0.press(key) }
+            return try await self.command(link) { try await $0.press(key, onlyIf: $1) }
         }
     }
 
@@ -412,6 +418,8 @@ public final class MenuModel {
         case ok, rejected(String), unanswered, gone
         /// Refused before anything was sent (an argument with a comma, CR or LF).
         case refused
+        /// Withheld at the client's slot: the run detached while the command waited, and nothing was sent.
+        case withheld
     }
 
     /// The `CommandReply` for an error the command threw.
@@ -426,6 +434,7 @@ public final class MenuModel {
             case .unexpectedResponse(let command): return .rejected("unexpected reply to \(command)")
             case .timeout: return .unanswered
             case .notConnected: return .gone
+            case .withheld: return .withheld
             }
         default: return .unanswered  // cancelled: whether it went out is unknown
         }
@@ -433,16 +442,20 @@ public final class MenuModel {
 
     /// Sends the action's one state-changing command, never resent, then re-reads the screen. A
     /// command refused before sending throws `.invalidValue`, with no display nudge and no re-read.
-    private func command(_ link: Link, _ send: (ScannerClient) async throws -> Void) async throws -> MenuContent? {
+    /// `send` hands its `onlyIf` (the run's permit) to the client, so a command still waiting for the slot when
+    /// the model detaches is withheld: then nothing went out, so no display nudge and no re-read.
+    private func command(_ link: Link,
+                         _ send: (ScannerClient, @escaping @Sendable () -> Bool) async throws -> Void) async throws -> MenuContent? {
         let client = try await client(link)
         let reply: CommandReply
         do {
-            try await send(client)
+            try await send(client, link.permit.check)
             reply = .ok
         } catch {
             reply = Self.commandReply(to: error)
         }
         if reply == .refused { throw MenuActionError.invalidValue }
+        if reply == .withheld { throw MenuActionError.notConnected }
         onCommandReply?()
         guard isAlive(link), reply != .gone else { throw MenuActionError.notConnected }
 
@@ -469,6 +482,7 @@ public final class MenuModel {
         case .unanswered: throw MenuActionError.noAnswer
         case .gone: throw MenuActionError.notConnected
         case .refused: throw MenuActionError.invalidValue  // thrown above, before the nudge
+        case .withheld: throw MenuActionError.notConnected  // thrown above, before the nudge
         }
     }
 

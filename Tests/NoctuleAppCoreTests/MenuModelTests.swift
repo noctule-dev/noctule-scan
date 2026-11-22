@@ -2,8 +2,9 @@
 // Copyright 2026 Sean Foley and the Noctule Scan contributors
 
 import Foundation
+import Synchronization
 import Testing
-import NoctuleKit
+@testable import NoctuleKit
 import NoctuleMockScanner
 import NoctuleStore
 @testable import NoctuleAppCore
@@ -120,6 +121,69 @@ private func menuStatus(_ lines: [String], highlighted: Int?, cursorOnly: Bool =
         return cursorOnly ? "*" + String(repeating: " ", count: 29) : String(repeating: "*", count: 30)
     }
     return try DisplayStatus(fields: ["1111111111"] + zip(rows, masks).flatMap { [$0, $1] } + trailingFields)
+}
+
+/// A menu action whose command queues for the client's request slot behind a `GSI` the mock never answers (the
+/// quick keys' I2 window, flaky-sweep review, on the menu). The `control()` call just before the command (after
+/// `checkReads` calls for the action's own reads) first starts that `GSI`, waits until the mock has it, then hands
+/// over the client; once the command is queued behind it, `interfere` runs, then the `GSI` is cancelled, freeing
+/// the slot. Returns the action's result and the mock's `KEY`, `MSV` and `MSI` commands since the action began.
+@MainActor
+private func menuActionHeldAtTheSlot(
+    checkReads: Int = 0, at screen: @escaping (ScannerClient) async throws -> MenuScreen,
+    _ action: @escaping @MainActor (MenuModel, MenuScreen) async throws -> MenuContent?,
+    whileWaiting interfere: @MainActor (MenuModel) -> Void
+) async throws -> (result: Result<MenuContent?, any Error>, commands: [String]) {
+    let mock = MockSDS200(scenario: .default, options: MockSDS200.Options(clock: .stepped(at: 1)))
+    let ports = try await mock.start()
+    let client = ScannerClient(transport: UDPTransport(host: "127.0.0.1", port: ports.udpPort),
+                               commandTimeout: .seconds(10))
+    let held = Mutex<Task<Void, Never>?>(nil)
+    do {
+        try await client.connect()
+        let current = try await screen(client)
+        let mark = await commandMark(mock)
+        let armed = Mutex<Int?>(checkReads)
+        let model = MenuModel()
+        model.attach(control: {
+            let hold = armed.withLock { armed -> Bool in
+                guard let left = armed else { return false }
+                armed = left == 0 ? nil : left - 1
+                return left == 0
+            }
+            if hold {
+                let before = await mock.control.receivedCommands.count
+                await mock.setFaults(MockFaults(dropNextRequest: "GSI"))
+                held.withLock { $0 = Task { _ = try? await client.scannerInfo() } }
+                let deadline = ContinuousClock.now + .seconds(5)
+                while !(await mock.control.receivedCommands.dropFirst(before).contains("GSI")),
+                      ContinuousClock.now < deadline {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
+            }
+            return client
+        })
+        model.show(MenuModel.content(for: current), title: current.title, menuIndex: current.menuIndex)
+        let task = Task { try await action(model, current) }
+        try await waitUntil("the command queued behind the held GSI", .seconds(5)) {
+            await client.requestsWaitingForTheSlot == 1
+        }
+        interfere(model)
+        held.withLock { $0?.cancel() }
+        let result = await task.result
+        await held.withLock { $0 }?.value
+        model.detach()
+        await model.quiesce()
+        let commands = await menuCommands(mock, since: mark)
+        await client.disconnect()
+        await mock.stop()
+        return (result, commands)
+    } catch {
+        held.withLock { $0?.cancel() }
+        await client.disconnect()
+        await mock.stop()
+        throw error
+    }
 }
 
 @MainActor
@@ -1195,6 +1259,50 @@ private func menuStatus(_ lines: [String], highlighted: Int?, cursorOnly: Bool =
             #expect(menu.isScannerAnswering)
         }
         #expect(outcome.leaked == [])
+    }
+
+    // MARK: Decided at the slot
+
+    @Test func aKeyHeldAtTheSlotIsSentOnce() async throws {
+        let (result, commands) = try await menuActionHeldAtTheSlot(at: { client in
+            try await client.press(.menu)
+            try await client.press(.enterYes)  // Set Scan Selection
+            return try await client.menuScreen()
+        }, { model, _ in try await model.back() }, whileWaiting: { _ in })
+        #expect(states(commands) == ["KEY,M,P"], "\(commands)")
+        if case .failure(let error) = result { Issue.record("the action failed: \(error)") }
+    }
+
+    @Test func detachWhileAKeyWaitsForTheSlotSendsNoKey() async throws {
+        let (result, commands) = try await menuActionHeldAtTheSlot(at: { client in
+            try await client.press(.menu)
+            try await client.press(.enterYes)  // Set Scan Selection
+            return try await client.menuScreen()
+        }, { model, _ in try await model.back() }, whileWaiting: { $0.detach() })
+        #expect(states(commands).isEmpty, "\(commands)")
+        if case .failure(let error) = result {
+            #expect(error as? MenuActionError == .notConnected)
+        } else {
+            Issue.record("the action returned")
+        }
+    }
+
+    @Test func detachWhileAnMSVWaitsForTheSlotSendsNoMSV() async throws {
+        // `choose` re-reads MSI first (one control call), then its MSV queues behind the held GSI.
+        let (result, commands) = try await menuActionHeldAtTheSlot(checkReads: 1, at: { client in
+            try await client.press(.menu)
+            return try await client.menuScreen()
+        }, { model, top in
+            let item = try #require(top.items.first { $0.name == "Display Options" })
+            return try await model.choose(item, on: top)
+        }, whileWaiting: { $0.detach() })
+        #expect(commands.first == "MSI", "the re-check ran: \(commands)")
+        #expect(states(commands).isEmpty, "\(commands)")
+        if case .failure(let error) = result {
+            #expect(error as? MenuActionError == .notConnected)
+        } else {
+            Issue.record("the action returned")
+        }
     }
 
     @Test func detachDuringTheRecheckSendsNothing() async throws {
