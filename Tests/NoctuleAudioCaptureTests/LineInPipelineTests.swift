@@ -222,7 +222,11 @@ import NoctuleAudioCapture
         #expect(peak(out.chunks) > 10_000)
     }
 
-    @Test func chunkTimesFollowAFastDeviceClock() {
+    /// Ten minutes of audio is seconds of CPU in a debug build (33 s under background priority and
+    /// load): on a cooperative thread it held every other test in this process, and under a
+    /// one-thread pool `EngineLineInSourceTests` timed out waiting (local sweep). It runs on a
+    /// dispatch thread.
+    @Test func chunkTimesFollowAFastDeviceClock() async {
         // A device clock 100 ppm fast: its n-th sample is captured at n / (rate × 1.0001) host seconds.
         let rate = 48_000.0
         let fmt = format(rate, channels: 2)
@@ -231,14 +235,21 @@ import NoctuleAudioCapture
         let block = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: 512)!
         block.frameLength = 512
         for c in 0..<2 { for i in 0..<512 { block.floatChannelData![c][i] = 0.1 * Float(sin(Double(i) * 0.3)) } }
-        var last: AudioChunk?
-        var lastCount = 0
-        let blocks = 56_250   // ten minutes
-        for n in 0..<blocks {
-            let at = start + .seconds(Double(n * 512) / (rate * 1.0001))
-            let out = pipeline.process(block, firstSampleAt: at)
-            if let chunk = out.chunks.last { last = chunk }
-            lastCount += out.chunks.count
+        nonisolated(unsafe) let work = (pipeline, block)
+        let (last, lastCount) = await withCheckedContinuation { (continuation: CheckedContinuation<(AudioChunk?, Int), Never>) in
+            DispatchQueue.global().async {
+                let (pipeline, block) = work
+                var last: AudioChunk?
+                var lastCount = 0
+                let blocks = 56_250   // ten minutes
+                for n in 0..<blocks {
+                    let at = start + .seconds(Double(n * 512) / (rate * 1.0001))
+                    let out = pipeline.process(block, firstSampleAt: at)
+                    if let chunk = out.chunks.last { last = chunk }
+                    lastCount += out.chunks.count
+                }
+                continuation.resume(returning: (last, lastCount))
+            }
         }
         let chunk = try! #require(last)
         // Chunk k starts at input sample k × 1920.
