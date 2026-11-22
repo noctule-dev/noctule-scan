@@ -1315,17 +1315,18 @@ extension DiskImageTests {
             #expect(try await porcelain(repo).isEmpty)
         }
 
-        @Test func gatekeeperOutputCarriesNoIdentity() async throws {
-        let stubs = try StubTools()
-        let repo = try await fakeRepository(in: stubs.directory)
-        try await tagHead(repo, "v0.1.0")
-        for extra in [[:], ["STUB_SPCTL_STATUS": "3"]] {
+        /// One release per case, each with its own time limit: the two in one test came within the
+        /// suite's minute on a loaded machine (two whole release builds; LESSONS.md 2026-11-22).
+        @Test(arguments: [[:], ["STUB_SPCTL_STATUS": "3"]] as [[String: String]])
+        func gatekeeperOutputCarriesNoIdentity(_ extra: [String: String]) async throws {
+            let stubs = try StubTools()
+            let repo = try await fakeRepository(in: stubs.directory)
+            try await tagHead(repo, "v0.1.0")
             let result = try await release(["0.1.0"], stubs, repo, extra)
             let output = result.stdout + result.stderr
             #expect(output.contains("source=Notarized Developer ID"), "\(extra)")
             #expect(!output.contains("Test Person") && !output.contains("TEAM123456"), "\(extra): \(output)")
         }
-    }
 
     @Test func failedGatekeeperCheckFailsTheRun() async throws {
             let stubs = try StubTools()

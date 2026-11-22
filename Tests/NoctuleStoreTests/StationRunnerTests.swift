@@ -254,6 +254,13 @@ private func withRunner(
     } catch {
         if failure == nil { failure = error }
     }
+    // The runner's `PSI,0` is a datagram the mock takes in on its own queue: wait (bounded) for it
+    // before stopping the mock and reading its log, rather than reading at once (which flaked on
+    // the CI runner). A missing `PSI,0` still fails `expectCleanStop`.
+    _ = try? await eventually(.seconds(3)) {
+        let commands = await mock.control.receivedCommands
+        return !commands.contains { $0.hasPrefix("PSI,") && $0 != "PSI,0" } || commands.last == "PSI,0"
+    }
     await mock.stop()
     let outcome = Outcome(leaked: await mock.leakedSessions, commands: await mock.control.receivedCommands,
                           events: events.all, eventsFinished: events.isFinished)
@@ -442,6 +449,9 @@ private func wavSeconds(_ path: String) throws -> Double {
             #expect(row.hit.endedAt != nil)
             let path = try #require(row.audioPath)
             #expect(FileManager.default.fileExists(atPath: path))
+            // `stop()` returning doesn't mean the collector has taken in the last events: wait for
+            // the stream to finish (CI run 44968370051 read `.audio(.stopped)`, the one before it).
+            try await eventually(.seconds(5)) { events.isFinished }
             #expect(events.all.last == .stopped)
             #expect(events.all.filter { $0 == .stopped }.count == 1)
             #expect(events.ended.first?.hit.endReason == .stopped)
@@ -702,8 +712,7 @@ private func wavSeconds(_ path: String) throws -> Double {
         expectCleanStop(outcome)
     }
 
-    @Test(.skippedOnCIRunner("reads the mock before it has taken in the final PSI,0; flaked on the CI runner"))
-    func neverLeavesAHitInProgressUnrecorded() async throws {
+    @Test func neverLeavesAHitInProgressUnrecorded() async throws {
         let outcome = try await withRunner(Self.onAirAtStart(.never)) { rig, _ in
             let events = rig.events
             try await eventually { !events.started.isEmpty }

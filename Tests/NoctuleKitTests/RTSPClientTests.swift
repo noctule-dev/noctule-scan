@@ -906,30 +906,32 @@ private func eventually(_ limit: Duration = .seconds(2),
 
 /// `close()` waits for the whole teardown worker, even past `teardown()`'s own 4 × timeout
 /// bound, so `unreleasedSessions` is final when it returns.
-@Test(.skippedOnCIRunner("250 ms TEARDOWN replies against a 300 ms timeout; too tight on the CI runner"))
-func closeWaitsForTheTeardownWorker() async throws {
-    // Six slow (answered) TEARDOWNs take longer than 4 × requestTimeout, then the server drops the
-    // connection on the seventh; the cooldown forbids the reconnect, so that id is unreleased.
+@Test func closeWaitsForTheTeardownWorker() async throws {
+    // Ten slow (answered) TEARDOWNs take longer than 4 × requestTimeout, then the server drops the
+    // connection on the eleventh; the cooldown forbids the reconnect, so that id is unreleased.
+    // Each reply comes half a timeout early (it was 250 ms against 300 ms, which a late wakeup
+    // under the background clamp turned into timeouts every run): 10 × 0.5 s > 4 × 1 s.
+    let slow = 10
     var script = FakeRTSPServer.Script.scannerLike
-    for _ in 0..<6 { script = script.delay(method: "TEARDOWN", seconds: 0.25, once: true) }
+    for _ in 0..<slow { script = script.delay(method: "TEARDOWN", seconds: 0.5, once: true) }
     script = script.closeOn(method: "TEARDOWN", once: true)
     let server = FakeRTSPServer(script: script, uniqueSessionIDs: true)
     let port = try await server.start()
-    let client = RTSPClient(host: "127.0.0.1", port: port, requestTimeout: .milliseconds(300),
+    let client = RTSPClient(host: "127.0.0.1", port: port, requestTimeout: .seconds(1),
                             reconnectCooldown: .seconds(30), cooldownStore: InMemoryRTSPCooldownStore(),
                             closeLinger: .zero)
     var failure: (any Error)?
     do {
-        try await within(.seconds(8)) {
+        try await within(.seconds(30)) {
             try await client.connect()
             let (gotBase, _) = try await client.describe()
-            for _ in 0..<7 { _ = try await client.setup(controlURL: gotBase + "trackID=1", clientPort: 50000) }
+            for _ in 0...slow { _ = try await client.setup(controlURL: gotBase + "trackID=1", clientPort: 50000) }
             let issued = await server.issuedSessionIDs
-            try #require(issued.count == 7)
+            try #require(issued.count == slow + 1)
             let start = ContinuousClock.now
             await client.close()
-            #expect(ContinuousClock.now - start > .milliseconds(1200))
-            #expect(await client.unreleasedSessions == [issued[6]])
+            #expect(ContinuousClock.now - start > .seconds(4), "close() returned before the worker's slow TEARDOWNs")
+            #expect(await client.unreleasedSessions == [issued[slow]])
             #expect(await server.teardownSessionIDs == issued)
         }
     } catch {

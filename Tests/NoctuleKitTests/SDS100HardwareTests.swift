@@ -325,7 +325,9 @@ extension SDS100HardwareTests {
     /// The keep-alive check on the mock SDS100 (real clock, short durations): exactly `MDL`, the
     /// `PSI` and its renewals, and `PSI,0`; never `KAL`.
     @Suite struct KeepAliveOnTheMock {
-        @Test(.skippedOnCIRunner("real-clock 50 ms pushes and 150 ms renewals; the CI runner delivered about half, three runs of three"))
+        // Unskipped 2026-11-22: the mock's strict push timer (2026-11-20) delivers every push, and
+        // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
+        @Test
         func passesWhenRenewalsRestartTheLifetime() async throws {
             let mock = try await withMockHandheld(personality: renewalMock(), clock: .real()) { path in
                 let report = try await shortRenewalCheck(path)
@@ -389,7 +391,9 @@ extension SDS100HardwareTests {
         /// The product-rate check (H4 at 100 ms) on the mock, renewing every 300 ms (slower than
         /// the pushes, LESSONS 2026-11-16) inside a 0.6 s lifetime: exactly `MDL`, `PSI,100` and
         /// its renewals, and `PSI,0`; never `KAL`.
-        @Test(.skippedOnCIRunner("real-clock 100 ms pushes and 300 ms renewals, as the 50 ms check"))
+        // Unskipped 2026-11-22: the mock's strict push timer (2026-11-20) delivers every push, and
+        // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
+        @Test
         func productRateSendsOnlyPSI100AndItsRenewals() async throws {
             let mock = try await withMockHandheld(personality: renewalMock(), clock: .real()) { path in
                 let report = try await renewalAtTheProductRate(

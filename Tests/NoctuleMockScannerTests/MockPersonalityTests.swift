@@ -32,12 +32,16 @@ private final class CoreRig: Sendable {
     /// Every send so far, oldest first.
     var all: [(data: Data, peer: ControlPeer)] { sent.items.withLock { $0 } }
 
-    /// Hands `command` to the core (on its queue) and returns what it sent while handling it.
+    /// Hands `command` to the core (on its queue) and returns what it sent while handling it. The
+    /// count is taken on the core's queue too: a push the timer sent between a count taken outside
+    /// it and the handling was counted as a reply (it failed so under the background clamp).
     @discardableResult
     func send(_ command: String, from peer: ControlPeer = .stream) -> [Data] {
-        let before = sent.items.withLock { $0.count }
-        core.sync { $0.receive(command, from: peer) }
-        return sent.items.withLock { Array($0[before...]) }.map(\.data)
+        core.sync { [sent] core in
+            let before = sent.items.withLock { $0.count }
+            core.receive(command, from: peer)
+            return sent.items.withLock { Array($0[before...]) }.map(\.data)
+        }
     }
 
     /// The one reply to `command`, as text.
@@ -709,8 +713,7 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
 
     // MARK: Peers
 
-    @Test(.skippedOnCIRunner("failed under the CI runner's parallel load"))
-    func pushesGoToTheSubscribingPeer() async throws {
+    @Test func pushesGoToTheSubscribingPeer() async throws {
         let rig = CoreRig(.sds150)
         defer { rig.stop() }
         let other = ControlPeer.udp(key: "other")

@@ -466,7 +466,9 @@ extension SDS150HardwareTests {
     /// The keep-alive check on the mock (real clock, short durations): exactly `MDL`, `PSI`, the
     /// `KAL`s and `PSI,0`.
     @Suite struct KeepAliveOnTheMock {
-        @Test(.skippedOnCIRunner("real-clock 50 ms pushes and 150 ms KALs; the CI runner delivered about half, three runs of three"))
+        // Unskipped 2026-11-22: the mock's strict push timer (2026-11-20) delivers every push, and
+        // these passed in every mode of the flaky sweep (LESSONS.md 2026-11-22).
+        @Test
         func passesWhenKALRestartsTheLifetime() async throws {
             let mock = try await withMockHandheld(personality: keepAliveMock(), clock: .real()) { path in
                 let report = try await shortKeepAliveCheck(path)
