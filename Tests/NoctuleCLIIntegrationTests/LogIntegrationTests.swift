@@ -228,7 +228,7 @@ private func rows(_ table: String) -> [String] {
         let mock = try await MockScanner.launch(["--cooldown-seconds", "1"])
         do {
             try await addStation(dirs, mock: mock)
-            let log = try Subprocess(try noctuleBinary(), ["log"] + dirs.logFlags)
+            let log = try Subprocess(try noctuleBinary(), ["log"] + dirs.logFlags, environment: noctuleTestEnvironment)
             let streaming = await log.waitForStderr(within: 15) { $0.contains("audio: streaming") }
             #expect(streaming, "\(log.stderr)")
             log.send(SIGTERM)
@@ -236,7 +236,7 @@ private func rows(_ table: String) -> [String] {
             log.send(SIGINT)
             let exited = await log.waitForExit(within: 20)
             log.kill()
-            let result = log.finish()
+            let result = await log.finish()
             #expect(exited)
             #expect(result.status == 143, "\(result.status) \(result.stderr)")
             #expect(result.stderr.contains("log: still closing the scanner session…"), "\(result.stderr)")
@@ -260,7 +260,7 @@ private func rows(_ table: String) -> [String] {
         let mock = try await MockScanner.launch(["--cooldown-seconds", "1"])
         do {
             try await addStation(dirs, mock: mock)
-            let first = try Subprocess(try noctuleBinary(), ["log"] + dirs.logFlags)
+            let first = try Subprocess(try noctuleBinary(), ["log"] + dirs.logFlags, environment: noctuleTestEnvironment)
             let streaming = await first.waitForStderr(within: 15) { $0.contains("audio: streaming") }
             #expect(streaming, "\(first.stderr)")
             // Point the last-station pointer at another station; a refused run must leave it alone.
@@ -280,7 +280,7 @@ private func rows(_ table: String) -> [String] {
             first.interrupt()
             let exited = await first.waitForExit(within: 20)
             first.kill()
-            let firstResult = first.finish()
+            let firstResult = await first.finish()
             #expect(exited && firstResult.status == 130, "\(firstResult.status) \(firstResult.stderr)")
         } catch {
             Issue.record(error)
@@ -307,7 +307,7 @@ private func rows(_ table: String) -> [String] {
                                               "--cooldown-store", dirs.cooldownStore.path]
 
             // First run; note when the mock sees its TEARDOWN.
-            let first = try Subprocess(try noctuleBinary(), ["log", "--seconds", "2", "--cooldown-seconds", "2"] + flags)
+            let first = try Subprocess(try noctuleBinary(), ["log", "--seconds", "2", "--cooldown-seconds", "2"] + flags, environment: noctuleTestEnvironment)
             var tornDownAt: Date?
             let deadline = Date().addingTimeInterval(20)
             while Date() < deadline, tornDownAt == nil || first.isRunning {
@@ -315,13 +315,13 @@ private func rows(_ table: String) -> [String] {
                 try? await Task.sleep(for: .milliseconds(10))
             }
             first.kill()
-            let firstResult = first.finish()
+            let firstResult = await first.finish()
             #expect(firstResult.status == 0, "\(firstResult.stderr)")
             let teardown = try #require(tornDownAt, "\(mock.process.stderr)")
 
             // Second run, at once: it must wait, then connect and record.
             let wavsBefore = wavCount(dirs)
-            let second = try Subprocess(try noctuleBinary(), ["log", "--seconds", "6", "--cooldown-seconds", "2"] + flags)
+            let second = try Subprocess(try noctuleBinary(), ["log", "--seconds", "6", "--cooldown-seconds", "2"] + flags, environment: noctuleTestEnvironment)
             var reconnectAt: Date?
             let deadline2 = Date().addingTimeInterval(30)
             while Date() < deadline2, reconnectAt == nil || second.isRunning {
@@ -329,7 +329,7 @@ private func rows(_ table: String) -> [String] {
                 try? await Task.sleep(for: .milliseconds(10))
             }
             second.kill()
-            let secondResult = second.finish()
+            let secondResult = await second.finish()
             #expect(secondResult.status == 0, "\(secondResult.stderr)")
             #expect(secondResult.stderr.contains("audio: waiting "), "\(secondResult.stderr)")
             #expect(secondResult.stderr.contains(" s before reconnecting (scanner cooldown)"), "\(secondResult.stderr)")
@@ -341,13 +341,13 @@ private func rows(_ table: String) -> [String] {
             // Third run with a long cooldown, interrupted while waiting: exit 130, nothing sent.
             let commandsBefore = count("control: ")
             let rtspBefore = count("rtsp: ")
-            let third = try Subprocess(try noctuleBinary(), ["log", "--cooldown-seconds", "60"] + flags)
+            let third = try Subprocess(try noctuleBinary(), ["log", "--cooldown-seconds", "60"] + flags, environment: noctuleTestEnvironment)
             let waiting = await third.waitForStderr(within: 10) { $0.contains("before reconnecting (scanner cooldown)") }
             #expect(waiting, "\(third.stderr)")
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let thirdResult = third.finish()
+            let thirdResult = await third.finish()
             #expect(exited)
             #expect(thirdResult.status == 130, "\(thirdResult.status) \(thirdResult.stderr)")
             try? await Task.sleep(for: .milliseconds(200))
@@ -393,12 +393,12 @@ private func rows(_ table: String) -> [String] {
             let format = ISO8601DateFormatter()
             format.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             try Data("{\"127.0.0.1\":{\"lastClosed\":\"\(format.string(from: Date()))\"}}".utf8).write(to: dirs.cooldownStore)
-            let third = try Subprocess(try noctuleBinary(), ["log"] + flags)
+            let third = try Subprocess(try noctuleBinary(), ["log"] + flags, environment: noctuleTestEnvironment)
             let waiting = await third.waitForStderr(within: 10) { $0.contains("before reconnecting (scanner cooldown)") }
             third.interrupt()
             let exited = await third.waitForExit(within: 10)
             third.kill()
-            let thirdResult = third.finish()
+            let thirdResult = await third.finish()
             #expect(waiting, "\(thirdResult.stderr)")
             #expect(exited && thirdResult.status == 130, "\(thirdResult.status) \(thirdResult.stderr)")
         } catch {
@@ -417,7 +417,7 @@ private func rows(_ table: String) -> [String] {
         let dirs = try Dirs()
         defer { dirs.cleanUp() }
         let add = try await noctule(["station", "add", "--name", "Test Station", "--host", "localhost",
-                                     "--udp-port", String(try deadPort()), "--rtsp-port", String(try deadPort())]
+                                     "--udp-port", String(try silentUDPPort()), "--rtsp-port", String(try silentUDPPort())]
                                     + dirs.settingsFlags)
         #expect(add.exited && add.status == 0, "\(add.stdout) \(add.stderr)")
         let format = ISO8601DateFormatter()
@@ -427,12 +427,12 @@ private func rows(_ table: String) -> [String] {
 
         let run = try Subprocess(try noctuleBinary(), ["log", "--cooldown-seconds", "60", "--cooldown-store",
                                                        dirs.cooldownStore.path, "--recordings", dirs.recordings.path]
-                                 + dirs.settingsFlags)
+                                 + dirs.settingsFlags, environment: noctuleTestEnvironment)
         let waiting = await run.waitForStderr(within: 10) { $0.contains("before reconnecting (scanner cooldown)") }
         run.interrupt()
         let exited = await run.waitForExit(within: 10)
         run.kill()
-        let result = run.finish()
+        let result = await run.finish()
         #expect(waiting, "\(result.stderr)")
         #expect(exited)
         #expect(result.status == 130, "\(result.status) \(result.stderr)")

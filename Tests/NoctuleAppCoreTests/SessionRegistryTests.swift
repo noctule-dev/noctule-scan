@@ -811,7 +811,7 @@ func withUSBRegistry(mocks count: Int = 1,
             var dead = Station()
             dead.name = "Dead Station"
             dead.connection.host = "127.0.0.1"
-            dead.connection.udpPort = try closedUDPPort()
+            dead.connection.udpPort = try silentUDPPort()
             let a = rig.open(rig.stations[0])
             let b = rig.open(dead)
             try await waitStreaming(a)
@@ -1211,7 +1211,7 @@ func withUSBRegistry(mocks count: Int = 1,
             var dead = Station()
             dead.name = "Dead Station"
             dead.connection.host = "127.0.0.1"
-            dead.connection.udpPort = try closedUDPPort()
+            dead.connection.udpPort = try silentUDPPort()
             let b = rig.open(dead)
             try await waitUntil("no answer", .seconds(15)) {
                 if case .noAnswer = b.phase { return true }

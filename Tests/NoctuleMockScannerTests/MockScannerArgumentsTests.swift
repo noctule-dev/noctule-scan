@@ -146,6 +146,9 @@ import NoctuleKit
         #expect(named.personality.reportedModel == "SDS150GBT")
         #expect(named.personality.firmware == MockPersonality.sds150.firmware)
         #expect(named.faults == MockFaults(dropNextReply: "KEY", unplugAfter: 2.5))
+        let afterPSI = try MockScannerArguments.parse(["--model", "sds150", "--serial", "--serial-link", "/tmp/x",
+                                                       "--fault", "unplug-after-psi=2:3"])
+        #expect(afterPSI.faults == MockFaults(unplugAfter: 2, replugAfter: 3, unplugCountsFromFirstPSI: true))
 
         // An SDS200 personality on a pty is allowed.
         let sds200 = try MockScannerArguments.parse(["--serial"])
@@ -180,7 +183,8 @@ import NoctuleKit
             #expect(throws: error, "\(arguments)") { try MockScannerArguments.parse(arguments) }
         }
         for bad in ["unplug", "unplug=", "unplug=x", "unplug=-1", "unplug=1:", "unplug=1:x", "unplug=1:-2",
-                    "unplug=1:2:3", "unplug=:2", "split-writes=1"] {
+                    "unplug=1:2:3", "unplug=:2", "split-writes=1", "unplug-after-psi", "unplug-after-psi=x",
+                    "unplug-after-psi=1:2:3"] {
             #expect(throws: MockScannerArgumentsError.invalidValue(option: "--fault", value: bad), "\(bad)") {
                 try MockScannerArguments.parse(["--serial", "--serial-link", "/tmp/x", "--fault", bad])
             }

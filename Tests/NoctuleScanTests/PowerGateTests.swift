@@ -61,21 +61,28 @@ import Testing
         #expect(log.events.filter { $0 == "allow" }.count == 1)
     }
 
+    /// The suspend hangs until the test releases it, so an allow at all is the deadline's: it
+    /// can't be the suspend finishing, however late this process's timers wake (an upper bound on
+    /// the time, 0.9 s, failed on the CI runner at 1.5–2.1 s; LESSONS.md 2026-11-21).
     @Test func willSleepAllowsAtTheDeadlineIfSuspendHangs() async {
         let log = Log()
+        let released = Released()
         let gate = PowerGate(deadline: .milliseconds(150), suspend: {
             log.events.append("suspend started")
-            try? await Task.sleep(for: .seconds(1))
+            while !released.value { try? await Task.sleep(for: .milliseconds(10)) }
             log.events.append("suspend finished")
         }, resume: {})
         let started = Date()
         gate.handle(.willSleep) { log.events.append("allow") }
-        #expect(await eventually { log.events.contains("allow") })
+        #expect(await eventually(10) { log.events.contains("allow") })
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed >= 0.15 && elapsed < 0.9, "\(elapsed)")
+        // Not before the deadline; and within a bound loose enough for a late wakeup (the runner's
+        // were up to 2 s) that still catches a deadline that fires far too late.
+        #expect(elapsed >= 0.15 && elapsed < 5, "allowed \(elapsed) s in (deadline 0.15 s)")
         #expect(log.events == ["suspend started", "allow"])
         // The suspend carries on; the sleep is still allowed only once.
-        #expect(await eventually { log.events.contains("suspend finished") })
+        released.value = true
+        #expect(await eventually(10) { log.events.contains("suspend finished") })
         #expect(log.events == ["suspend started", "allow", "suspend finished"])
     }
 

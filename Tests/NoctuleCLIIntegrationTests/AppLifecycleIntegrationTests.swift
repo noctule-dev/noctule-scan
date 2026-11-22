@@ -76,7 +76,7 @@ private func appTearsDown(on signal: Int32, sheet: Bool = false, menu: Bool = fa
         // What the mock had seen by the time the app was gone.
         let seen = mock.process.stderr
         launched.kill()
-        let result = launched.finish()
+        let result = await launched.finish()
         app = nil
         #expect(exited, "the app didn't exit within 15 s; app: \(result.stderr)")
         // A signal-initiated quit goes through `NSApp.terminate`, which exits 0 (AGENTS.md).
@@ -101,7 +101,7 @@ private func appTearsDown(on signal: Int32, sheet: Bool = false, menu: Bool = fa
     }
     if let app {
         app.kill()
-        _ = app.finish()
+        _ = await app.finish()
     }
     let result = await mock.shutdown()
     #expect(result.exited && result.status == 0, "\(result.stderr)")
@@ -284,7 +284,7 @@ private func terminate(_ app: Subprocess, within limit: Double, log: () -> Strin
     let exited = await app.waitForExit(within: limit)
     let seen = log()
     app.kill()
-    let result = app.finish()
+    let result = await app.finish()
     return (exited, result.status, result.stderr, seen)
 }
 
@@ -307,7 +307,7 @@ private func openFiles(of pid: Int32) async -> String? {
     guard let lsof = try? Subprocess(URL(fileURLWithPath: "/usr/sbin/lsof"), ["-n", "-P", "-p", "\(pid)"]) else { return nil }
     let exited = await lsof.waitForExit(within: 10)
     lsof.kill()
-    let result = lsof.finish()
+    let result = await lsof.finish()
     return exited && result.status == 0 ? result.stdout : nil
 }
 
@@ -366,7 +366,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         await mock.shutdown()  // `active-subscriptions=0`
         let commands = mock.commands
@@ -416,7 +416,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         let mock = try await SerialMock.launch(link: run.link)
         try? await Task.sleep(for: .seconds(2))
@@ -442,7 +442,7 @@ private func openFiles(of pid: Int32) async -> String? {
                 Issue.record("the app never started the station (its lock is free); app: \(launched.stderr)")
                 throw CocoaError(.featureUnsupported)
             }
-            let scanner = try await SerialMock.launch(link: run.link, ["--fault", "unplug=4:3"])
+            let scanner = try await SerialMock.launch(link: run.link, ["--fault", "unplug-after-psi=2:3"])  // counted from the app's PSI
             mock = scanner
             let resumed = await waitForLog(scanner, within: 20) { lines in
                 guard let replug = lines.firstIndex(where: { $0.hasPrefix("mock: plugged in again") }) else { return false }
@@ -469,7 +469,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         if let mock {
             await mock.shutdown()  // `active-subscriptions=0`
@@ -517,7 +517,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         await mock.shutdown()  // `active-subscriptions=0`
         let commands = mock.commands
@@ -562,7 +562,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         await mock.shutdown()  // `active-subscriptions=0`
         let commands = mock.commands
@@ -614,7 +614,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         await mock.shutdown()  // `active-subscriptions=0`
         let files = run.recordedFiles
@@ -666,7 +666,7 @@ private func openFiles(of pid: Int32) async -> String? {
         }
         if let app {
             app.kill()
-            _ = app.finish()
+            _ = await app.finish()
         }
         await mock.shutdown()  // `active-subscriptions=0`
         #expect(run.recordedFiles == [], "\(run.recordedFiles)")

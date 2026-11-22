@@ -75,7 +75,7 @@ private struct BrandingTree {
     var icns: URL { out.appending(path: "AppIcon.icns") }
 
     /// Runs the tree's compile script; `variable` nil leaves `NOCTULE_BRANDING_DIR` out of the environment.
-    func compile(variable: String?, from directory: URL? = nil) throws -> (status: Int32, stdout: String, stderr: String) {
+    func compile(variable: String?, from directory: URL? = nil) async throws -> (status: Int32, stdout: String, stderr: String) {
         let script = root.appending(path: "scripts/compile-app-icon.sh")
         let process: Subprocess
         if let variable {
@@ -85,96 +85,91 @@ private struct BrandingTree {
             process = try Subprocess(URL(fileURLWithPath: "/usr/bin/env"), ["-u", "NOCTULE_BRANDING_DIR", script.path, out.path],
                                      currentDirectory: directory ?? root)
         }
-        if !waitFor(120, { !process.process.isRunning }) { process.kill() }
-        return process.finish()
+        if !(await process.waitForExit(within: 120)) { process.kill() }
+        return await process.finish()
     }
 }
 
-private let actoolInstalled: Bool = {
-    guard let finder = try? Subprocess(URL(fileURLWithPath: "/usr/bin/xcrun"), ["--find", "actool"]) else { return false }
-    _ = waitFor(30) { !finder.process.isRunning }
-    return finder.finish().status == 0
-}()
-
-@Suite(.enabled(if: actoolInstalled, "needs Xcode's actool"), .timeLimit(.minutes(3)))
+// One test at a time: each runs tools (IntegrationSupport.swift, "Waiting in these tests").
+@Suite(.serialized, .enabled("needs Xcode's actool") { await actoolInstalled.value }, .timeLimit(.minutes(3)))
 struct BrandingTests {
     private let placeholderLine = "branding: placeholder (set NOCTULE_BRANDING_DIR for the official art)"
 
-    @Test func emptyVariableMeansPlaceholder() throws {
+    @Test func emptyVariableMeansPlaceholder() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let stub = try stubBrandingFolder(in: tree.root)
         try tree.writeConfig("NOCTULE_BRANDING_DIR=\(stub.path)\n")
-        let result = try tree.compile(variable: "")
+        let result = try await tree.compile(variable: "")
         #expect(result.status == 0, "stderr: \(result.stderr)")
         #expect(result.stderr.contains(placeholderLine), "stderr: \(result.stderr)")
         #expect(FileManager.default.fileExists(atPath: tree.icns.path))
     }
 
-    @Test func variableNamesTheFolder() throws {
+    @Test func variableNamesTheFolder() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let stub = try stubBrandingFolder(in: tree.root)
-        let result = try tree.compile(variable: stub.path)
+        let result = try await tree.compile(variable: stub.path)
         #expect(result.status == 0, "stderr: \(result.stderr)")
         #expect(result.stderr.contains("branding: \(stub.path)"), "stderr: \(result.stderr)")
         #expect(FileManager.default.fileExists(atPath: tree.icns.path))
     }
 
-    @Test func configFileIsReadWhenTheVariableIsUnset() throws {
+    @Test func configFileIsReadWhenTheVariableIsUnset() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let stub = try stubBrandingFolder(in: tree.root)
         try tree.writeConfig("# the official art\nNOCTULE_BRANDING_DIR=\"\(stub.path)\"\n")
-        let result = try tree.compile(variable: nil)
+        let result = try await tree.compile(variable: nil)
         #expect(result.status == 0, "stderr: \(result.stderr)")
         #expect(result.stderr.contains("branding: \(stub.path)"), "stderr: \(result.stderr)")
     }
 
-    @Test func relativeBrandingPathResolvesFromTheRoot() throws {
+    @Test func relativeBrandingPathResolvesFromTheRoot() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let stub = try stubBrandingFolder(in: tree.root)
         try tree.writeConfig("NOCTULE_BRANDING_DIR=stub-branding\n")
         let elsewhere = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: elsewhere) }
-        let result = try tree.compile(variable: nil, from: elsewhere)
+        let result = try await tree.compile(variable: nil, from: elsewhere)
         #expect(result.status == 0, "stderr: \(result.stderr)")
         #expect(result.stderr.contains("branding: \(stub.path)"), "stderr: \(result.stderr)")
     }
 
-    @Test func brandingFolderMissingPartsFails() throws {
+    @Test func brandingFolderMissingPartsFails() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let partial = tree.root.appending(path: "partial")
         try FileManager.default.createDirectory(at: partial, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: tree.root.appending(path: "Resources/Placeholder/AppIcon.icon"),
                                          to: partial.appending(path: "AppIcon.icon"))
-        let result = try tree.compile(variable: partial.path)
+        let result = try await tree.compile(variable: partial.path)
         #expect(result.status == 1, "stderr: \(result.stderr)")
         #expect(result.stderr.contains("isn't a branding folder (it needs AppIcon.icon and dmg/background.tiff)"),
                 "stderr: \(result.stderr)")
         #expect(!FileManager.default.fileExists(atPath: tree.icns.path))
     }
 
-    @Test func configFileIsNotExecuted() throws {
+    @Test func configFileIsNotExecuted() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let marker = tree.root.appending(path: "marker")
         try tree.writeConfig("NOCTULE_BRANDING_DIR=$(touch \(marker.path))\n")
-        let result = try tree.compile(variable: nil)
+        let result = try await tree.compile(variable: nil)
         #expect(result.status == 1, "the text isn't a folder: \(result.stderr)")
         #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 
     /// With a `config/branding.env` in the tree (as on the owner's Mac), `runScript` must still get
     /// the placeholder: its default `NOCTULE_BRANDING_DIR=""` is what keeps that file out of tests.
-    @Test func runScriptDefaultsToThePlaceholder() throws {
+    @Test func runScriptDefaultsToThePlaceholder() async throws {
         let tree = try BrandingTree()
         defer { tree.cleanUp() }
         let stub = try stubBrandingFolder(in: tree.root)
         try tree.writeConfig("NOCTULE_BRANDING_DIR=\(stub.path)\n")
-        let result = try runScript("scripts/compile-app-icon.sh", [tree.out.path], root: tree.root)
+        let result = try await runScript("scripts/compile-app-icon.sh", [tree.out.path], root: tree.root)
         #expect(result.status == 0, "stderr: \(result.stderr)")
         #expect(result.stderr.contains(placeholderLine), "stderr: \(result.stderr)")
     }

@@ -101,7 +101,7 @@ private func serialNoctule(_ arguments: [String], _ dirs: SerialDirs, limit: Dou
                              environment: dirs.environment.merging(extra) { _, new in new })
     let exited = await process.waitForExit(within: limit)
     process.kill()
-    let result = process.finish()
+    let result = await process.finish()
     return (exited, result.status, result.stdout, result.stderr)
 }
 
@@ -129,7 +129,7 @@ private func stop(_ process: Subprocess, with signal: Int32, limit: Double = 10)
     process.send(signal)
     let exited = await process.waitForExit(within: limit)
     process.kill()
-    let result = process.finish()
+    let result = await process.finish()
     return (exited, result.status, result.stdout, result.stderr)
 }
 
@@ -160,7 +160,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         let pwd = try launch(URL(fileURLWithPath: "/bin/pwd"), ["-P"], dirs)
         let exited = await pwd.waitForExit(within: 10)
         pwd.kill()
-        let result = pwd.finish()
+        let result = await pwd.finish()
         // `/bin/pwd -P` prints the physical path (`/private/var/…`), as `realpath` gives it.
         let expected = try #require(realpath(dirs.root.path, nil).map { pointer in
             defer { free(pointer) }
@@ -806,13 +806,14 @@ private func lines(_ text: String, containing needle: String) -> [String] {
     }
 
     /// The scanner goes away for two seconds and comes back: `log` says so, waits, reconnects and
-    /// logs again. The station is added before the mock starts, so `log` connects (and gets a
-    /// push) well before the unplug two seconds after the mock's start.
+    /// logs again. The unplug comes two seconds after `log`'s subscribing `PSI`
+    /// (`unplug-after-psi`), so it is always a disconnect mid-run: counted from the mock's start, a
+    /// slow runner's `log` hadn't opened the port yet (CI run 44964839734).
     @Test func logResumes() async throws {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
         try await addUSBStation(dirs, port: dirs.link.path)
-        let mock = try await SerialMock.launch(link: dirs.link, ["--scenario", dirs.scenario.path, "--fault", "unplug=2:2"])
+        let mock = try await SerialMock.launch(link: dirs.link, ["--scenario", dirs.scenario.path, "--fault", "unplug-after-psi=2:2"])
         do {
             let log = try startNoctule(["log", "--seconds", "10"] + dirs.logFlags, dirs)
             let reconnected = await log.waitForStderr(within: 15) { $0.contains("log: reconnected") }
@@ -822,7 +823,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
             #expect(hitAfter, "\(log.stdout)")
             let exited = await log.waitForExit(within: 15)
             log.kill()
-            let result = log.finish()
+            let result = await log.finish()
             #expect(exited && result.status == 0, "\(result.status) \(result.stderr)")
             #expect(result.stderr.contains("log: scanner disconnected. \(hint)\nlog: waiting for the scanner…\n"),
                     "\(result.stderr)")
@@ -841,7 +842,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
         try await addUSBStation(dirs, port: dirs.link.path)
-        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "unplug=2"])
+        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "unplug-after-psi=2"])
         do {
             let log = try startNoctule(["log"] + dirs.logFlags, dirs)
             let waiting = await log.waitForStderr(within: 15) { $0.contains("log: waiting for the scanner…") }
@@ -861,7 +862,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
         try await addUSBStation(dirs, port: dirs.link.path)
-        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "unplug=2"])
+        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "unplug-after-psi=2"])
         do {
             let log = try await serialNoctule(["log", "--seconds", "5"] + dirs.logFlags, dirs, limit: 15)
             #expect(log.exited && log.status == 0, "\(log.status) \(log.stderr)")
@@ -926,7 +927,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
         try await addUSBStation(dirs, port: dirs.link.path)
-        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "stall-psi=0", "--fault", "unplug=2"])
+        let mock = try await SerialMock.launch(link: dirs.link, ["--fault", "stall-psi=0", "--fault", "unplug-after-psi=2"])
         do {
             let log = try await serialNoctule(["log", "--seconds", "30"] + dirs.logFlags, dirs, limit: 15)
             #expect(log.exited && log.status == 1, "\(log.status) \(log.stderr)")

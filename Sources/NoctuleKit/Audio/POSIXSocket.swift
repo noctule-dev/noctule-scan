@@ -260,8 +260,9 @@ final class TCPStream: Sendable {
 
     deinit { core.requestClose(linger: .zero, drain: .seconds(1)) }
 
-    /// Resolves `host` and connects to each address in turn (a non-blocking `connect` polled in
-    /// short slices, so it honours cancellation) until one succeeds or `timeout` has passed.
+    /// Resolves `host` and connects to each address in turn (a non-blocking `connect` checked
+    /// every few milliseconds, suspending in between, so it honours cancellation and holds no
+    /// thread while it waits) until one succeeds or `timeout` has passed.
     /// Throws `.connectFailed(errno)` for a refusal or unreachable network, `.connectTimedOut`,
     /// `.resolveFailed`, or `CancellationError`.
     static func connect(host: String, port: UInt16, timeout: Duration) async throws -> TCPStream {
@@ -269,9 +270,18 @@ final class TCPStream: Sendable {
         let addresses = await SocketAddress.resolve(
             host: host, port: port, socketType: SOCK_STREAM, limit: min(timeout, .seconds(2)))
         guard !addresses.isEmpty else { throw POSIXSocketError.resolveFailed(host) }
+        return try await connect(to: addresses, deadline: deadline)
+    }
+
+    /// Connects to each of `addresses` in turn until one succeeds; a `POSIXSocketError` from one
+    /// moves on to the next while the deadline lasts. Internal so the fallback can be tested
+    /// without a resolver (whose order for a name like `localhost` varies).
+    static func connect(to addresses: [SocketAddress], deadline: ContinuousClock.Instant) async throws -> TCPStream {
         var lastError = POSIXSocketError.connectTimedOut
-        for address in addresses {
-            guard ContinuousClock.now < deadline else {
+        for (index, address) in addresses.enumerated() {
+            // The first address is always tried (its own wait enforces the deadline): a resolve
+            // that returned late on a busy machine mustn't time out a connect never attempted.
+            guard index == 0 || ContinuousClock.now < deadline else {
                 lastError = .connectTimedOut
                 break
             }
@@ -297,14 +307,23 @@ final class TCPStream: Sendable {
         if result != 0 {
             let code = errno
             guard code == EINPROGRESS || code == EINTR else { throw POSIXSocketError.connectFailed(code) }
+            // Look without waiting, then suspend between looks (as `send` does): a `poll` that
+            // waited held a cooperative thread for the whole connect, and a few unanswered connects
+            // starved every other task on a 3-core machine (LESSONS.md 2026-11-21). The socket is
+            // looked at before the deadline is, and the first look always gets one more slice, so
+            // a handshake (or a refusal) the kernel finished at once isn't called a timeout just
+            // because this task resumed late on a busy machine.
+            var looked = false
             while true {
                 try Task.checkCancellation()
-                let remaining = deadline - ContinuousClock.now
-                guard remaining > .zero else { throw POSIXSocketError.connectTimedOut }
                 var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-                let ready = poll(&descriptor, 1, max(1, min(10, milliseconds(remaining))))
+                let ready = poll(&descriptor, 1, 0)
                 if ready > 0 { break }
                 if ready < 0, errno != EINTR { throw POSIXSocketError.connectFailed(errno) }
+                let remaining = deadline - ContinuousClock.now
+                guard remaining > .zero || !looked else { throw POSIXSocketError.connectTimedOut }
+                looked = true
+                try await Task.sleep(for: max(.milliseconds(1), min(remaining, .milliseconds(5))))
             }
             var soError: Int32 = 0
             var length = socklen_t(MemoryLayout<Int32>.size)
