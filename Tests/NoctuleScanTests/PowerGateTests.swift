@@ -19,8 +19,10 @@ import Testing
         var value = false
     }
 
-    /// Polls for at most `seconds`.
-    private func eventually(_ seconds: Double = 2, _ condition: () -> Bool) async -> Bool {
+    /// Polls for at most `seconds`. Ten by default, not two: every step here runs on the main actor,
+    /// which this process's other `@MainActor` suites share, and on a runner VM a wake's resume took
+    /// longer than two seconds to be seen (run 45019776194). A condition that holds ends it at once.
+    private func eventually(_ seconds: Double = 10, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
             if condition() { return true }
