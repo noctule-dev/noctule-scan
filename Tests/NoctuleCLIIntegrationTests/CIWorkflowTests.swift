@@ -67,24 +67,24 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         }
         /// Commits a file at each path (making its directories), and returns the new commit.
         @discardableResult
-        func commitFiles(_ paths: [String], _ subject: String = "files") throws -> String {
+        func commitFiles(_ paths: [String], _ subject: String = "files") async throws -> String {
             for path in paths {
                 let url = dir.appending(path: path)
                 try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try "\(path) \(UUID())".write(to: url, atomically: true, encoding: .utf8)
-                try git("add", path)
+                try await git("add", path)
             }
-            try git("commit", "-q", "-m", subject)
-            return try git("rev-parse", "HEAD")
+            try await git("commit", "-q", "-m", subject)
+            return try await git("rev-parse", "HEAD")
         }
-        func ciChanges(_ args: String...) throws -> (status: Int32, stdout: String, stderr: String) {
-            try run(repositoryFile("scripts/ci-changes.sh"), args, currentDirectory: dir)
+        func ciChanges(_ args: String...) async throws -> (status: Int32, stdout: String, stderr: String) {
+            try await run(repositoryFile("scripts/ci-changes.sh"), args, currentDirectory: dir)
         }
         /// What `ci-changes.sh` says for a commit that adds a file at each of `paths`.
-        func scope(adding paths: [String]) throws -> String {
-            let base = try git("rev-parse", "HEAD")
-            try commitFiles(paths)
-            let r = try ciChanges(base, "HEAD")
+        func scope(adding paths: [String]) async throws -> String {
+            let base = try await git("rev-parse", "HEAD")
+            try await commitFiles(paths)
+            let r = try await ciChanges(base, "HEAD")
             try #require(r.status == 0, "\(r)")
             return r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -178,8 +178,9 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
     @Test(arguments: [
         ["README.md"], ["docs/specs/x.md"], ["docs/uniden/README.txt"], ["images/screenshots/a.png"], ["LICENSE"], ["NOTICE"],
         ["README.md", "docs/a.md", "CONTRIBUTING.md"],
-    ]) func ciChangesCallsDocumentationDocs(paths: [String]) throws {
-        #expect(try Repo().scope(adding: paths) == "docs")
+    ]) func ciChangesCallsDocumentationDocs(paths: [String]) async throws {
+        let scope = try await Repo().scope(adding: paths)
+        #expect(scope == "docs")
     }
 
     @Test(arguments: [
@@ -188,50 +189,51 @@ private func runCommand(in text: String, stepNamed prefix: String) -> String? {
         ["config/x.env.example"], ["README.txt"],
         ["sources/X/notes.md"], ["TESTS/x.md"], ["tests/X/fixture.md"], ["RESOURCES/x.md"], ["resources/x.md"], ["SOURCES/X/n.md"],
         ["Package.swift", "README.md"], [".github/workflows/ci.yml", "CONTRIBUTING.md"],
-    ]) func ciChangesCallsEverythingElseCode(paths: [String]) throws {
-        #expect(try Repo().scope(adding: paths) == "code")
+    ]) func ciChangesCallsEverythingElseCode(paths: [String]) async throws {
+        let scope = try await Repo().scope(adding: paths)
+        #expect(scope == "code")
     }
 
-    @Test func ciChangesCountsAFileMovedIntoDocsAsCode() throws {
-        let repo = try Repo()
-        try repo.commitFiles(["Sources/X/a.md"])
-        let base = try repo.git("rev-parse", "HEAD")
+    @Test func ciChangesCountsAFileMovedIntoDocsAsCode() async throws {
+        let repo = try await Repo()
+        try await repo.commitFiles(["Sources/X/a.md"])
+        let base = try await repo.git("rev-parse", "HEAD")
         try FileManager.default.createDirectory(at: repo.dir.appending(path: "docs"), withIntermediateDirectories: true)
-        try repo.git("mv", "Sources/X/a.md", "docs/a.md")
-        try repo.git("commit", "-q", "-m", "move")
-        let r = try repo.ciChanges(base, "HEAD")
+        try await repo.git("mv", "Sources/X/a.md", "docs/a.md")
+        try await repo.git("commit", "-q", "-m", "move")
+        let r = try await repo.ciChanges(base, "HEAD")
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "code", "\(r.stdout)")
     }
 
-    @Test func ciChangesCallsAnEmptyDiffCode() throws {
-        let repo = try Repo()
-        let r = try repo.ciChanges("HEAD", "HEAD")
+    @Test func ciChangesCallsAnEmptyDiffCode() async throws {
+        let repo = try await Repo()
+        let r = try await repo.ciChanges("HEAD", "HEAD")
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "code", "\(r.stdout)")
     }
 
-    @Test func ciChangesComparesFromTheMergeBase() throws {
+    @Test func ciChangesComparesFromTheMergeBase() async throws {
         // As a pull request shows it: what the branch changed, not what main did meanwhile.
-        let repo = try Repo()
-        try repo.git("checkout", "-q", "-b", "side")
-        try repo.commitFiles(["README.md"])
-        try repo.git("checkout", "-q", "main")
-        try repo.commitFiles(["Sources/X/a.swift"])
-        let r = try repo.ciChanges("main", "side")
+        let repo = try await Repo()
+        try await repo.git("checkout", "-q", "-b", "side")
+        try await repo.commitFiles(["README.md"])
+        try await repo.git("checkout", "-q", "main")
+        try await repo.commitFiles(["Sources/X/a.swift"])
+        let r = try await repo.ciChanges("main", "side")
         #expect(r.status == 0, "\(r)")
         #expect(r.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "docs", "\(r.stdout)")
     }
 
-    @Test func ciChangesUsageAndUnknownRevisions() throws {
-        let repo = try Repo()
-        let none = try repo.ciChanges()
+    @Test func ciChangesUsageAndUnknownRevisions() async throws {
+        let repo = try await Repo()
+        let none = try await repo.ciChanges()
         #expect(none.status == 2 && none.stderr.contains("usage:"), "\(none)")
-        let one = try repo.ciChanges("HEAD")
+        let one = try await repo.ciChanges("HEAD")
         #expect(one.status == 2 && one.stderr.contains("usage:"), "\(one)")
-        let three = try repo.ciChanges("a", "b", "c")
+        let three = try await repo.ciChanges("a", "b", "c")
         #expect(three.status == 2 && three.stderr.contains("usage:"), "\(three)")
-        let unknown = try repo.ciChanges("no-such-revision", "HEAD")
+        let unknown = try await repo.ciChanges("no-such-revision", "HEAD")
         #expect(unknown.status == 2, "\(unknown)")
         #expect(unknown.stderr.contains("ci-changes: can't compare no-such-revision and HEAD"), "\(unknown.stderr)")
         #expect(unknown.stdout.isEmpty, "\(unknown.stdout)")
