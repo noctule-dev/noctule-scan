@@ -25,6 +25,9 @@ import Synchronization
 ///   waiting for a resume still in flight; a full wake (`NSWorkspace.didWakeNotification`)
 ///   resumes them, each through its cooldown gate. While quitting, a sleep waits for the quit's
 ///   stops instead.
+/// - **Update checks** (`updates`): started once launch has finished, never holding it up; a full
+///   wake lets an overdue check run; a quit stops them first, so it never waits on one. Results
+///   show in `updateWindow`, never a modal alert.
 /// - SIGPIPE is ignored, so a closed stdout or stderr can't kill the app mid-session.
 /// - Closing the last window doesn't quit; a closed window's session stops through `release`.
 ///   Closing the last station window opens the Stations window (`stationWindows`), except while
@@ -45,6 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Test-only (`NOCTULE_TEST_PRESENT_SHEET`): station windows present a sheet once open.
     let presentsTestSheet: Bool
     let launch = LaunchRoute()
+    /// Asks the release feed for a newer version (update-check design §5); Settings shows its state.
+    let updates: UpdateChecker
+    private let updateWindow = UpdateWindowController()
 
     private var signalSources: [DispatchSourceSignal] = []
     private var power: SystemPowerObserver?
@@ -96,6 +102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingsRoot = environment.recordingsRoot
         presentsTestSheet = environment.presentsTestSheet
         directory = StationDirectory(settings: environment.settings, registry: registry)
+        let (updateConfiguration, updateNotes) = UpdateCheckConfiguration.resolve(
+            variables: ProcessInfo.processInfo.environment, infoDictionary: Bundle.main.infoDictionary ?? [:])
+        for note in updateNotes { fputs("NoctuleScan: test override: \(note)\n", stderr) }
+        let window = updateWindow
+        let checker = UpdateChecker(
+            configuration: updateConfiguration,
+            // The same app.json actor as the rest of the app.
+            preferences: environment.settings as? any UpdatePreferencesStore ?? InMemoryUpdatePreferences(),
+            fetcher: URLSessionReleaseFetcher(userAgent: "NoctuleScan/\(updateConfiguration.runningVersionText)"),
+            present: { result, trigger in window.show(result, trigger: trigger) },
+            log: { text in fputs(UpdateCheckLog.line(text) + "\n", stderr) })
+        window.skip = { [weak checker] version in Task { await checker?.skip(version) } }
+        updates = checker
         super.init()
         signalSources = installTerminationSignals { [weak self] _ in
             terminateFromRunLoop()
@@ -121,10 +140,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         power = observer
         // The one wake signal: a full wake. (IOKit's has-powered-on also arrives on dark wakes.)
+        let updates = updates
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { gate.handle(.wake) {} }
+            MainActor.assumeIsolated {
+                gate.handle(.wake) {}
+                updates.handleWake()
+            }
         }
+        Task { await updates.start() }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -141,6 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func exitIfTerminateRefused(after grace: Duration = .seconds(2)) async {
         try? await Task.sleep(for: grace)
         guard quitStop == nil else { return }
+        updates.stop()
         fputs("NoctuleScan: quit was refused (a sheet or dialog is open); stopping sessions and exiting\n", stderr)
         isQuitting = true
         if !(await registry.stopAll()) {
@@ -150,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        updates.stop()
         // A second request while the first is stopping sessions: that one's reply covers both.
         guard quitStop == nil else { return .terminateLater }
         isQuitting = true
