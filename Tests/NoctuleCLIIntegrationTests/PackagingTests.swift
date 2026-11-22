@@ -147,9 +147,23 @@ func tool(_ name: String) -> URL { URL(fileURLWithPath: "/usr/bin/\(name)") }
 
 /// Mounts `dmg` read-only and out of the Finder's sight, runs `body` with the mount point, and
 /// always detaches it.
+///
+/// The attach is tried up to three times, two seconds apart: on a runner VM one failed with status 1
+/// and nothing but hdiutil's deprecation warning on stderr, right after `release.sh` had attached and
+/// force-detached the same image (flake hunt run 44979282952); a failed attempt is printed with its
+/// whole output and what `hdiutil info` showed attached, and the last one's goes in the failure.
 private func withMountedImage(_ dmg: URL, _ body: (URL) async throws -> Void) async throws {
-    let attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
-    try #require(attach.status == 0, "hdiutil attach failed: \(attach.stderr)")
+    var attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+    var attempts = 1
+    while attach.status != 0, attempts < 3 {
+        let attached = try? await run(tool("hdiutil"), ["info"], limit: 20)
+        print("withMountedImage: hdiutil attach \(dmg.lastPathComponent) attempt \(attempts) exited \(attach.status); stderr: \(attach.stderr) stdout: \(attach.stdout) attached: \(attached?.stdout ?? "?")")
+        try await Task.sleep(for: .seconds(2))
+        attach = try await run(tool("hdiutil"), ["attach", "-nobrowse", "-readonly", "-plist", dmg.path])
+        attempts += 1
+    }
+    try #require(attach.status == 0,
+                 "hdiutil attach failed \(attempts) times, last with status \(attach.status): stderr: \(attach.stderr) stdout: \(attach.stdout)")
     let plist = try PropertyListSerialization.propertyList(from: Data(attach.stdout.utf8), format: nil) as? [String: Any]
     let entities = (plist?["system-entities"] as? [[String: Any]]) ?? []
     let mountPoint = try #require(entities.compactMap { $0["mount-point"] as? String }.first)
