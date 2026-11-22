@@ -73,7 +73,7 @@ final class RawRTSP: @unchecked Sendable {
         await offThePool { self.blockingExchange(request) }
     }
 
-    private func blockingExchange(_ request: String) -> String? {
+    func blockingExchange(_ request: String) -> String? {
         let bytes = Array(request.utf8)
         guard send(fd, bytes, bytes.count, 0) == bytes.count else { return nil }
         var data = Data()
