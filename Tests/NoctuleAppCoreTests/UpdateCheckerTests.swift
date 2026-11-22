@@ -431,6 +431,30 @@ private func preferences(on: Bool = true, lastChecked: Date? = nil, skipped: Str
         h.checker.stop()
     }
 
+    @Test func developmentBuildWithNoFeedManual() async {
+        let h = Harness(running: "0.0.0", feed: nil, reply: .latest("1.0.1"))
+        await h.checker.start()
+        await h.checker.checkNow()
+        #expect(h.shown == [Shown(.developmentBuild(versionText: "0.0.0"), .manual)])
+        #expect(await h.fetcher.calls == 0)
+        #expect(h.logs.all.isEmpty)
+    }
+
+    @Test func manualCheckResetsTheTimer() async {
+        let h = Harness(reply: .latest("1.0.0"))
+        await h.checker.start()
+        await h.checker.waitUntilIdle()
+        await h.sleeper.waitForRequests(1)
+
+        h.clock.advance(20 * hour)
+        await h.checker.checkNow()
+        await h.sleeper.waitForCancellations(1)
+        await h.sleeper.waitForRequests(2)
+        #expect(await h.sleeper.requests == [UpdateChecker.interval, UpdateChecker.interval])
+        #expect(await h.fetcher.calls == 2)
+        h.checker.stop()
+    }
+
     @Test func wakeAfterADayChecksOnce() async {
         let h = Harness(reply: .latest("1.0.0"))
         await h.checker.start()

@@ -72,10 +72,15 @@ public final class UpdateChecker {
     /// Saves run one after another, so the newest preferences are the ones left in the store.
     @ObservationIgnored private var saving: Task<Void, Never>?
 
+    /// The default `sleep` is on `SuspendingClock`, which stops while the Mac sleeps, so a check
+    /// never falls due during a dark wake: after a full wake, `handleWake()` recomputes the timer
+    /// from the wall clock and runs an overdue check then (design §5.2).
     public init(configuration: UpdateCheckConfiguration, preferences: any UpdatePreferencesStore,
                 fetcher: any ReleaseFetching,
                 now: @escaping @Sendable () -> Date = { Date() },
-                sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+                sleep: @escaping @Sendable (Duration) async throws -> Void = {
+                    try await SuspendingClock().sleep(for: $0)
+                },
                 present: @escaping @MainActor (UpdateCheckResult, UpdateCheckTrigger) -> Void,
                 log: @escaping @Sendable (String) -> Void) {
         self.configuration = configuration
@@ -144,8 +149,8 @@ public final class UpdateChecker {
         schedule()
     }
 
-    /// Cancels the timer and any check in flight. Nothing is presented, logged, saved or scheduled
-    /// afterwards, and nothing starts again.
+    /// Cancels the timer and any check in flight. No check result is presented, logged, saved or
+    /// scheduled afterwards, and no check starts again; the person's own toggle and skip still save.
     public func stop() {
         stopped = true
         cancelTimer()
