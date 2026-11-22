@@ -30,7 +30,7 @@ struct UpdateWindowView: View {
                     Text(message.body).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Spacer()
-                        Button("OK", action: close).keyboardShortcut(.defaultAction)
+                        Button(UpdateText.okButton, action: close).keyboardShortcut(.defaultAction)
                     }
                 }
             }
@@ -42,7 +42,7 @@ struct UpdateWindowView: View {
     @ViewBuilder private func update(_ offer: UpdateOffer) -> some View {
         Text(UpdateText.headline).font(.headline)
         Text(UpdateText.available(offer)).fixedSize(horizontal: false, vertical: true)
-        Text("Release notes:").font(.subheadline).bold()
+        Text(UpdateText.notesLabel).font(.subheadline).bold()
         ScrollView {
             Text(UpdateText.notes(offer.release.notes))
                 .textSelection(.enabled)
@@ -53,13 +53,13 @@ struct UpdateWindowView: View {
         .background(Color(nsColor: .textBackgroundColor))
         .border(Color(nsColor: .separatorColor))
         HStack {
-            Button("Skip This Version") {
+            Button(UpdateText.skipButton) {
                 skip(offer.release.version)
                 close()
             }
             Spacer()
-            Button("Later", action: close).keyboardShortcut(.cancelAction)
-            Button("Download…") {
+            Button(UpdateText.laterButton, action: close).keyboardShortcut(.cancelAction)
+            Button(UpdateText.downloadButton) {
                 download(offer.release.page)
                 close()
             }

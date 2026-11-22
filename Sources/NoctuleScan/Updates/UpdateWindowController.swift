@@ -38,6 +38,8 @@ import SwiftUI
             created.contentViewController = controller
             created.title = UpdateText.windowTitle
             created.isReleasedWhenClosed = false
+            // Sized to the content before centring, so the first show is centred at its real size.
+            created.setContentSize(controller.view.fittingSize)
             created.center()
             hosting = controller
             self.window = created

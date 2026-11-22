@@ -163,9 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// editor or a confirmation), stop every session anyway (`PSI,0`, TEARDOWN; at most 15 s) and
     /// exit 0, so a signal never leaves the app running with the scanner session open.
     func exitIfTerminateRefused(after grace: Duration = .seconds(2)) async {
+        // Quitting either way: no update check starts, logs or shows during the grace.
+        updates.stop()
         try? await Task.sleep(for: grace)
         guard quitStop == nil else { return }
-        updates.stop()
         fputs("NoctuleScan: quit was refused (a sheet or dialog is open); stopping sessions and exiting\n", stderr)
         isQuitting = true
         if !(await registry.stopAll()) {

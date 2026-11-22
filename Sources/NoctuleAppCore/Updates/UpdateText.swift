@@ -23,6 +23,11 @@ public enum UpdateText {
     public static let settingsFooter =
         "At launch and once a day, Noctule Scan asks GitHub for its latest release (betas aren't included). Nothing is downloaded or installed."
     public static let menuItem = "Check for Updates…"
+    public static let notesLabel = "Release notes:"
+    public static let skipButton = "Skip This Version"
+    public static let laterButton = "Later"
+    public static let downloadButton = "Download…"
+    public static let okButton = "OK"
 
     public static func available(_ offer: UpdateOffer) -> String {
         "Noctule Scan \(offer.release.version) is available — you have \(offer.running)."

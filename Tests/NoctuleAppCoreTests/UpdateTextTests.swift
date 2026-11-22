@@ -128,6 +128,11 @@ struct UpdateTextTests {
         #expect(UpdateText.headline == "A new version of Noctule Scan is available")
         #expect(UpdateText.automaticToggle == "Check for updates automatically")
         #expect(UpdateText.menuItem == "Check for Updates…")
+        #expect(UpdateText.notesLabel == "Release notes:")
+        #expect(UpdateText.skipButton == "Skip This Version")
+        #expect(UpdateText.laterButton == "Later")
+        #expect(UpdateText.downloadButton == "Download…")
+        #expect(UpdateText.okButton == "OK")
         #expect(
             UpdateText.settingsFooter
                 == "At launch and once a day, Noctule Scan asks GitHub for its latest release (betas aren't included). Nothing is downloaded or installed."
