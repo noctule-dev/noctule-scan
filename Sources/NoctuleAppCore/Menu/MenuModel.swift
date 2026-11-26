@@ -90,6 +90,10 @@ public final class MenuModel {
 
     /// The menu item names that need a confirmation (`ModelProfile.destructiveMenuItems`).
     @ObservationIgnored var destructiveItems: DestructiveMenuItems
+    /// How this model enters, goes back and leaves a menu (`ModelProfile.menuNavigation`): by keys
+    /// (`KEY,M,P`, `KEY,L,P`) or by its menu commands (`MNU`, `MSB`). Only which one command is sent
+    /// differs; every guard around it is the same.
+    @ObservationIgnored var navigation: MenuNavigation = .keys
     /// Called after each command's reply, or its timeout (`StationSession.noteMenuCommandReply`).
     @ObservationIgnored var onCommandReply: (@MainActor () -> Void)?
     /// Called each time `isInMenu` changes, detach included (`StationSession` tells its quick keys).
@@ -242,7 +246,7 @@ public final class MenuModel {
 
     // MARK: Actions
 
-    /// Enters the menu (`KEY,M,P`). Reads `GSI` first: if the scanner is already in a menu it only
+    /// Enters the menu (`KEY,M,P`, or `MNU,TOP,` where the model has menu commands). Reads `GSI` first: if the scanner is already in a menu it only
     /// re-reads (nothing is sent). Throws `.noAnswer`, sending nothing, if that read goes unanswered.
     @discardableResult
     public func enter() async throws -> MenuContent? {
@@ -253,7 +257,12 @@ public final class MenuModel {
                 self.apply(snapshot)
                 return snapshot.content
             }
-            return try await self.command(link) { try await $0.press(.menu, onlyIf: $1) }
+            return try await self.command(link) { client, permit in
+                switch self.navigation {
+                case .keys: try await client.press(.menu, onlyIf: permit)
+                case .menuCommands: try await client.openMenu(onlyIf: permit)
+                }
+            }
         }
     }
 
@@ -304,15 +313,20 @@ public final class MenuModel {
         }
     }
 
-    /// Up one level (`KEY,M,P`); on an entry screen it cancels without saving.
+    /// Up one level (`KEY,M,P`, or `MSB,,`); on an entry screen it cancels without saving.
     @discardableResult
     public func back() async throws -> MenuContent? {
         try await perform(inMenu: true) { link in
-            try await self.command(link) { try await $0.press(.menu, onlyIf: $1) }
+            try await self.command(link) { client, permit in
+                switch self.navigation {
+                case .keys: try await client.press(.menu, onlyIf: permit)
+                case .menuCommands: try await client.menuBack(onlyIf: permit)
+                }
+            }
         }
     }
 
-    /// Leaves the menu from any depth (`KEY,L,P`); scanning resumes. Reads `GSI` first, since
+    /// Leaves the menu from any depth (`KEY,L,P`, or `MSB,,RETURN_PREVOUS_MODE`); scanning resumes. Reads `GSI` first, since
     /// outside a menu that key is Avoid and `content` can lag the scanner (the radio's panel left
     /// the menu, or an earlier Exit took effect but its replies were lost): if the scanner is no
     /// longer in a menu nothing is sent, `content` turns nil and nil is returned. Throws
@@ -325,7 +339,12 @@ public final class MenuModel {
                 self.apply(Snapshot(info: info, content: nil))
                 return nil
             }
-            return try await self.command(link) { try await $0.press(.avoid, onlyIf: $1) }
+            return try await self.command(link) { client, permit in
+                switch self.navigation {
+                case .keys: try await client.press(.avoid, onlyIf: permit)
+                case .menuCommands: try await client.leaveMenu(onlyIf: permit)
+                }
+            }
         }
     }
 

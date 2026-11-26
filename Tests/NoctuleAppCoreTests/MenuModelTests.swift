@@ -1472,3 +1472,188 @@ private func menuActionHeldAtTheSlot(
         #expect(outcome.leaked == [])
     }
 }
+
+// MARK: - BCD436HP menus (Plan 23, Task 6)
+
+/// A `MenuModel` attached to a client on a serial mock of `personality`, with the navigation and
+/// destructive items that model's profile gives. Stops everything on every path.
+@MainActor
+private func withMenuModel(
+    personality: MockPersonality, model: ScannerModel,
+    control: @escaping @Sendable (ScannerClient, MockSerialScanner) async -> Void = { _, _ in },
+    commandTimeout: Duration = .seconds(2),
+    _ body: (MenuModel, ScannerClient, MockSerialScanner) async throws -> Void
+) async throws {
+    let mock = MockSerialScanner(scenario: .default, clock: .stepped(at: 3), personality: personality)
+    var failure: (any Error)?
+    var client: ScannerClient?
+    var menu: MenuModel?
+    do {
+        let path = try await mock.start()
+        let connected = ScannerClient(transport: SerialTransport(path: path), commandTimeout: commandTimeout)
+        client = connected
+        try await connected.connect()
+        let profile = ModelProfile.profile(for: model)
+        let made = MenuModel(destructiveItems: profile.destructiveMenuItems)
+        made.navigation = profile.menuNavigation
+        menu = made
+        made.attach(control: {
+            await control(connected, mock)
+            return connected
+        })
+        try await body(made, connected, mock)
+    } catch { failure = error }
+    menu?.detach()
+    await menu?.quiesce()
+    await client?.disconnect()
+    await mock.stop()
+    if let failure { throw failure }
+}
+
+private func navCommands(_ commands: [String]) -> [String] {
+    commands.filter { ["MNU", "MSB"].contains(String($0.prefix(3))) || $0.hasPrefix("KEY,M") || $0.hasPrefix("KEY,L") }
+}
+
+@MainActor
+@Suite("BCD436HP menus", .serialized, .timeLimit(.minutes(2))) struct BCDMenuModelTests {
+    @Test func enterSendsMNUTopOnlyOutsideAMenu() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, _, mock in
+            _ = try await menu.enter()
+            #expect(await mock.isInMenu)
+            #expect(menu.isInMenu)
+            let log = await mock.receivedCommands
+            #expect(navCommands(log) == ["MNU,TOP,"])
+            let mnu = try #require(log.firstIndex(of: "MNU,TOP,"))
+            #expect(log[..<mnu].contains("GSI"), "GSI first: \(log)")
+            _ = try await menu.enter()
+            #expect(navCommands(await mock.receivedCommands) == ["MNU,TOP,"], "already in a menu: no second MNU")
+        }
+    }
+
+    @Test func backSendsMSB() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, client, mock in
+            try await client.openMenu()
+            _ = try await menu.refresh()
+            _ = try await menu.back()
+            let nav = navCommands(await mock.receivedCommands)
+            #expect(nav == ["MNU,TOP,", "MSB,,"])
+        }
+    }
+
+    @Test func exitSendsMSBReturnOnlyInAMenu() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, _, mock in
+            _ = try await menu.enter()
+            let mark = await mock.receivedCommands.count
+            _ = try await menu.exit()
+            let after = Array(await mock.receivedCommands.dropFirst(mark))
+            #expect(navCommands(after) == ["MSB,,RETURN_PREVOUS_MODE"])
+            let msb = try #require(after.firstIndex(of: "MSB,,RETURN_PREVOUS_MODE"))
+            #expect(after[..<msb].contains("GSI"))
+            #expect(!(await mock.isInMenu))
+            #expect(menu.content == nil)
+        }
+    }
+
+    @Test func exitNeverPressesAvoid() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, _, mock in
+            _ = try await menu.enter()
+            _ = try await menu.back()
+            _ = try await menu.exit()
+            let log = await mock.receivedCommands
+            #expect(!log.contains("KEY,L,P") && !log.contains("KEY,M,P"), "\(log)")
+        }
+    }
+
+    @Test func staleExitIsRefusedQuietly() async throws {
+        let left = Mutex(false), live = Mutex(false)
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp, control: { client, mock in
+            // Between exit()'s GSI reply and its MSB: the radio's panel leaves the menu.
+            guard live.withLock({ $0 }), await mock.receivedCommands.last == "GSI", await mock.isInMenu,
+                  left.withLock({ let was = $0; $0 = true; return !was }) else { return }
+            try? await client.leaveMenu()
+        }) { menu, client, mock in
+            try await client.openMenu()
+            _ = try await menu.refresh()
+            live.withLock { $0 = true }
+            let error = await menuError { try await menu.exit() }
+            #expect(left.withLock { $0 }, "the panel left the menu")
+            if case .rejected = error {} else { Issue.record("expected .rejected, got \(String(describing: error))") }
+            let log = await mock.receivedCommands
+            #expect(log.filter { $0 == "MSB,,RETURN_PREVOUS_MODE" }.count == 2, "the panel's and the model's, never resent: \(log)")
+            #expect(menu.content == nil)
+            #expect(!menu.isInMenu)
+        }
+    }
+
+    @Test func notResentAfterADroppedReply() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp, commandTimeout: .milliseconds(400)) { menu, _, mock in
+            await mock.setFaults(MockFaults(dropNextReply: "MNU"))
+            _ = await menuError { try await menu.enter() }
+            let log = await mock.receivedCommands
+            #expect(log.filter { $0 == "MNU,TOP," }.count == 1, "\(log)")
+        }
+    }
+
+    @Test func withheldOnceDetached() async throws {
+        let armed = Mutex(false), live = Mutex(false)
+        let held = Mutex<Task<Void, Never>?>(nil)
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp, control: { client, mock in
+            // The call before exit()'s MSB (after its GSI): hold the slot with a GSI the mock never answers.
+            guard live.withLock({ $0 }), await mock.receivedCommands.last == "GSI", await mock.isInMenu,
+                  armed.withLock({ let was = $0; $0 = true; return !was }) else { return }
+            let before = await mock.receivedCommands.count
+            await mock.setFaults(MockFaults(dropNextRequest: "GSI"))
+            held.withLock { $0 = Task { _ = try? await client.scannerInfo() } }
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !(await mock.receivedCommands.dropFirst(before).contains("GSI")), ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+        }, commandTimeout: .seconds(10)) { menu, client, mock in
+            try await client.openMenu()
+            _ = try await menu.refresh()
+            live.withLock { $0 = true }
+            let task = Task { try await menu.exit() }
+            try await waitUntil("the MSB queued behind the held GSI", .seconds(5)) {
+                await client.requestsWaitingForTheSlot == 1
+            }
+            menu.detach()
+            held.withLock { $0?.cancel() }
+            _ = await task.result
+            await held.withLock { $0 }?.value
+            #expect(!(await mock.receivedCommands.contains("MSB,,RETURN_PREVOUS_MODE")))
+            #expect(await mock.isInMenu)
+        }
+    }
+
+    @Test func sdsUnchanged() async throws {
+        try await withMenuModel(personality: .sds100, model: .sds100) { menu, _, mock in
+            _ = try await menu.enter()
+            _ = try await menu.back()
+            _ = try await menu.exit()
+            let log = await mock.receivedCommands
+            #expect(navCommands(log) == ["KEY,M,P", "KEY,M,P", "KEY,L,P"], "\(log)")
+            #expect(!log.contains { $0.hasPrefix("MNU") || $0.hasPrefix("MSB") })
+        }
+    }
+
+    @Test func destructiveItemOnTheBCDAsksFirst() async throws {
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, _, mock in
+            #expect(menu.isDestructive("Clear All ID Avoids"))
+            #expect(menu.isDestructive("Reset to Factory"))
+            #expect(menu.isDestructive("Delete Favorites List"))
+            #expect(!menu.isDestructive("Display Options"))
+            _ = try await menu.enter()
+            let sent = await mock.receivedCommands.count
+            let screen = try parsedScreen("""
+                <MSI Name="Fictional" Index="4293060020" MenuType="TypeSelect" Selected="0" >
+                <MenuItem Name="Clear All ID Avoids" Index="0" />
+                <Footer No="1" EOT="1"/>
+                </MSI>
+                """)
+            let item = try #require(screen.items.first)
+            let error = await menuError { try await menu.choose(item, on: screen) }
+            #expect(error == .needsConfirmation(itemName: "Clear All ID Avoids"))
+            #expect(await mock.receivedCommands.count == sent)
+        }
+    }
+}

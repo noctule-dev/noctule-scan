@@ -700,6 +700,7 @@ public final class StationSession {
             detectedModel = ScannerModel(reported: model)
             startLiveLoops(runner)
             menu.destructiveItems = ModelProfile.profile(for: self.model).destructiveMenuItems
+            menu.navigation = ModelProfile.profile(for: self.model).menuNavigation
             menu.attach(control: { await runner.control() })
             let known = detectedModel ?? station.connection.modelOverride
             let hasQuickKeys = known.map { ModelProfile.profile(for: $0).supportsQuickKeys } ?? false
