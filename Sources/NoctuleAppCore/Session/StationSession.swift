@@ -1134,7 +1134,7 @@ public final class StationSession {
         guard isConnected else { return false }
         switch ModelProfile.profile(for: model).holdMethod {
         case .softKeyLabel: return Self.holdKey(level, display: display) != nil
-        case .holdCommand: return !holdInFlight && keyGate != nil && Self.holdTarget(level, info: info) != nil
+        case .holdCommand: return !holdInFlight && !menu.isBusy && keyGate != nil && Self.holdTarget(level, info: info) != nil
         }
     }
 

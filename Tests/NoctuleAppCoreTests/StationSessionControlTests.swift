@@ -710,32 +710,36 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
 
     // MARK: Keys per model (design §5.11)
 
-    private func keysSent(_ setup: USBSetup, _ keys: [FrontPanelKey]) async throws -> [String] {
+    private func keysSent(_ setup: USBSetup, _ keys: [FrontPanelKey], expecting expected: Int) async throws -> [String] {
         let outcome = try await withUSBSession(setup) { rig in
             rig.start()
             try await rig.waitConnected()
             try await rig.waitForPush()
             for key in keys { rig.session.press(key) }
-            // Presses are queued one at a time; give a sent one time to reach the mock.
-            try await Task.sleep(for: .milliseconds(700))
+            // Presses are queued one at a time: wait for the expected ones, then settle briefly
+            // so a key that should not be sent has the time to show.
+            try await waitUntil("the expected keys", .seconds(10)) {
+                await rig.commands.filter { $0.hasPrefix("KEY") }.count >= expected
+            }
+            try await Task.sleep(for: .milliseconds(300))
         }
         return outcome.commands.filter { $0.hasPrefix("KEY") }
     }
 
     @Test func bcdPressesItsOwnKeysOnly() async throws {
-        let sent = try await keysSent(bcdSetup(), [.serviceType, .squelchPush, .scrollPush, .soft1])
+        let sent = try await keysSent(bcdSetup(), [.serviceType, .squelchPush, .scrollPush, .soft1], expecting: 2)
         #expect(sent == ["KEY,^,P", "KEY,A,P"])
     }
 
     @Test func sds100DropsServicesAndSquelchPushKeepsRange() async throws {
         var setup = USBSetup()
         setup.personality = .sds100
-        let sent = try await keysSent(setup, [.serviceType, .squelchPush, .range])
+        let sent = try await keysSent(setup, [.serviceType, .squelchPush, .range], expecting: 1)
         #expect(sent == ["KEY,R,P"])
     }
 
     @Test func sds150DropsRange() async throws {
-        let sent = try await keysSent(USBSetup(), [.range, .serviceType, .zip])
+        let sent = try await keysSent(USBSetup(), [.range, .serviceType, .zip], expecting: 1)
         #expect(sent == ["KEY,Z,P"])
     }
 
@@ -746,6 +750,30 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
             rig.session.press(.serviceType)
             try await waitUntil("KEY,T,P") { await rig.commands.contains("KEY,T,P") }
         }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    /// The model `MDL` names wins over a station's override: an SDS100 behind a BCD436HP override
+    /// still gets the SDS keys, its menu by `KEY`, no `HLD` and the SDS layout (`MNU`, `MSB` and
+    /// `HLD` are never sent to an SDS model).
+    @Test func detectedModelWinsOverTheOverride() async throws {
+        var setup = USBSetup()
+        setup.personality = .sds100
+        setup.modelOverride = .bcd436hp
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            #expect(rig.session.model == .sds100)
+            #expect(rig.session.menu.navigation == .keys)
+            #expect(rig.session.display?.layout == .sds)
+            rig.session.hold(.system)
+            _ = try await rig.session.menu.enter()
+            try await waitUntil("KEY,M,P") { await rig.commands.contains("KEY,M,P") }
+            _ = try await rig.session.menu.exit()
+            try await waitUntil("KEY,L,P") { await rig.commands.contains("KEY,L,P") }
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("MNU") || $0.hasPrefix("MSB") || $0.hasPrefix("HLD") })
         #expect(outcome.commands.last == "PSI,0")
     }
 
@@ -776,6 +804,27 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
         #expect(outcome.commands.last == "PSI,0")
     }
 
+    /// Between a Menu click and the re-read that shows the menu, a Hold click sends no `HLD`
+    /// behind the `MNU`.
+    @Test func noHoldWhileAMenuActionRuns() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["MNU": .milliseconds(600)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            #expect(rig.session.canHold(.system))
+            let entering = Task { @MainActor in _ = try? await rig.session.menu.enter() }
+            try await waitUntil("the menu action runs") { rig.session.menu.isBusy }
+            #expect(!rig.session.canHold(.system), "a menu action is in flight")
+            rig.session.hold(.system)
+            _ = await entering.value
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
     @Test func doubleClickSendsOneHLD() async throws {
         var setup = bcdSetup()
         setup.replyDelays = ["HLD": .milliseconds(600)]
@@ -787,9 +836,9 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
             #expect(!rig.session.canHold(.system), "in flight")
             rig.session.hold(.system)
             rig.session.hold(.department)
-            try await Task.sleep(for: .milliseconds(1200))
+            try await waitUntil("the flag clears after the reply") { rig.session.canHold(.system) }
+            try await Task.sleep(for: .milliseconds(300))
             #expect(await rig.received("HLD") == 1)
-            #expect(rig.session.canHold(.system), "the flag clears after the reply")
         }
         #expect(outcome.commands.last == "PSI,0")
     }

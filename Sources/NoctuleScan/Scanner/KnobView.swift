@@ -72,6 +72,16 @@ struct KnobView: View {
     let onPush: () -> Void
     var diameter: CGFloat = 58
 
+    /// A knob with nothing to push (a blank caption: SQL where the model has no squelch push)
+    /// says only how to turn it.
+    private var hasPush: Bool { !pushCaption.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    private var tooltip: String {
+        guard hasPush else { return "\(title): scroll or drag to turn" }
+        return help.map { "\(title): scroll or drag to turn, click to push. \($0)" }
+            ?? "\(title): scroll or drag to turn, click to push (\(pushCaption))"
+    }
+
     var body: some View {
         VStack(spacing: 6) {
             ZStack {
@@ -91,8 +101,7 @@ struct KnobView: View {
             }
             .frame(width: diameter, height: diameter)
             .opacity(enabled ? 1 : 0.55)
-            .help(help.map { "\(title): scroll or drag to turn, click to push. \($0)" }
-                    ?? "\(title): scroll or drag to turn, click to push (\(pushCaption))")
+            .help(tooltip)
 
             VStack(spacing: 1) {
                 Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(Color(white: 0.88))
@@ -104,7 +113,7 @@ struct KnobView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue(readout ?? "")
-        .accessibilityHint("Push: \(pushCaption)")
+        .accessibilityHint(hasPush ? "Push: \(pushCaption)" : "")
         .accessibilityAdjustableAction { direction in
             switch direction {
             case .increment: if enabled { onSteps(1) }

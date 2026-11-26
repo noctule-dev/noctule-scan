@@ -103,6 +103,10 @@ enum HandheldHardwareChecks {
         /// The `Battery` attribute of the `GSI` document's `Property` element as written; nil when
         /// it has none.
         var batteryAttribute: String?
+        /// `STS`'s form: each line's size flag in order (digits), never text.
+        var displayForm: String = ""
+        /// The attribute names of `GSI`'s `Property` element, sorted; never their values.
+        var propertyAttributeNames: [String] = []
     }
 
     /// `MDL`, `VER`, `VOL`, `SQL`, `GSI`, `STS`, one each and in that order, then the port is
@@ -153,7 +157,11 @@ enum HandheldHardwareChecks {
             return false
         }
         var battery: String?
-        if case .xml(_, let root) = gsi { battery = root.child("Property")?.attributes["Battery"] }
+        var propertyNames: [String] = []
+        if case .xml(_, let root) = gsi {
+            battery = root.child("Property")?.attributes["Battery"]
+            propertyNames = (root.child("Property")?.attributes.keys.sorted()) ?? []
+        }
         let display = try await client.displayStatus()
         #expect(display.lines.count >= 2, "STS has \(display.lines.count) line(s)")
         let layout = profile.display
@@ -178,7 +186,8 @@ enum HandheldHardwareChecks {
         }
         return ReadOnlyReport(model: reported, firmware: firmware, volume: volume, squelch: squelch,
                               mode: info.mode, screen: info.screen, softKeys: softKeys,
-                              displayWidths: display.lines.map(\.text.count), batteryAttribute: battery)
+                              displayWidths: display.lines.map(\.text.count), batteryAttribute: battery,
+                              displayForm: String(display.lines.map(\.sizeFlag)), propertyAttributeNames: propertyNames)
     }
 
     /// A level range as `0…15` (`none` for a model without one).

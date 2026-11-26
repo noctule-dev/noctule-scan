@@ -10,7 +10,7 @@ import NoctuleKitTestSupport
 import NoctuleMockScanner
 @testable import NoctuleKit
 
-// Opt-in checks against the owner's BCD436HP on USB serial (BCD436HP design §5.8, §6), and the same checks run against `MockSerialScanner` (`MockPersonality.bcd436hp`)
+// Opt-in checks against the owner's BCD436HP on USB serial (BCD436HP design §5.9, §6), and the same checks run against `MockSerialScanner` (`MockPersonality.bcd436hp`)
 // by default, so what they send is known before the owner runs them. The checks themselves are `HandheldHardwareChecks`,
 // shared with the SDS150's and SDS100's suites.
 //
@@ -67,7 +67,10 @@ enum BCD436HPHardwareGate {
                 + "SQL \(report.squelch), GSI mode \(report.mode ?? "nil"), screen \(report.screen ?? "nil"), "
                 + "soft keys \(report.softKeys)")
             // Counts only (never display text): the line count and each line's width in characters.
-            print("BCD436HP hardware: STS \(report.displayWidths.count) lines, widths \(report.displayWidths)")
+            print("BCD436HP hardware: STS \(report.displayWidths.count) lines, form \(report.displayForm), "
+                + "widths \(report.displayWidths)")
+            // Attribute names only, never their values.
+            print("BCD436HP hardware: GSI Property attributes \(report.propertyAttributeNames)")
             // A battery reading is not radio traffic.
             print("BCD436HP hardware: GSI Property Battery "
                 + (report.batteryAttribute.map { "present (\"\($0)\")" } ?? "absent"))
@@ -88,7 +91,7 @@ enum BCD436HPHardwareGate {
 
     /// The owner's BCD436HP: `PSI` pushes while `GSI` is asked (H3), then the port held 1.5 s after
     /// `PSI,0`: the pushes must stop. Opt-in: `NOCTULE_BCD436HP_HARDWARE_TESTS=1` and
-    /// `NOCTULE_BCD436HP_PUSH_TEST=1` (never with `NOCTULE_NO_USB_DETECTION` set). Sends `MDL` (an
+    /// `NOCTULE_BCD436HP_PUSH_TEST=1` (never with `NOCTULE_NO_USB_DETECTION` set). Sends `MDL` (a
     /// BCD436HP, else nothing more), `PSI,500`, 20 `GSI`s, and `PSI,0` on every path; never `KAL`,
     /// `GCS`, `KEY`, `MSV`, `MSM` or `POF`.
     @Suite(.enabled(if: BCD436HPHardwareGate.pushEnabled(ProcessInfo.processInfo.environment)))
@@ -155,14 +158,17 @@ extension BCD436HPHardwareTests {
                 #expect(report.softKeys.isEmpty, "the BCD436HP has no soft-key line")
                 #expect(report.displayWidths.count >= 2)
                 #expect(report.batteryAttribute == nil, "the mock's GSI has no Battery")
+                #expect(report.displayForm.count == report.displayWidths.count)
+                #expect(report.displayForm.allSatisfy { $0.isNumber })
+                #expect(!report.propertyAttributeNames.isEmpty)
             }
             #expect(await mock.receivedCommands == ["MDL", "VER", "VOL", "SQL", "GSI", "STS"])
             #expect(await mock.activeSubscribers == 0)
         }
 
-        /// The width check on an idle mock, whose first line carries the BCD436HP's four glyph bytes
-        /// (0x06, 0x07, 0x1A, 0x1B): 17 lines, each 30 characters wide, text and mask alike.
-        @Test func readOnlyWidthsIncludeTheIdleGlyphs() async throws {
+        /// The width check on an idle mock: 14 lines, each the layout's 24 characters wide. The idle
+        /// BCD436HP mock carries no glyph bytes.
+        @Test func readOnlyWidthsOnTheIdleMock() async throws {
             _ = try await withMockHandheld(personality: .bcd436hp, clock: .stepped(at: 0)) { path in
                 let report = try await HandheldHardwareChecks.readOnly(
                     path: path, expecting: .bcd436hp, commandTimeout: .milliseconds(700))
