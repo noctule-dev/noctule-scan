@@ -753,6 +753,8 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
         #expect(outcome.commands.last == "PSI,0")
     }
 
+    /// The HLD waits for the request slot behind a slow `STS`; the stop closes the gate first, so
+    /// once it holds the slot it writes nothing.
     @Test func holdAfterStopSendsNothing() async throws {
         var setup = bcdSetup()
         setup.replyDelays = ["STS": .seconds(2)]
@@ -760,8 +762,32 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
             rig.start()
             try await rig.waitConnected()
             try await rig.waitForPush()
-            try await rig.stopSession()
+            try await waitUntil("an STS holds the slot") { await rig.received("STS") >= 1 }
+            #expect(rig.session.canHold(.system))
             rig.session.hold(.system)
+            try await Task.sleep(for: .milliseconds(100))
+            try await rig.stopSession()
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+            #expect(!rig.session.warnings.contains { $0.contains("couldn't hold") }, "\(rig.session.warnings)")
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+
+    @Test func unprogrammedTalkgroupDisablesChannelOnASession() async throws {
+        let outcome = try await withUSBSession(bcdSetup()) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            var found = false
+            for _ in 0..<200 where !found {
+                if rig.session.info?.channel?.index == ScannerInfo.unprogrammedIndex { found = true; break }
+                rig.clock.advance(by: 0.5)
+                try await Task.sleep(for: .milliseconds(60))
+            }
+            try #require(found, "the scenario's unprogrammed talkgroup never showed")
+            #expect(!rig.session.canHold(.channel))
+            rig.session.hold(.channel)
             try await Task.sleep(for: .milliseconds(300))
             #expect(await rig.received("HLD") == 0)
         }

@@ -1110,12 +1110,15 @@ public final class StationSession {
             guard canHold(level), let target = Self.holdTarget(level, info: info), let gate = keyGate else { return }
             holdInFlight = true
             Task { [weak self] in
-                defer { self?.holdInFlight = false }
+                // Only the run that set the flag clears it: a reconnect's run has its own gate.
+                defer { if let self, self.keyGate === gate || self.keyGate == nil { self.holdInFlight = false } }
                 guard let runner = self?.runner, let client = await runner.control() else { return }
                 do {
                     try await client.hold(target, onlyIf: { gate.isOpen })
                 } catch ScannerClientError.withheld {
                 } catch {
+                    // A stop closing the transport under the reply is not a failed hold.
+                    guard gate.isOpen else { return }
                     self?.handle(.warning("couldn't hold the \(level.holdName): \(error)"))
                 }
             }
@@ -1188,6 +1191,7 @@ public final class StationSession {
     /// Closes the gate (keys still queued are dropped) and ends the feeder. Synchronous, so it can
     /// be a stop's first step.
     func stopKeyQueue() {
+        holdInFlight = false
         keyGate?.close()
         keyGate = nil
         keyInput?.finish()
