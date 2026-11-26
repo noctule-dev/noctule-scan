@@ -853,8 +853,12 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
         #expect(status.lines.count == 14)
         for line in status.lines {
             #expect(line.text.utf8.count == 24, "\(line.text.debugDescription)")
-            #expect(line.highlightMask.count == 24 || line.highlightMask.isEmpty || line.highlightMask.allSatisfy { $0 == " " })
-            #expect(!line.highlightMask.contains("*********"), "no soft-key mask")
+        }
+        // Exact masks: `_` across all 24 columns on lines 2, 5, 8 and 12, none on the others.
+        for (index, line) in status.lines.enumerated() {
+            let masked: Set<Int> = [1, 4, 7, 11]
+            let expected = masked.contains(index) ? String(repeating: "_", count: 24) : ""
+            #expect(line.highlightMask == expected, "line \(index + 1): \(line.highlightMask.debugDescription)")
         }
         #expect(status.trailing == ["1", "1", "0", "0", "", "", "0", "OFF", "0"])
         #expect(fields.allSatisfy { $0.allSatisfy { $0 < 0x80 } }, "no glyph bytes while idle")
@@ -907,5 +911,147 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
         for line in status.lines { #expect(line.text.utf8.count == 30) }
         let gsi = try #require(CoreRig(.sds150, at: 3).reply("GSI"))
         #expect(gsi.contains("Rssi=\"-62\""))
+    }
+
+    // MARK: MNU, MSB, HLD and the hold keys (design §3.5, §3.5a, §5.7)
+
+    private func holdAttribute(_ gsi: String, _ tag: String) -> String? {
+        guard let line = gsi.components(separatedBy: "\r").first(where: { $0.hasPrefix("<\(tag) ") }),
+              let range = line.range(of: "Hold=\"") else { return nil }
+        return String(line[range.upperBound...].prefix { $0 != "\"" })
+    }
+
+    private func gsiText(_ rig: CoreRig) -> String { rig.reply("GSI") ?? "" }
+
+    private func index(_ gsi: String, _ tag: String) -> String? {
+        MockScreens.shownIndex(gsi, tag: tag, lineBreak: "\r")
+    }
+
+    @Test func bcdMenuCommands() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("MSB,,") == "MSB,NG\r")
+        #expect(rig.reply("MNU,TOP,") == "MNU,OK\r")
+        #expect(rig.core.sync { $0.menu.isActive })
+        #expect(rig.reply("MNU,SETTINGS,") == "MNU,NG\r")
+        #expect(rig.reply("KEY,E,P") == "KEY,OK\r")  // opens a submenu
+        let deep = rig.core.sync { $0.menu.path.count }
+        #expect(deep == 2)
+        #expect(rig.reply("MSB,,") == "MSB,OK\r")
+        #expect(rig.core.sync { $0.menu.path.count } == deep - 1)
+        #expect(rig.reply("MSB,,RETURN_PREVOUS_MODE") == "MSB,OK\r")
+        #expect(!rig.core.sync { $0.menu.isActive })
+        #expect(rig.reply("MSB,,") == "MSB,NG\r")
+        #expect(rig.reply("MSB,,RETURN_PREVOUS_MODE") == "MSB,NG\r")
+    }
+
+    @Test func sdsMocksRefuseBCDCommands() {
+        for personality in [MockPersonality.sds100, .sds150, .sds200] {
+            let rig = CoreRig(personality)
+            for command in ["MNU,TOP,", "MSB,,", "MSB,,RETURN_PREVOUS_MODE", "HLD,SYS,101,"] {
+                #expect(rig.reply(command) == "ERR\r", "\(personality.reportedModel) \(command)")
+            }
+            #expect(!rig.core.sync { $0.menu.isActive })
+            #expect(rig.core.sync { $0.holds.isEmpty })
+        }
+    }
+
+    @Test func bcdHLDTogglesBySystemIndex() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let before = try #require(rig.reply("GSI"))
+        let system = try #require(index(before, "System"))
+        let mode = before.components(separatedBy: "\r").first { $0.hasPrefix("<ScannerInfo") }
+        #expect(holdAttribute(before, "System") == "Off")
+        #expect(rig.reply("HLD,SYS,\(system),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "System") == "On")
+        #expect(held.components(separatedBy: "\r").first { $0.hasPrefix("<ScannerInfo") } == mode)
+        #expect(rig.core.sync { $0.holds } == ["SYS:\(system)"])
+        #expect(rig.reply("HLD,SYS,\(system),") == "HLD,OK\r")
+        #expect(holdAttribute(gsiText(rig), "System") == "Off")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        // A department hold names its parent system and leaves Mode alone.
+        let department = try #require(index(before, "Department"))
+        #expect(rig.reply("HLD,DEPT,\(department),\(system)") == "HLD,OK\r")
+        let heldDept = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(heldDept, "Department") == "On")
+        #expect(holdAttribute(heldDept, "System") == "Off")
+    }
+
+    @Test func bcdHLDChannelChangesMode() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let before = try #require(rig.reply("GSI"))
+        let tgid = try #require(index(before, "TGID"))
+        #expect(before.contains("Mode=\"Trunk Scan\""))
+        #expect(rig.reply("HLD,TGID,\(tgid),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "TGID") == "On")
+        #expect(held.contains("Mode=\"Trunk Scan Hold\""), "\(held)")
+        #expect(rig.reply("HLD,TGID,\(tgid),") == "HLD,OK\r")
+        let released = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(released, "TGID") == "Off")
+        #expect(released.contains("Mode=\"Trunk Scan\""))
+    }
+
+    @Test func bcdHLDConventionalChannel() throws {
+        let rig = CoreRig(.bcd436hp, at: 3, scenario: conventionalScenario)
+        let gsi = try #require(rig.reply("GSI"))
+        let channel = try #require(index(gsi, "ConvFrequency"))
+        #expect(rig.reply("HLD,CFREQ,\(channel),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "ConvFrequency") == "On")
+        #expect(held.contains("Mode=\"Scan Mode Hold\""), "\(held)")
+    }
+
+    @Test func bcdHLDUnknownIndex() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        #expect(rig.reply("HLD,SYS,999999,") == "HLD,NG\r")
+        #expect(rig.reply("HLD,BOGUS,101,") == "HLD,NG\r")
+        #expect(rig.reply("HLD,SYS,,") == "HLD,NG\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+    }
+
+    @Test func bcdHoldKeys() throws {
+        let rig = CoreRig(.bcd436hp, at: 2.5)
+        let first = try #require(rig.reply("GSI"))
+        let system = try #require(index(first, "System"))
+        // One press: nothing yet, then held once the 2 s pause has passed on the mock's clock.
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        rig.clock.advance(by: 1.9)
+        #expect(holdAttribute(gsiText(rig), "System") == "Off")
+        rig.clock.advance(by: 0.2)
+        #expect(holdAttribute(gsiText(rig), "System") == "On")
+        #expect(rig.core.sync { $0.holds } == ["SYS:\(system)"])
+        // Two presses 0.1 s apart toggle at once (releasing it).
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        rig.clock.advance(by: 0.1)
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        rig.clock.advance(by: 5)  // the cancelled single press doesn't fire later
+        #expect(rig.core.sync { $0.holds.isEmpty })
+    }
+
+    @Test func bcdDepartmentDoublePressAndChannelKey() throws {
+        let rig = CoreRig(.bcd436hp, at: 2.5)
+        let gsi = try #require(rig.reply("GSI"))
+        let department = try #require(index(gsi, "Department"))
+        let tgid = try #require(index(gsi, "TGID"))
+        _ = rig.reply("KEY,B,P")
+        rig.clock.advance(by: 0.1)
+        _ = rig.reply("KEY,B,P")
+        #expect(rig.core.sync { $0.holds } == ["DEPT:\(department)"])
+        // One Channel press toggles at once, and the next releases it.
+        _ = rig.reply("KEY,C,P")
+        #expect(rig.core.sync { $0.holds.sorted() } == ["DEPT:\(department)", "TGID:\(tgid)"])
+        #expect(gsiText(rig).contains("Mode=\"Trunk Scan Hold\""))
+        _ = rig.reply("KEY,C,P")
+        #expect(rig.core.sync { $0.holds } == ["DEPT:\(department)"])
+    }
+
+    @Test func sdsHoldKeysDoNothing() {
+        let rig = CoreRig(.sds100, at: 2.5)
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        rig.clock.advance(by: 5)
+        #expect(rig.core.sync { $0.holds.isEmpty && $0.pendingHold == nil })
     }
 }

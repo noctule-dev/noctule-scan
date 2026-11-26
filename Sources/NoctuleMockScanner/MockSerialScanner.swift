@@ -240,6 +240,8 @@ public actor MockSerialScanner {
     public var menuPath: [String] { core.sync { $0.menu.path } }
     /// Every state change the menu carried out, oldest first.
     public var menuActions: [String] { core.sync { $0.menu.actions } }
+    /// What is held (BCD436HP): `<LEVEL>:<index>`, sorted (`SYS`, `DEPT`, `TGID`, `CFREQ`).
+    public var holds: [String] { core.sync { $0.settleHolds(); return $0.holds.sorted() } }
     /// The most bytes any one write to the port has held (7 with `splitWrites`), for tests.
     var largestWrite: Int { endpoint.sync { $0.largestWrite } }
 

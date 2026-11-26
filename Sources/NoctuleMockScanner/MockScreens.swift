@@ -219,6 +219,53 @@ enum MockScreens {
         return reply
     }
 
+    /// The hold levels of the BCD436HP's `HLD` command and the `GSI` element each one marks.
+    static let holdLevels: [(level: String, tag: String)] = [
+        ("SYS", "System"), ("DEPT", "Department"), ("TGID", "TGID"), ("CFREQ", "ConvFrequency"),
+    ]
+
+    /// The `Index` of the first `tag` element of a `ScannerInfo` document, if the moment shows one.
+    static func shownIndex(_ xml: String, tag: String, lineBreak: String) -> String? {
+        for line in xml.components(separatedBy: lineBreak) where line.hasPrefix("<\(tag) ") {
+            guard let start = line.range(of: " Index=\"") else { continue }
+            let rest = line[start.upperBound...]
+            if let end = rest.firstIndex(of: "\"") { return String(rest[..<end]) }
+        }
+        return nil
+    }
+
+    /// Whether the document shows a `tag` element whose `Index` is `index`.
+    static func shows(_ xml: String, tag: String, index: String, lineBreak: String) -> Bool {
+        xml.components(separatedBy: lineBreak).contains {
+            $0.hasPrefix("<\(tag) ") && $0.contains(" Index=\"\(index)\"")
+        }
+    }
+
+    /// Marks the held elements `Hold="On"` (`holds` holds `"<LEVEL>:<index>"`), and ends `Mode` in
+    /// ` Hold` while a channel (a `TGID` or `ConvFrequency`) is held; a System or Department hold
+    /// leaves `Mode` alone (design §3.5a).
+    static func applyHolds(_ xml: String, holds: Set<String>, lineBreak: String) -> String {
+        guard !holds.isEmpty else { return xml }
+        var channelHeld = false
+        var lines = xml.components(separatedBy: lineBreak)
+        for (n, line) in lines.enumerated() {
+            for (level, tag) in holdLevels where line.hasPrefix("<\(tag) ") {
+                guard let start = line.range(of: " Index=\""),
+                      let end = line[start.upperBound...].firstIndex(of: "\"") else { continue }
+                let index = String(line[start.upperBound..<end])
+                if holds.contains("\(level):\(index)") {
+                    lines[n] = line.replacingOccurrences(of: "Hold=\"Off\"", with: "Hold=\"On\"")
+                    if level == "TGID" || level == "CFREQ" { channelHeld = true }
+                }
+            }
+        }
+        if channelHeld, let n = lines.firstIndex(where: { $0.hasPrefix("<ScannerInfo ") }),
+           let mode = lines[n].range(of: "Mode=\""), let end = lines[n][mode.upperBound...].firstIndex(of: "\"") {
+            lines[n].insert(contentsOf: " Hold", at: end)
+        }
+        return lines.joined(separator: lineBreak)
+    }
+
     /// Signal bars (0-5) from RSSI, roughly as the scanner shows them.
     static func signalBars(rssi: Int) -> Int {
         if rssi >= -65 { return 5 }

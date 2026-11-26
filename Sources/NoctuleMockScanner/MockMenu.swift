@@ -129,6 +129,25 @@ struct MockMenu: Sendable {
         return id
     }
 
+    // MARK: Menu commands (the BCD436HP's `MNU` and `MSB`)
+
+    /// `MNU,TOP,`: shows the top menu (from anywhere).
+    mutating func enterTop() { frames = [Frame(node: 0)] }
+
+    /// `MSB,,`: back one level; at the top menu it stays (assumed). Returns false outside a menu.
+    mutating func back() -> Bool {
+        guard isActive else { return false }
+        if frames.count > 1 { frames.removeLast() }
+        return true
+    }
+
+    /// `MSB,,RETURN_PREVOUS_MODE`: leaves the menu entirely. Returns false outside a menu.
+    mutating func leave() -> Bool {
+        guard isActive else { return false }
+        frames = []
+        return true
+    }
+
     // MARK: Keys
 
     /// Handles a front-panel key code (already known to be valid). Returns true when the menu

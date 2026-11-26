@@ -59,14 +59,26 @@ import Foundation
 /// - `.bcd436hp`: the BCD436HP over USB serial (BCD436HP design §3, §5.7). Seen on hardware:
 ///   `MDL` `BCD436HP`; the push lifetime of the SDS100's kind; `KAL` doing nothing useful; an
 ///   out-of-range `VOL`/`SQL` set clamped and answered `OK` (`clampsLevels`); a `<Footer No="1"
-///   EOT="1"/>` on an `MSI` document (`xmlFooter`; `GSI` and pushes carry none); two icon glyph
-///   bytes on the idle screen (only their count was seen, design §3.6). It has no `T` or `Q` key
-///   (`missingKeys`; design §5.11).
+///   EOT="1"/>` on an `MSI` document (`xmlFooter`; `GSI` and pushes carry none); icon glyph bytes
+///   only during a transmission, 2 on line 1 and 4 on line 5, none while idle (only their counts
+///   were seen, design §3.6). It has no `T` or `Q` key (`missingKeys`; design §5.11). Seen too:
+///   `MNU,TOP,` and `MSB` (`MSB,,` back one level, `MSB,,RETURN_PREVOUS_MODE` leaving, `MSB,NG`
+///   outside a menu), `HLD` as a toggle by index for `SYS`, `DEPT` and `TGID`, a single `KEY,A,P`
+///   holding the System 2 s later, a double press holding or releasing it, and `KEY,C,P` toggling
+///   the channel at once, with ` Hold` on `Mode` for a channel only (design §3.5, §3.5a).
 ///
 /// **Assumptions, not hardware** (BCD436HP): `VER`'s `Version ` prefix; `KAL` and `GCS` answered
 /// `ERR`; `MSM,1` answered `MSM,NG` with nothing else happening; that every `PSI` restarts the full
 /// 183 s; the glyph byte values (fictional); `GSI` and `PSI` without a footer; that a key the radio
-/// lacks is answered `KEY,NG` (the SDS100 and SDS150 `missingKeys` too, design §5.11); and the
+/// lacks is answered `KEY,NG` (the SDS100 and SDS150 `missingKeys` too, design §5.11); the
+/// scan screen's fictional line layout and text, a number entry's value mask spanning all 24
+/// columns, and `Rssi` as 0.1624 x the signal bars; the `MNU` ids other than `TOP` answered `MNU,NG`;
+/// `MSB,,` at the top menu staying there; an `MSB` of any other shape, or an `HLD` of an unknown
+/// level or an index the moment doesn't show, answered `NG`; `HLD,CFREQ` toggling like the others
+/// (never tried); the double-press window of 0.5 s (hardware: at least 95 ms), a single System or
+/// Department press holding after 2 s on the mock's clock (a second press inside the window
+/// cancelling it), and a hold lasting until toggled off (the radio would lose a trunked channel's
+/// when the call ends); the SDS models answering `MNU`, `MSB` and `HLD` `ERR`; and the
 /// menus, scenarios, faults, unplug and replug, copied from the other serial mocks.
 ///
 /// **The push lifetime** (SDS150; `pushLifetime`, `pushLifetimeRestarts`, `silentCommands`). Seen
@@ -161,7 +173,8 @@ public struct MockPersonality: Sendable, Equatable {
     /// Front-panel key codes the model has no key for: `KEY,<code>,P` is answered `KEY,NG`
     /// (design §5.11; assumed that the radio answers so).
     public var missingKeys: Set<String>
-    /// True: the model has the BCD436HP's `MNU`, `MSB` and `HLD` commands (Task 4 gives it behaviour).
+    /// True: the model has the BCD436HP's `MNU`, `MSB` and `HLD` commands and its System, Dept and
+    /// Channel keys (`KEY,A|B|C,P`); every other model answers the commands `ERR`.
     public var bcdCommands: Bool
     /// The form of `STS` and `GSI`'s display text (Task 3 gives `.bcd436hp` behaviour).
     public var displayForm: DisplayForm
