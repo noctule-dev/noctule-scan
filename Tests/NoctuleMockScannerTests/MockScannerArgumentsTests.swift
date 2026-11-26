@@ -206,7 +206,7 @@ import NoctuleKit
 
         let cases: [([String], MockScannerArgumentsError)] = [
             (["--push-lifetime", "5"], .usage("--push-lifetime needs --serial")),
-            (["--serial", "--push-lifetime", "5"], .usage("--push-lifetime needs --model sds150 or sds100 (the SDS200 has no push lifetime)")),
+            (["--serial", "--push-lifetime", "5"], .usage("--push-lifetime needs --model sds150, sds100 or bcd436hp (the SDS200 has no push lifetime)")),
             (["--model", "sds150", "--serial", "--push-lifetime", "0"], .invalidValue(option: "--push-lifetime", value: "0")),
             (["--model", "sds150", "--serial", "--push-lifetime", "-1"], .invalidValue(option: "--push-lifetime", value: "-1")),
             (["--model", "sds150", "--serial", "--push-lifetime", "x"], .invalidValue(option: "--push-lifetime", value: "x")),

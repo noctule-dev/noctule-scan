@@ -33,7 +33,8 @@ import Foundation
 /// conventional scan (no SDS150 `STS` of a scan is captured), with three icon glyph bytes
 /// (`displayGlyphBytes`: 0x80, 0x81, 0x8D) at columns 0-2 of its first line: that the SDS150 draws
 /// icons as lone bytes like these, one per column, and which bytes it uses, is assumed (design
-/// §7.3; the hardware suite's read-only run measures the widths on the real unit).
+/// §7.3; the hardware suite's read-only run measures the widths on the real unit). It answers `KEY` with a code it lacks (`T`, `Q`, `R`) with `KEY,NG`
+/// (design §5.11; assumed, not hardware).
 ///
 /// - `.sds100`: the SDS100 over USB serial (SDS100 design §3, §5.4; fw 1.26.01, the owner's run of
 ///   2026-11-16). Seen on hardware: `MDL` `SDS100`; `VER` `1.26.01` (its `Version ` prefix is the
@@ -51,7 +52,8 @@ import Foundation
 /// `ERR`, as `KAL` is (the real answer wasn't usable; the product never sends `GCS` to an SDS100);
 /// `MSM,1` answered `MSM,NG` with nothing else happening, never sent; that each icon glyph takes
 /// one column (the hardware suite measures it, design §7 H1); and every scenario, menu, conventional
-/// and trunk shape, fault, unplug and replug, taken from the SDS150 mock's. The push lifetime's
+/// and trunk shape, fault, unplug and replug, taken from the SDS150 mock's; and that a `KEY` with a code
+/// it lacks (`T`, `Q`) is answered `KEY,NG` (design §5.11). The push lifetime's
 /// assumptions are in the next paragraph.
 ///
 /// - `.bcd436hp`: the BCD436HP over USB serial (BCD436HP design §3, §5.7). Seen on hardware:

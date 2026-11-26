@@ -305,9 +305,16 @@ final class ControlCore: @unchecked Sendable {
         case ("MSV", 2...) where args[0].isEmpty:
             reply(menu.setValue(args.dropFirst().joined(separator: ",")) ? "MSV,OK" : "MSV,NG", to: peer)
         case ("STS", 0) where menu.isActive:
-            reply(menu.statusFields() + Data("\r".utf8), to: peer)
+            let narrow = personality.displayForm == .bcd436hp
+            reply(menu.statusFields(columns: narrow ? 24 : 30, glyphBytes: personality.displayGlyphBytes) + Data("\r".utf8),
+                  to: peer)
         case ("STS", 0):
             let now = clock.now
+            if personality.displayForm == .bcd436hp {
+                reply(MockScreens.bcdDisplay(scenario.moment(at: now), scenario: scenario, seconds: now,
+                                             glyphBytes: personality.displayGlyphBytes) + Data("\r".utf8), to: peer)
+                return
+            }
             let screen = MockScreens.display(scenario.moment(at: now), scenario: scenario, volume: volume,
                                              squelch: squelch, seconds: now, glyphBytes: personality.displayGlyphBytes)
             reply(screen + Data("\r".utf8), to: peer)
@@ -369,7 +376,8 @@ final class ControlCore: @unchecked Sendable {
         let now = clock.now
         return MockScreens.scannerInfoXML(scenario.moment(at: now), scenario: scenario, volume: volume, squelch: squelch,
                                           lineBreak: personality.xmlLineBreak,
-                                          idleForm: personality.idleForm, seconds: now)
+                                          idleForm: personality.idleForm, seconds: now,
+                                          decimalRssi: personality.displayForm == .bcd436hp)
     }
 
     // MARK: Push

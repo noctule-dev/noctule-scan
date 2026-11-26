@@ -265,7 +265,7 @@ public struct MockScannerArguments: Sendable, Equatable {
                 throw misuse("--fault \(form)=N:M (replug) needs --serial-link")
             }
             if pushLifetime != nil, model == .sds200 {
-                throw misuse("--push-lifetime needs --model sds150 or sds100 (the SDS200 has no push lifetime)")
+                throw misuse("--push-lifetime needs --model sds150, sds100 or bcd436hp (the SDS200 has no push lifetime)")
             }
             if keepAliveRevivesStoppedPushes != nil, model == .sds200 {
                 throw misuse("--kal-after-expiry needs --model sds150 (the mock's SDS200 has no push lifetime and answers KAL with ERR)")

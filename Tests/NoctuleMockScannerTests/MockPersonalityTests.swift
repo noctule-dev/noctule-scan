@@ -828,4 +828,84 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
         try await expectNotPushing(rig)
         #expect(rig.core.sync { $0.subscribers.count } == 1)
     }
+
+    // MARK: The BCD436HP's and the SDS100's screens (design §3.6, §5.7)
+
+    /// The `STS` reply as the product's parser sees it: the comma-separated fields, bytes kept.
+    private func stsFields(_ rig: CoreRig) throws -> (fields: [[UInt8]], status: DisplayStatus) {
+        let replies = rig.send("STS")
+        #expect(replies.count == 1)
+        var bytes = Array(try #require(replies.first))
+        #expect(bytes.last == UInt8(ascii: "\r"))
+        bytes.removeLast()
+        let prefix = Array("STS,".utf8)
+        #expect(bytes.starts(with: prefix))
+        let fields = bytes.dropFirst(prefix.count).split(separator: UInt8(ascii: ","), omittingEmptySubsequences: false)
+            .map(Array.init)
+        let status = try DisplayStatus(fields: fields.map { String(decoding: $0.map { $0 < 0x80 ? $0 : UInt8(ascii: "?") }, as: UTF8.self) })
+        return (fields, status)
+    }
+
+    @Test func bcdScanScreenShape() throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        let (fields, status) = try stsFields(rig)
+        #expect(fields[0] == Array("00110110110000".utf8))
+        #expect(status.lines.count == 14)
+        for line in status.lines {
+            #expect(line.text.utf8.count == 24, "\(line.text.debugDescription)")
+            #expect(line.highlightMask.count == 24 || line.highlightMask.isEmpty || line.highlightMask.allSatisfy { $0 == " " })
+            #expect(!line.highlightMask.contains("*********"), "no soft-key mask")
+        }
+        #expect(status.trailing == ["1", "1", "0", "0", "", "", "0", "OFF", "0"])
+        #expect(fields.allSatisfy { $0.allSatisfy { $0 < 0x80 } }, "no glyph bytes while idle")
+        #expect(status.lines[3].text.contains("ID Searching..."))
+    }
+
+    @Test func bcdScanScreenGlyphsOnACall() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let (fields, status) = try stsFields(rig)
+        #expect(status.lines.count == 14)
+        let text = (0..<14).map { fields[1 + 2 * $0] }
+        for (index, line) in text.enumerated() {
+            #expect(line.count == 24)
+            let glyphs = line.prefix { $0 >= 0x80 }.count
+            let high = line.filter { $0 >= 0x80 }.count
+            #expect(high == glyphs, "glyphs sit in the first columns")
+            #expect(glyphs == (index == 0 ? 2 : index == 4 ? 4 : 0), "line \(index + 1)")
+        }
+        #expect(Array(text[0].prefix(2)) == [0x8A, 0x8B])
+        #expect(status.trailing == ["1", "0", "0", "0", "", "", "5", "OFF", "0"])
+    }
+
+    @Test func bcdMenuScreenShape() throws {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("KEY,M,P") == "KEY,OK\r")
+        let (fields, status) = try stsFields(rig)
+        #expect(fields[0] == Array("1111111111".utf8))
+        #expect(status.lines.count == 10)
+        for line in status.lines { #expect(line.text.utf8.count == 24) }
+        #expect(status.lines[0].highlightMask == String(repeating: "_", count: 24))
+        #expect(status.lines.contains { $0.highlightMask == String(repeating: "*", count: 24) })
+    }
+
+    @Test func bcdGSIProperty() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let gsi = try #require(rig.reply("GSI"))
+        #expect(gsi.contains("Rssi=\"0.812\""), "\(gsi)")
+        #expect(!gsi.contains("Battery"))
+        guard case .xml("GSI", let root)? = assemble(Data(gsi.utf8)).first else {
+            Issue.record("GSI: \(gsi)")
+            return
+        }
+        #expect(try ScannerInfo(xml: root).rssi == nil)
+    }
+
+    @Test func sdsScreensUnchanged() throws {
+        let rig = CoreRig(.sds100, at: 0)
+        let (_, status) = try stsFields(rig)
+        #expect(status.lines.count == 17)
+        for line in status.lines { #expect(line.text.utf8.count == 30) }
+        let gsi = try #require(CoreRig(.sds150, at: 3).reply("GSI"))
+        #expect(gsi.contains("Rssi=\"-62\""))
+    }
 }

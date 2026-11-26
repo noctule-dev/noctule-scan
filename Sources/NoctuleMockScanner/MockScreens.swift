@@ -26,7 +26,8 @@ enum MockScreens {
     /// `Mode="Scan Mode" V_Screen="conventional_scan"`.
     static func scannerInfoXML(_ moment: MockMoment, scenario: MockScenario, volume: Int, squelch: Int,
                                lineBreak: String = "\n",
-                               idleForm: MockPersonality.IdleForm = .trunkSite, seconds: Double = 0) -> String {
+                               idleForm: MockPersonality.IdleForm = .trunkSite, seconds: Double = 0,
+                               decimalRssi: Bool = false) -> String {
         var lines = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>"]
         let idleScan: Bool
         if scenario.mode == .trunk, idleForm == .conventionalScan, case .idle = moment { idleScan = true } else { idleScan = false }
@@ -93,13 +94,15 @@ enum MockScreens {
         case .idle(let idle): rssi = idle.rssi; bars = 0
         case .transmission(_, let t): rssi = t.rssi; bars = signalBars(rssi: t.rssi)
         }
+        // The BCD436HP's `Rssi` is a decimal, a fictional 0.1624 a signal bar (design §3.4, §5.7).
+        let rssiText = decimalRssi ? String(format: "%.3f", Double(bars) * 0.1624) : String(rssi)
         if idleScan {
             lines.append("<Property F=\"Off\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"0\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
                 + "P25Status=\"None\" Mute=\"Mute\" Backlight=\"100\" A_Led=\"Off\" Dir=\"Up\" Rssi=\"-999\"/>")
             lines += ["<ViewDescription>", "<OverWrite Text=\"Scanning...\" />", "</ViewDescription>"]
         } else {
             lines.append("<Property F=\"Off\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"\(bars)\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
-                + "P25Status=\"\(scenario.mode == .trunk ? "PT1" : "None")\" Mute=\"Unmute\" Backlight=\"100\" A_Led=\"Off\" Dir=\"Up\" Rssi=\"\(rssi)\"/>")
+                + "P25Status=\"\(scenario.mode == .trunk ? "PT1" : "None")\" Mute=\"Unmute\" Backlight=\"100\" A_Led=\"Off\" Dir=\"Up\" Rssi=\"\(rssiText)\"/>")
             lines.append("<ViewDescription></ViewDescription>")
         }
         lines.append("</ScannerInfo>")
@@ -170,6 +173,52 @@ enum MockScreens {
         return reply
     }
 
+    /// The BCD436HP's scan screen (design §3.6, §5.7): 14 lines of 24 columns and no soft-key line,
+    /// form `00110110110000`, `_` masks on lines 2, 5, 8 and 12, fictional text from the scenario.
+    /// During a transmission the personality's glyph bytes (cycled) fill the first two columns of
+    /// line 1 and the first four of line 5, as raw bytes; idle, none. The trailing fields read
+    /// `1,1,0,0,,,0,OFF,0` idle and `1,0,0,0,,,<signal bars>,OFF,0` on a call.
+    static func bcdDisplay(_ moment: MockMoment, scenario: MockScenario, seconds: Double, glyphBytes: [UInt8]) -> Data {
+        var text = Array(repeating: "", count: 14)
+        let bars: Int
+        switch moment {
+        case .idle(let idle):
+            text[0] = idle.system
+            text[2] = idle.site
+            text[3] = "ID Searching..."
+            text[7] = frequency(idle.frequencyMHz) + " " + idle.modulation
+            bars = 0
+        case .transmission(_, let t):
+            text[0] = t.system
+            text[1] = t.department
+            text[2] = t.channel
+            text[3] = t.tgid.map { "TGID:\($0)" } ?? ""
+            text[4] = "Sig:\(signalBars(rssi: t.rssi))"
+            text[7] = frequency(t.frequencyMHz) + " " + t.modulation
+            text[9] = "UID: \(t.unitID ?? "---")"
+            bars = signalBars(rssi: t.rssi)
+        }
+        let total = Int(max(0, seconds))
+        text[13] = String(format: "Mock  t+%02d:%02d", total / 60 % 60, total % 60)
+        var onCall = false
+        if case .transmission = moment { onCall = true }
+        let glyphCounts = [0: 2, 4: 4]
+        let masks = [1, 4, 7, 11]
+        var reply = Data("STS,00110110110000".utf8)
+        for (index, line) in text.enumerated() {
+            reply.append(UInt8(ascii: ","))
+            let columns = pad(line, columns: 24)
+            var count = 0
+            if onCall, !glyphBytes.isEmpty, let wanted = glyphCounts[index] { count = wanted }
+            for column in 0..<count { reply.append(glyphBytes[column % glyphBytes.count]) }
+            reply.append(contentsOf: columns.utf8.dropFirst(count))
+            reply.append(UInt8(ascii: ","))
+            if masks.contains(index) { reply.append(contentsOf: String(repeating: "_", count: 24).utf8) }
+        }
+        reply.append(contentsOf: (onCall ? ",1,0,0,0,,,\(bars),OFF,0" : ",1,1,0,0,,,0,OFF,0").utf8)
+        return reply
+    }
+
     /// Signal bars (0-5) from RSSI, roughly as the scanner shows them.
     static func signalBars(rssi: Int) -> Int {
         if rssi >= -65 { return 5 }
@@ -206,9 +255,9 @@ enum MockScreens {
     }
 
     /// 30 columns, no commas (the STS field separator).
-    private static func pad(_ text: String) -> String {
+    private static func pad(_ text: String, columns: Int = 30) -> String {
         let clean = text.replacingOccurrences(of: ",", with: " ")
-        return String(clean.prefix(30)).padding(toLength: 30, withPad: " ", startingAt: 0)
+        return String(clean.prefix(columns)).padding(toLength: columns, withPad: " ", startingAt: 0)
     }
 
     static func escape(_ text: String) -> String {

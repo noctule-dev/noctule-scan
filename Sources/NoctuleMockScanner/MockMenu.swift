@@ -272,43 +272,51 @@ struct MockMenu: Sendable {
 
     private func screenIndex(_ node: Int) -> String { String(4_293_060_000 + node) }
 
-    private func rowText(_ screen: Int, _ row: Int) -> String {
+    private func rowText(_ screen: Int, _ row: Int, columns: Int = 30) -> String {
         let node = nodes[screen]
         if node.kind == .pickOne { return node.options[row] }
         let child = nodes[node.children[row]]
         guard child.kind == .toggle else { return child.name }
-        return String(child.name.prefix(26)).padding(toLength: 26, withPad: " ", startingAt: 0)
+        return String(child.name.prefix(columns - 4)).padding(toLength: columns - 4, withPad: " ", startingAt: 0)
             + (child.isOn ? ":On " : ":Off")
     }
 
     /// The whole `STS` reply line, without the trailing `\r`, as bytes: the name entry's soft-key
-    /// row isn't valid UTF-8.
-    func statusFields() -> Data {
+    /// row isn't valid UTF-8. `columns` is 30 for the SDS models, whose screens are unchanged, and 24
+    /// for the BCD436HP (design §3.6): there a number entry's mask spans the value, a name entry has
+    /// `glyphBytes` (four, cycled) on line 6 and no soft-key line, and the trailing field is 0.
+    func statusFields(columns: Int = 30, glyphBytes: [UInt8] = []) -> Data {
         guard let frame = frames.last else { return Data() }
         let node = nodes[frame.node]
-        let blank = String(repeating: " ", count: 30)
-        var lines: [(text: Data, mask: String)] = [(Self.padded(node.title), String(repeating: "_", count: 30))]
+        let narrow = columns != 30
+        let blank = String(repeating: " ", count: columns)
+        var lines: [(text: Data, mask: String)] = [(Self.padded(node.title, columns: columns), String(repeating: "_", count: columns))]
         switch node.kind {
         case .number, .text:
-            lines.append((Self.padded(displayValue(frame)), "*" + String(repeating: " ", count: 29)))
+            let valueMask = narrow && node.kind == .number ? String(repeating: "*", count: columns)
+                : "*" + String(repeating: " ", count: columns - 1)
+            lines.append((Self.padded(displayValue(frame), columns: columns), valueMask))
             for row in 2..<10 {
                 if node.kind == .number, row == 4, let info = node.addedInformation {
-                    lines.append((Self.padded(info), blank))
-                } else if node.kind == .text, row == 9 {
+                    lines.append((Self.padded(info, columns: columns), blank))
+                } else if node.kind == .text, row == 9, !narrow {
                     lines.append((Data(Self.nameEntrySoftKeys), blank))
+                } else if node.kind == .text, row == 5, narrow, !glyphBytes.isEmpty {
+                    let glyphs = (0..<4).map { glyphBytes[$0 % glyphBytes.count] }
+                    lines.append((Data(glyphs) + Self.padded("", columns: columns - 4), blank))
                 } else {
-                    lines.append((Self.padded(""), blank))
+                    lines.append((Self.padded("", columns: columns), blank))
                 }
             }
         default:
             for slot in 0..<Self.rowsOnScreen {
                 let row = frame.top + slot
                 guard row < rowCount(frame.node) else {
-                    lines.append((Self.padded(""), blank))
+                    lines.append((Self.padded("", columns: columns), blank))
                     continue
                 }
-                lines.append((Self.padded(rowText(frame.node, row)),
-                              row == frame.highlight ? String(repeating: "*", count: 30) : blank))
+                lines.append((Self.padded(rowText(frame.node, row, columns: columns), columns: columns),
+                              row == frame.highlight ? String(repeating: "*", count: columns) : blank))
             }
         }
         var data = Data("STS,1111111111,".utf8)
@@ -316,14 +324,14 @@ struct MockMenu: Sendable {
             data.append(line.text)
             data.append(Data(",\(line.mask),".utf8))
         }
-        data.append(Data("1,1,0,0,,,0,OFF,3".utf8))
+        data.append(Data((narrow ? "1,1,0,0,,,0,OFF,0" : "1,1,0,0,,,0,OFF,3").utf8))
         return data
     }
 
-    /// 30 columns, no commas (the `STS` field separator).
-    private static func padded(_ text: String) -> Data {
+    /// `columns` (30) wide, no commas (the `STS` field separator).
+    private static func padded(_ text: String, columns: Int = 30) -> Data {
         let clean = text.replacingOccurrences(of: ",", with: " ")
-        return Data(String(clean.prefix(30)).padding(toLength: 30, withPad: " ", startingAt: 0).utf8)
+        return Data(String(clean.prefix(columns)).padding(toLength: columns, withPad: " ", startingAt: 0).utf8)
     }
 
     /// The `ScannerInfo` document for `GSI`/`PSI`: no channel elements (design §4.2). Its lines are
