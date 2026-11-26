@@ -96,6 +96,12 @@ import NoctuleStore
                 == PushKeepAlive(action: .renewSubscription, interval: .milliseconds(400)))
         #expect(KeepAliveOverride.forWatch(reportedModel: "SDS100", invocation: network, environment: [:]) == nil)
         #expect(KeepAliveOverride.forWatch(reportedModel: "SDS100", invocation: configured, environment: with([key: "0.4"])) == nil)
+        // The BCD436HP renews its own PSI too.
+        #expect(KeepAliveOverride.forWatch(reportedModel: "BCD436HP", invocation: serial, environment: [:]) == renewal)
+        #expect(KeepAliveOverride.forWatch(reportedModel: "BCD436HP", invocation: serial, environment: with([key: "0.4"]))
+                == PushKeepAlive(action: .renewSubscription, interval: .milliseconds(400)))
+        #expect(KeepAliveOverride.forWatch(reportedModel: "BCD436HP", invocation: network, environment: [:]) == nil)
+        #expect(KeepAliveOverride.forWatch(reportedModel: "BCD436HP", invocation: configured, environment: with([key: "0.4"])) == nil)
         // A network scanner (even one that says SDS150), or a model without one: none.
         for environment in [[:], with([key: "0.4"])] {
             for invocation in [network, configured] {
