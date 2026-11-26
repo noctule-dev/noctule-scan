@@ -298,7 +298,7 @@ import Testing
         #expect(QuickKeysText.toolbarLabel == "Quick Keys")
         #expect(QuickKeysText.toolbarHelp == "Turn Favorites Lists, systems and departments on and off")
         #expect(!QuickKeysToolbar.isShown(for: nil))
-        let (without, dir1) = try session(model: .bcd436hp)
+        let (without, dir1) = try session(model: nil)
         defer { try? FileManager.default.removeItem(at: dir1) }
         #expect(!without.supportsQuickKeys)
         #expect(!QuickKeysToolbar.isShown(for: without))

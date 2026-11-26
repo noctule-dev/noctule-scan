@@ -742,3 +742,316 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
         #expect(rig.pushes(to: .stream).count == stopped)
     }
 }
+
+// MARK: The BCD436HP (design `2026-11-25-bcd436hp-usb-design.md` §3, §5.7, §5.11)
+
+@Suite(.timeLimit(.minutes(1))) struct MockBCD436HPPersonalityTests {
+    @Test func bcdIdentity() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("MDL") == "MDL,BCD436HP\r")
+        #expect(rig.reply("VER") == "VER,Version 1.28.24\r")
+        let bcd = MockPersonality.bcd436hp
+        #expect(bcd.volumeRange == 0...15)
+        #expect(bcd.squelchRange == 0...15)
+        #expect(bcd.clampsLevels)
+        #expect(bcd.missingKeys == ["T", "Q"])
+        #expect(bcd.bcdCommands)
+        #expect(bcd.displayForm == .bcd436hp)
+        #expect(bcd.displayGlyphBytes.count == 2)
+        #expect(!bcd.restartReboots)
+        #expect(bcd.pushLifetime == 183)
+        #expect(MockPersonality.sds100.displayForm == .sds)
+        #expect(!MockPersonality.sds100.clampsLevels)
+        #expect(!MockPersonality.sds100.bcdCommands)
+    }
+
+    @Test func bcdClampsLevels() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("VOL,16") == "VOL,OK\r")
+        #expect(rig.reply("VOL") == "VOL,15\r")
+        #expect(rig.reply("SQL,16") == "SQL,OK\r")
+        #expect(rig.reply("SQL") == "SQL,15\r")
+        #expect(rig.reply("VOL,7") == "VOL,OK\r")
+        #expect(rig.reply("VOL") == "VOL,7\r")
+        let sds100 = CoreRig(.sds100)
+        #expect(sds100.reply("VOL,16") == "VOL,NG\r")
+    }
+
+    @Test func bcdRefusesKeysItHasNot() {
+        let bcd = CoreRig(.bcd436hp)
+        #expect(bcd.reply("KEY,T,P") == "KEY,NG\r")
+        #expect(bcd.reply("KEY,Q,P") == "KEY,NG\r")
+        #expect(bcd.reply("KEY,R,P") == "KEY,OK\r")
+        #expect(bcd.reply("KEY,M,P") == "KEY,OK\r")
+        let sds100 = CoreRig(.sds100)
+        #expect(sds100.reply("KEY,T,P") == "KEY,NG\r")
+        #expect(sds100.reply("KEY,Q,P") == "KEY,NG\r")
+        #expect(sds100.reply("KEY,R,P") == "KEY,OK\r")
+        let sds150 = CoreRig(.sds150)
+        for key in ["T", "Q", "R"] { #expect(sds150.reply("KEY,\(key),P") == "KEY,NG\r") }
+        let sds200 = CoreRig(.sds200)
+        for key in ["T", "Q", "R"] { #expect(sds200.reply("KEY,\(key),P") == "KEY,OK\r") }
+    }
+
+    @Test func bcdAnswersKALAndGCSWithERR() async throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        defer { rig.stop() }
+        #expect(rig.reply("KAL") == "ERR\r")
+        #expect(rig.reply("GCS") == "ERR\r")
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        rig.clock.set(100)
+        #expect(rig.reply("KAL") == "ERR\r")
+        rig.clock.set(184)
+        try await expectNotPushing(rig)
+    }
+
+    @Test func bcdMSICarriesAFooter() throws {
+        let rig = CoreRig(.bcd436hp)
+        let msi = try #require(rig.reply("MSI"))
+        #expect(msi.contains("<Footer No=\"1\" EOT=\"1\"/>"), "\(msi)")
+        #expect(msi.contains("\r"))
+        let gsi = try #require(rig.reply("GSI"))
+        #expect(!gsi.contains("<Footer"))
+    }
+
+    @Test func bcdPushLifetime() async throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        defer { rig.stop() }
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        try await expectPushing(rig)
+        rig.clock.set(100)
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        #expect(rig.core.sync { $0.subscribers.count } == 1)
+        rig.clock.set(182)
+        try await expectPushing(rig)
+        rig.clock.set(284)
+        try await expectNotPushing(rig)
+        #expect(rig.core.sync { $0.subscribers.count } == 1)
+    }
+
+    // MARK: The BCD436HP's and the SDS100's screens (design §3.6, §5.7)
+
+    /// The `STS` reply as the product's parser sees it: the comma-separated fields, bytes kept.
+    private func stsFields(_ rig: CoreRig) throws -> (fields: [[UInt8]], status: DisplayStatus) {
+        let replies = rig.send("STS")
+        #expect(replies.count == 1)
+        var bytes = Array(try #require(replies.first))
+        #expect(bytes.last == UInt8(ascii: "\r"))
+        bytes.removeLast()
+        let prefix = Array("STS,".utf8)
+        #expect(bytes.starts(with: prefix))
+        let fields = bytes.dropFirst(prefix.count).split(separator: UInt8(ascii: ","), omittingEmptySubsequences: false)
+            .map(Array.init)
+        let status = try DisplayStatus(fields: fields.map { String(decoding: $0.map { $0 < 0x80 ? $0 : UInt8(ascii: "?") }, as: UTF8.self) })
+        return (fields, status)
+    }
+
+    @Test func bcdScanScreenShape() throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        let (fields, status) = try stsFields(rig)
+        #expect(fields[0] == Array("00110110110000".utf8))
+        #expect(status.lines.count == 14)
+        for line in status.lines {
+            #expect(line.text.utf8.count == 24, "\(line.text.debugDescription)")
+        }
+        // Exact masks: `_` across all 24 columns on lines 2, 5, 8 and 12, none on the others.
+        for (index, line) in status.lines.enumerated() {
+            let masked: Set<Int> = [1, 4, 7, 11]
+            let expected = masked.contains(index) ? String(repeating: "_", count: 24) : ""
+            #expect(line.highlightMask == expected, "line \(index + 1): \(line.highlightMask.debugDescription)")
+        }
+        #expect(status.trailing == ["1", "1", "0", "0", "", "", "0", "OFF", "0"])
+        #expect(fields.allSatisfy { $0.allSatisfy { $0 < 0x80 } }, "no glyph bytes while idle")
+        #expect(status.lines[3].text.contains("ID Searching..."))
+    }
+
+    @Test func bcdScanScreenGlyphsOnACall() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let (fields, status) = try stsFields(rig)
+        #expect(status.lines.count == 14)
+        let text = (0..<14).map { fields[1 + 2 * $0] }
+        for (index, line) in text.enumerated() {
+            #expect(line.count == 24)
+            let glyphs = line.prefix { $0 >= 0x80 }.count
+            let high = line.filter { $0 >= 0x80 }.count
+            #expect(high == glyphs, "glyphs sit in the first columns")
+            #expect(glyphs == (index == 0 ? 2 : index == 4 ? 4 : 0), "line \(index + 1)")
+        }
+        #expect(Array(text[0].prefix(2)) == [0x8A, 0x8B])
+        #expect(status.trailing == ["1", "0", "0", "0", "", "", "5", "OFF", "0"])
+    }
+
+    @Test func bcdMenuScreenShape() throws {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("KEY,M,P") == "KEY,OK\r")
+        let (fields, status) = try stsFields(rig)
+        #expect(fields[0] == Array("1111111111".utf8))
+        #expect(status.lines.count == 10)
+        for line in status.lines { #expect(line.text.utf8.count == 24) }
+        #expect(status.lines[0].highlightMask == String(repeating: "_", count: 24))
+        #expect(status.lines.contains { $0.highlightMask == String(repeating: "*", count: 24) })
+    }
+
+    @Test func bcdGSIProperty() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let gsi = try #require(rig.reply("GSI"))
+        #expect(gsi.contains("Rssi=\"0.812\""), "\(gsi)")
+        #expect(!gsi.contains("Battery"))
+        guard case .xml("GSI", let root)? = assemble(Data(gsi.utf8)).first else {
+            Issue.record("GSI: \(gsi)")
+            return
+        }
+        #expect(try ScannerInfo(xml: root).rssi == nil)
+    }
+
+    @Test func sdsScreensUnchanged() throws {
+        let rig = CoreRig(.sds100, at: 0)
+        let (_, status) = try stsFields(rig)
+        #expect(status.lines.count == 17)
+        for line in status.lines { #expect(line.text.utf8.count == 30) }
+        let gsi = try #require(CoreRig(.sds150, at: 3).reply("GSI"))
+        #expect(gsi.contains("Rssi=\"-62\""))
+    }
+
+    // MARK: MNU, MSB, HLD and the hold keys (design §3.5, §3.5a, §5.7)
+
+    private func holdAttribute(_ gsi: String, _ tag: String) -> String? {
+        guard let line = gsi.components(separatedBy: "\r").first(where: { $0.hasPrefix("<\(tag) ") }),
+              let range = line.range(of: "Hold=\"") else { return nil }
+        return String(line[range.upperBound...].prefix { $0 != "\"" })
+    }
+
+    private func gsiText(_ rig: CoreRig) -> String { rig.reply("GSI") ?? "" }
+
+    private func index(_ gsi: String, _ tag: String) -> String? {
+        MockScreens.shownIndex(gsi, tag: tag, lineBreak: "\r")
+    }
+
+    @Test func bcdMenuCommands() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("MSB,,") == "MSB,NG\r")
+        #expect(rig.reply("MNU,TOP,") == "MNU,OK\r")
+        #expect(rig.core.sync { $0.menu.isActive })
+        #expect(rig.reply("MNU,SETTINGS,") == "MNU,NG\r")
+        #expect(rig.reply("KEY,E,P") == "KEY,OK\r")  // opens a submenu
+        let deep = rig.core.sync { $0.menu.path.count }
+        #expect(deep == 2)
+        #expect(rig.reply("MSB,,") == "MSB,OK\r")
+        #expect(rig.core.sync { $0.menu.path.count } == deep - 1)
+        #expect(rig.reply("MSB,,RETURN_PREVOUS_MODE") == "MSB,OK\r")
+        #expect(!rig.core.sync { $0.menu.isActive })
+        #expect(rig.reply("MSB,,") == "MSB,NG\r")
+        #expect(rig.reply("MSB,,RETURN_PREVOUS_MODE") == "MSB,NG\r")
+    }
+
+    @Test func sdsMocksRefuseBCDCommands() {
+        for personality in [MockPersonality.sds100, .sds150, .sds200] {
+            let rig = CoreRig(personality)
+            for command in ["MNU,TOP,", "MSB,,", "MSB,,RETURN_PREVOUS_MODE", "HLD,SYS,101,"] {
+                #expect(rig.reply(command) == "ERR\r", "\(personality.reportedModel) \(command)")
+            }
+            #expect(!rig.core.sync { $0.menu.isActive })
+            #expect(rig.core.sync { $0.holds.isEmpty })
+        }
+    }
+
+    @Test func bcdHLDTogglesBySystemIndex() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let before = try #require(rig.reply("GSI"))
+        let system = try #require(index(before, "System"))
+        let mode = before.components(separatedBy: "\r").first { $0.hasPrefix("<ScannerInfo") }
+        #expect(holdAttribute(before, "System") == "Off")
+        #expect(rig.reply("HLD,SYS,\(system),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "System") == "On")
+        #expect(held.components(separatedBy: "\r").first { $0.hasPrefix("<ScannerInfo") } == mode)
+        #expect(rig.core.sync { $0.holds } == ["SYS:\(system)"])
+        #expect(rig.reply("HLD,SYS,\(system),") == "HLD,OK\r")
+        #expect(holdAttribute(gsiText(rig), "System") == "Off")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        // A department hold names its parent system and leaves Mode alone.
+        let department = try #require(index(before, "Department"))
+        #expect(rig.reply("HLD,DEPT,\(department),\(system)") == "HLD,OK\r")
+        let heldDept = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(heldDept, "Department") == "On")
+        #expect(holdAttribute(heldDept, "System") == "Off")
+    }
+
+    @Test func bcdHLDChannelChangesMode() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        let before = try #require(rig.reply("GSI"))
+        let tgid = try #require(index(before, "TGID"))
+        #expect(before.contains("Mode=\"Trunk Scan\""))
+        #expect(rig.reply("HLD,TGID,\(tgid),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "TGID") == "On")
+        #expect(held.contains("Mode=\"Trunk Scan Hold\""), "\(held)")
+        #expect(rig.reply("HLD,TGID,\(tgid),") == "HLD,OK\r")
+        let released = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(released, "TGID") == "Off")
+        #expect(released.contains("Mode=\"Trunk Scan\""))
+    }
+
+    @Test func bcdHLDConventionalChannel() throws {
+        let rig = CoreRig(.bcd436hp, at: 3, scenario: conventionalScenario)
+        let gsi = try #require(rig.reply("GSI"))
+        let channel = try #require(index(gsi, "ConvFrequency"))
+        #expect(rig.reply("HLD,CFREQ,\(channel),") == "HLD,OK\r")
+        let held = try #require(rig.reply("GSI"))
+        #expect(holdAttribute(held, "ConvFrequency") == "On")
+        #expect(held.contains("Mode=\"Scan Mode Hold\""), "\(held)")
+    }
+
+    @Test func bcdHLDUnknownIndex() throws {
+        let rig = CoreRig(.bcd436hp, at: 3)
+        #expect(rig.reply("HLD,SYS,999999,") == "HLD,NG\r")
+        #expect(rig.reply("HLD,BOGUS,101,") == "HLD,NG\r")
+        #expect(rig.reply("HLD,SYS,,") == "HLD,NG\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+    }
+
+    @Test func bcdHoldKeys() throws {
+        let rig = CoreRig(.bcd436hp, at: 2.5)
+        let first = try #require(rig.reply("GSI"))
+        let system = try #require(index(first, "System"))
+        // One press: nothing yet, then held once the 2 s pause has passed on the mock's clock.
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        rig.clock.advance(by: 1.9)
+        #expect(holdAttribute(gsiText(rig), "System") == "Off")
+        rig.clock.advance(by: 0.2)
+        #expect(holdAttribute(gsiText(rig), "System") == "On")
+        #expect(rig.core.sync { $0.holds } == ["SYS:\(system)"])
+        // Two presses 0.1 s apart toggle at once (releasing it).
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        rig.clock.advance(by: 0.1)
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        #expect(rig.core.sync { $0.holds.isEmpty })
+        rig.clock.advance(by: 5)  // the cancelled single press doesn't fire later
+        #expect(rig.core.sync { $0.holds.isEmpty })
+    }
+
+    @Test func bcdDepartmentDoublePressAndChannelKey() throws {
+        let rig = CoreRig(.bcd436hp, at: 2.5)
+        let gsi = try #require(rig.reply("GSI"))
+        let department = try #require(index(gsi, "Department"))
+        let tgid = try #require(index(gsi, "TGID"))
+        _ = rig.reply("KEY,B,P")
+        rig.clock.advance(by: 0.1)
+        _ = rig.reply("KEY,B,P")
+        #expect(rig.core.sync { $0.holds } == ["DEPT:\(department)"])
+        // One Channel press toggles at once, and the next releases it.
+        _ = rig.reply("KEY,C,P")
+        #expect(rig.core.sync { $0.holds.sorted() } == ["DEPT:\(department)", "TGID:\(tgid)"])
+        #expect(gsiText(rig).contains("Mode=\"Trunk Scan Hold\""))
+        _ = rig.reply("KEY,C,P")
+        #expect(rig.core.sync { $0.holds } == ["DEPT:\(department)"])
+    }
+
+    @Test func sdsHoldKeysDoNothing() {
+        let rig = CoreRig(.sds100, at: 2.5)
+        #expect(rig.reply("KEY,A,P") == "KEY,OK\r")
+        rig.clock.advance(by: 5)
+        #expect(rig.core.sync { $0.holds.isEmpty && $0.pendingHold == nil })
+    }
+}

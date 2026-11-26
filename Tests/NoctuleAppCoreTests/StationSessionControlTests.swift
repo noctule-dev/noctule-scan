@@ -671,3 +671,227 @@ private final class Box<Value> { var value: Value? }
         #expect(outcome.leaked == [])
     }
 }
+
+// MARK: Hold by HLD on the BCD436HP (Plan 23 Task 8)
+
+private func holdInfo(_ body: String, mode: String = "Scan Mode", screen: String = "trunk_scan") throws -> ScannerInfo {
+    try ScannerInfo(xml: XMLNode.parse(Data("<ScannerInfo Mode=\"\(mode)\" V_Screen=\"\(screen)\">\(body)</ScannerInfo>".utf8)))
+}
+
+private let holdSystem = "<System Name=\"Fictional\" Index=\"101\" Hold=\"Off\"/>"
+private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
+
+@MainActor
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionHoldCommandTests {
+    @Test func holdTargetMapsEachLevel() throws {
+        let trunk = try holdInfo(holdSystem + holdDept + "<TGID Name=\"TG\" Index=\"1000\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.system, info: trunk) == .system(index: 101))
+        #expect(StationSession.holdTarget(.department, info: trunk) == .department(index: 200, system: 101))
+        #expect(StationSession.holdTarget(.channel, info: trunk) == .trunkChannel(index: 1000))
+        let conv = try holdInfo(holdSystem + holdDept + "<ConvFrequency Name=\"C\" Index=\"1000\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.channel, info: conv) == .conventionalChannel(index: 1000))
+        #expect(StationSession.holdTarget(.system, info: nil) == nil)
+        let noDept = try holdInfo(holdSystem)
+        #expect(StationSession.holdTarget(.department, info: noDept) == nil)
+        #expect(StationSession.holdTarget(.channel, info: noDept) == nil)
+    }
+
+    @Test func noHoldTargetForAnUnprogrammedTalkgroup() throws {
+        let info = try holdInfo(holdSystem + holdDept + "<TGID Name=\"\" Index=\"4294967295\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.channel, info: info) == nil)
+        #expect(StationSession.holdTarget(.system, info: info) == .system(index: 101))
+    }
+
+    @Test func noHoldInAMenu() throws {
+        let info = try holdInfo(holdSystem + holdDept + "<TGID Name=\"TG\" Index=\"1000\" Hold=\"Off\"/>",
+                                mode: "Menu Tree", screen: "menu_selection")
+        for level in HoldLevel.allCases { #expect(StationSession.holdTarget(level, info: info) == nil) }
+    }
+
+    // MARK: Keys per model (design §5.11)
+
+    private func keysSent(_ setup: USBSetup, _ keys: [FrontPanelKey], expecting expected: Int) async throws -> [String] {
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            for key in keys { rig.session.press(key) }
+            // Presses are queued one at a time: wait for the expected ones, then settle briefly
+            // so a key that should not be sent has the time to show.
+            try await waitUntil("the expected keys", .seconds(10)) {
+                await rig.commands.filter { $0.hasPrefix("KEY") }.count >= expected
+            }
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        return outcome.commands.filter { $0.hasPrefix("KEY") }
+    }
+
+    @Test func bcdPressesItsOwnKeysOnly() async throws {
+        let sent = try await keysSent(bcdSetup(), [.serviceType, .squelchPush, .scrollPush, .soft1], expecting: 2)
+        #expect(sent == ["KEY,^,P", "KEY,A,P"])
+    }
+
+    @Test func sds100DropsServicesAndSquelchPushKeepsRange() async throws {
+        var setup = USBSetup()
+        setup.personality = .sds100
+        let sent = try await keysSent(setup, [.serviceType, .squelchPush, .range], expecting: 1)
+        #expect(sent == ["KEY,R,P"])
+    }
+
+    @Test func sds150DropsRange() async throws {
+        let sent = try await keysSent(USBSetup(), [.range, .serviceType, .zip], expecting: 1)
+        #expect(sent == ["KEY,Z,P"])
+    }
+
+    @Test func sds200StillSendsServices() async throws {
+        let outcome = try await withSession { rig in
+            rig.start()
+            try await rig.waitConnected()
+            rig.session.press(.serviceType)
+            try await waitUntil("KEY,T,P") { await rig.commands.contains("KEY,T,P") }
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    /// The model `MDL` names wins over a station's override: an SDS100 behind a BCD436HP override
+    /// still gets the SDS keys, its menu by `KEY`, no `HLD` and the SDS layout (`MNU`, `MSB` and
+    /// `HLD` are never sent to an SDS model).
+    @Test func detectedModelWinsOverTheOverride() async throws {
+        var setup = USBSetup()
+        setup.personality = .sds100
+        setup.modelOverride = .bcd436hp
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            #expect(rig.session.model == .sds100)
+            #expect(rig.session.menu.navigation == .keys)
+            #expect(rig.session.display?.layout == .sds)
+            rig.session.hold(.system)
+            _ = try await rig.session.menu.enter()
+            try await waitUntil("KEY,M,P") { await rig.commands.contains("KEY,M,P") }
+            _ = try await rig.session.menu.exit()
+            try await waitUntil("KEY,L,P") { await rig.commands.contains("KEY,L,P") }
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("MNU") || $0.hasPrefix("MSB") || $0.hasPrefix("HLD") })
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    private func bcdSetup() -> USBSetup {
+        var setup = USBSetup()
+        setup.personality = .bcd436hp
+        return setup
+    }
+
+    @Test func holdSendsOneHLDAndTheNextPushShowsIt() async throws {
+        let outcome = try await withUSBSession(bcdSetup()) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            let system = try #require(rig.session.info?.system?.index)
+            #expect(rig.session.canHold(.system))
+            rig.session.hold(.system)
+            try await waitUntil("HLD sent") { await rig.received("HLD") == 1 }
+            try await waitUntil("the push shows the hold") { rig.session.info?.system?.hold == true }
+            #expect(await rig.commands.contains("HLD,SYS,\(system),"))
+            #expect(await rig.mock.holds == ["SYS:\(system)"])
+            try await waitUntil("flag clear") { rig.session.canHold(.system) }
+            rig.session.hold(.system)
+            try await waitUntil("released") { rig.session.info?.system?.hold == false }
+            #expect(await rig.received("HLD") == 2)
+            #expect(await rig.received("KEY") == 0)
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    /// Between a Menu click and the re-read that shows the menu, a Hold click sends no `HLD`
+    /// behind the `MNU`.
+    @Test func noHoldWhileAMenuActionRuns() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["MNU": .milliseconds(600)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            #expect(rig.session.canHold(.system))
+            let entering = Task { @MainActor in _ = try? await rig.session.menu.enter() }
+            try await waitUntil("the menu action runs") { rig.session.menu.isBusy }
+            #expect(!rig.session.canHold(.system), "a menu action is in flight")
+            rig.session.hold(.system)
+            _ = await entering.value
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    @Test func doubleClickSendsOneHLD() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["HLD": .milliseconds(600)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            rig.session.hold(.system)
+            #expect(!rig.session.canHold(.system), "in flight")
+            rig.session.hold(.system)
+            rig.session.hold(.department)
+            try await waitUntil("the flag clears after the reply") { rig.session.canHold(.system) }
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 1)
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    /// The HLD waits for the request slot behind a slow `STS`; the stop closes the gate first, so
+    /// once it holds the slot it writes nothing.
+    @Test func holdAfterStopSendsNothing() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["STS": .seconds(2)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            try await waitUntil("an STS holds the slot") { await rig.received("STS") >= 1 }
+            #expect(rig.session.canHold(.system))
+            rig.session.hold(.system)
+            try await Task.sleep(for: .milliseconds(100))
+            try await rig.stopSession()
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+            #expect(!rig.session.warnings.contains { $0.contains("couldn't hold") }, "\(rig.session.warnings)")
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+
+    @Test func unprogrammedTalkgroupDisablesChannelOnASession() async throws {
+        let outcome = try await withUSBSession(bcdSetup()) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            var found = false
+            for _ in 0..<200 where !found {
+                if rig.session.info?.channel?.index == ScannerInfo.unprogrammedIndex { found = true; break }
+                rig.clock.advance(by: 0.5)
+                try await Task.sleep(for: .milliseconds(60))
+            }
+            try #require(found, "the scenario's unprogrammed talkgroup never showed")
+            #expect(!rig.session.canHold(.channel))
+            rig.session.hold(.channel)
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+
+    @Test func sdsHoldUnchanged() async throws {
+        let outcome = try await withSession { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await waitUntil("display") { rig.session.display != nil }
+            rig.session.hold(.system)
+            try await waitUntil("KEY,A,P") { await rig.commands.contains("KEY,A,P") }
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+}

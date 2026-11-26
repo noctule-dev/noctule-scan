@@ -25,11 +25,12 @@ The design notes, protocol notes and plans behind Noctule Scan, in the order the
 **The app and its menus**
 - [`2026-11-10-remote-menus-design.md`](2026-11-10-remote-menus-design.md): driving the scanner's menus remotely (`KEY`, `MSI`, `MSV`) and showing them in the app.
 
-**USB and the SDS100, SDS150 and SDS200**
+**USB and the SDS100, SDS150, SDS200 and BCD436HP**
 - [`2026-11-11-sds150-usb-design.md`](2026-11-11-sds150-usb-design.md): the SDS150 over USB serial: the command line, then the app; hardware checks and results.
 - [`2026-11-13-sds150-future-features-and-enhancements.md`](2026-11-13-sds150-future-features-and-enhancements.md): ideas for the SDS150 that were not built.
 - [`2026-11-13-sds200-100ms-design.md`](2026-11-13-sds200-100ms-design.md): giving the SDS200 the SDS150's rates: `PSI,100` and `STS` every 100 ms.
 - [`2026-11-16-sds100-usb-design.md`](2026-11-16-sds100-usb-design.md): the SDS100 over USB, on the SDS150's stack.
+- [`2026-11-25-bcd436hp-usb-design.md`](2026-11-25-bcd436hp-usb-design.md): the BCD436HP over USB, on the same stack: its keep-alive, its menu commands (`MNU`, `MSB`) its 24-column screen and Hold by `HLD`.
 
 **Line-in audio**
 - [`2026-11-17-usb-line-in-audio-design.md`](2026-11-17-usb-line-in-audio-design.md): audio for USB scanners from the headphone jack through a Mac audio input.
@@ -75,3 +76,4 @@ Each plan was the step-by-step implementation plan for one piece of work. They s
 - [`2026-11-18-plan-20-quick-keys.md`](2026-11-18-plan-20-quick-keys.md): Plan 20, Favorites quick keys.
 - [`2026-11-20-plan-21-open-source-prep.md`](2026-11-20-plan-21-open-source-prep.md): Plan 21, taking Noctule Scan public (done 2026-11-22; Results at the end).
 - [`2026-11-22-plan-22-update-check.md`](2026-11-22-plan-22-update-check.md): Plan 22, checking GitHub for a newer release (design: [`2026-11-22-update-check-design.md`](2026-11-22-update-check-design.md)).
+- [`2026-11-25-plan-23-bcd436hp-usb.md`](2026-11-25-plan-23-bcd436hp-usb.md): Plan 23, the BCD436HP over USB (design: [`2026-11-25-bcd436hp-usb-design.md`](2026-11-25-bcd436hp-usb-design.md); built against the mock, hardware session pending).

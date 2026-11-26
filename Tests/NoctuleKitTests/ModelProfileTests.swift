@@ -19,11 +19,48 @@ import Testing
         #expect(!sds100.hasNetworkAudio); #expect(!sds100.supportsRemoteRestart)
         #expect(!sds100.supportsChargeStatus); #expect(sds100.usbProductIDs == [0x001A])
 
-        for model in [ScannerModel.bcd436hp] {
-            let p = ModelProfile.profile(for: model)
-            #expect(!p.hasNetworkAudio, "\(model)"); #expect(!p.supportsRemoteRestart, "\(model)")
-            #expect(!p.supportsChargeStatus, "\(model)"); #expect(p.usbProductIDs == [], "\(model)")
+    }
+
+    /// The BCD436HP (design §5.1): on the SDS handhelds' stack, with its own menu commands and no soft keys.
+    @Test func bcd436hpProfile() {
+        let p = ModelProfile.profile(for: .bcd436hp)
+        #expect(p.volumeRange == 0...15 && p.squelchRange == 0...15)
+        #expect(p.pushKeepAlive == PushKeepAlive(action: .renewSubscription, interval: .seconds(60)))
+        #expect(p.pushInterval == .milliseconds(100) && p.displayRefreshInterval == .milliseconds(100))
+        #expect(p.supportsQuickKeys && !p.supportsChargeStatus && !p.supportsRemoteRestart && !p.hasNetworkAudio)
+        #expect(p.usbProductIDs == [0x001A] && !p.protocolVerifiedOnHardware)
+        #expect(p.display == .bcd436hp && p.menuNavigation == .menuCommands && p.holdMethod == .holdCommand)
+        #expect(p.frontPanelKeys == Set(FrontPanelKey.allCases).subtracting([.serviceType, .squelchPush]))
+        #expect(p.destructiveMenuItems == .bcd436hp)
+        #expect(p.encoderPushCaption == "Vol")
+    }
+
+    @Test(arguments: [ScannerModel.sds200, .sds150, .sds100])
+    func sdsModelsKeepTheirData(model: ScannerModel) {
+        let p = ModelProfile.profile(for: model)
+        #expect(p.display == .sds && p.display.columns == 30 && p.display.hasSoftKeyLine)
+        #expect(p.menuNavigation == .keys && p.holdMethod == .softKeyLabel)
+    }
+
+    /// The handhelds' panels (design §5.11): keys a model lacks are not offered, and the encoder push is captioned.
+    @Test func handheldPanels() {
+        let all = Set(FrontPanelKey.allCases)
+        let sds200 = ModelProfile.profile(for: .sds200)
+        #expect(sds200.frontPanelKeys == all && sds200.encoderPushCaption == "Func")
+        let sds100 = ModelProfile.profile(for: .sds100)
+        #expect(sds100.frontPanelKeys == all.subtracting([.serviceType, .squelchPush]) && sds100.encoderPushCaption == "Vol")
+        let sds150 = ModelProfile.profile(for: .sds150)
+        #expect(sds150.frontPanelKeys == all.subtracting([.serviceType, .squelchPush, .range])
+                && sds150.encoderPushCaption == "Vol")
+    }
+
+    @Test func bcd436hpDestructiveItems() {
+        let d = DestructiveMenuItems.bcd436hp
+        for name in ["Clear User Data", "Reset User Settings", "Stop All Avoiding", "Set All Lists Off", "Set All Lists On",
+                     "Clear All ID Avoids", "Reset to Factory", "Delete Site", "Initialize Value"] {
+            #expect(d.contains(name), "\(name)")
         }
+        #expect(!d.contains("Set Clock"))
     }
 
     /// The keep-alive a subscription passes: the model's, over a serial link only, with an
@@ -40,10 +77,12 @@ import Testing
         #expect(PushKeepAlive.forSubscription(reportedModel: "SDS100", overSerial: true, interval: .milliseconds(400))
                 == PushKeepAlive(action: .renewSubscription, interval: .milliseconds(400)))
         #expect(PushKeepAlive.forSubscription(reportedModel: "SDS100", overSerial: false) == nil)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "BCD436HP", overSerial: true) == renewal)
+        #expect(PushKeepAlive.forSubscription(reportedModel: "BCD436HP", overSerial: false) == nil)
         // Never over the network, and never to a model without one, whatever the override.
         #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: false) == nil)
         #expect(PushKeepAlive.forSubscription(reportedModel: "SDS150", overSerial: false, interval: .seconds(1)) == nil)
-        for reported in ["SDS200", "BCD436HP", "UBC9999", ""] {
+        for reported in ["SDS200", "UBC9999", ""] {
             #expect(PushKeepAlive.forSubscription(reportedModel: reported, overSerial: true) == nil, "\(reported)")
             #expect(PushKeepAlive.forSubscription(reportedModel: reported, overSerial: true, interval: .seconds(1)) == nil,
                     "\(reported)")
@@ -80,24 +119,18 @@ import Testing
     }
 
     /// How often a subscription asks for pushes (`PSI,<ms>`): 100 ms on the SDS150 (sustained on
-    /// hardware, 2026-11-13), the SDS200 and the SDS100, 500 ms on the BCD436HP.
+    /// hardware, 2026-11-13), the SDS200, the SDS100 and the BCD436HP.
     @Test func pushIntervals() {
-        for model in [ScannerModel.sds150, .sds200, .sds100] {
+        for model in ScannerModel.allCases {
             #expect(ModelProfile.profile(for: model).pushInterval == .milliseconds(100), "\(model)")
-        }
-        for model in [ScannerModel.bcd436hp] {
-            #expect(ModelProfile.profile(for: model).pushInterval == .milliseconds(500), "\(model)")
         }
     }
 
     /// The shortest gap between two `STS` reads while the screen changes: 100 ms on the SDS150 and
-    /// the SDS200 and the SDS100 (their push interval, so a scan's every step is read), 1 s on the BCD436HP.
+    /// the SDS200 and the SDS100 and the BCD436HP (their push interval, so a scan's every step is read).
     @Test func displayRefreshIntervals() {
-        for model in [ScannerModel.sds150, .sds200, .sds100] {
+        for model in ScannerModel.allCases {
             #expect(ModelProfile.profile(for: model).displayRefreshInterval == .milliseconds(100), "\(model)")
-        }
-        for model in [ScannerModel.bcd436hp] {
-            #expect(ModelProfile.profile(for: model).displayRefreshInterval == .seconds(1), "\(model)")
         }
     }
 

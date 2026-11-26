@@ -6,9 +6,9 @@ import NoctuleAppCore
 import NoctuleKit
 import SwiftUI
 
-/// Mac-native controls under the front panel: Hold (a menu of the soft keys labelled SYSTEM,
-/// DEPT and CHANNEL), Avoid, Listen (playback on or off), Logging (pause or resume logging and
-/// recording; the designer's "Record"), and the app's own volume. While the scanner is in a menu,
+/// Mac-native controls under the front panel: Hold (a menu of System, Department and Channel: an SDS
+/// model presses the soft key with that label, the BCD436HP sends `HLD`), Avoid, Listen (playback
+/// on or off), Logging (pause or resume logging and recording; the designer's "Record"), and the app's own volume. While the scanner is in a menu,
 /// Hold and Avoid are off (Avoid leaves the menu on the scanner; remote menus design §5.3); the
 /// Scanner view's keypad Avoid still works, as on the radio. A station without audio (a USB
 /// station; SDS150 design §7.2) has no Listen and no app volume. A USB station with a line-in has

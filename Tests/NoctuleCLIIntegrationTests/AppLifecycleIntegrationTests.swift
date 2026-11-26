@@ -574,6 +574,111 @@ private func openFiles(of pid: Int32) async -> String? {
         #expect(run.cooldownFiles.isEmpty, "\(run.cooldownFiles)")
     }
 
+    // MARK: A BCD436HP on the serial mock (Plan 23 Task 10)
+
+    /// What the app must never send a BCD436HP by itself: `KAL`, `GCS`, `MSM`, `POF`, and (it
+    /// sends them only from a click) every `KEY`, `MSV`, `MNU`, `MSB` and `HLD`.
+    private func bcdForbidden(_ commands: [String]) -> [String] {
+        commands.filter { command in
+            ["KAL", "GCS", "MSM", "POF", "KEY", "MSV", "MNU", "MSB", "HLD"].contains { command.hasPrefix($0) }
+        }
+    }
+
+    /// The app on a mock BCD436HP: `MDL`, `VER`, `PSI,100`, the display's `STS`; SIGTERM ends it in
+    /// order (exit 0 within 15 s, `PSI,0` last, no subscription left), with no `KAL`, `GCS`, `MSM`,
+    /// `POF` or any state-changing command, and no cooldown record.
+    @Test func usbAppRunsABCD436HPAndQuitsCleanly() async throws {
+        let run = try await USBAppRun.make()
+        defer { run.cleanUp() }
+        let mock = try await SerialMock.launch(link: run.link, model: "bcd436hp")
+        var app: Subprocess?
+        do {
+            let launched = try run.launchApp()
+            app = launched
+            let subscribed = await waitForLog(mock, within: 30) { $0.contains("control: PSI,100") }
+            guard subscribed else {
+                Issue.record("the mock never saw PSI,100; mock: \(mock.process.stderr) app: \(launched.stderr)")
+                throw CocoaError(.featureUnsupported)
+            }
+            let read = await waitForLog(mock, within: 10) { $0.contains("control: STS") }
+            #expect(read, "mock: \(mock.process.stderr)")
+            let stopped = await terminate(launched, within: 15) { mock.process.stderr }
+            app = nil
+            #expect(stopped.exited, "the app didn't exit within 15 s; app: \(stopped.stderr)")
+            #expect(stopped.status == 0, "exit status \(stopped.status); app: \(stopped.stderr)")
+            #expect(SerialMock.commands(in: stopped.seen).last == "PSI,0", "\(stopped.seen)")
+        } catch let error as CocoaError where error.code == .featureUnsupported {
+            // Already recorded.
+        } catch {
+            Issue.record(error)
+        }
+        if let app {
+            app.kill()
+            _ = await app.finish()
+        }
+        await mock.shutdown()  // `active-subscriptions=0`
+        let commands = mock.commands
+        #expect(Array(commands.prefix(3)) == ["MDL", "VER", "PSI,100"], "\(commands)")
+        #expect(commands.last == "PSI,0", "\(commands)")
+        #expect(commands.filter { $0 == "PSI,0" }.count == 1, "\(commands)")
+        #expect(commands.contains("STS"), "\(commands)")
+        #expect(bcdForbidden(commands) == [], "\(commands)")
+        #expect(run.cooldownFiles == [], "\(run.cooldownFiles)")
+    }
+
+    /// The BCD436HP is in its menu when the app starts (the test puts it there with one `MNU,TOP,`
+    /// on the mock's port before the app opens it): the app reads the menu (`GSI`, `MSI`) and
+    /// quitting sends the scanner nothing to leave it: no `KEY,L,P`, no `MSB`, no `MSV`.
+    @Test func usbAppQuitsWhileABCD436HPIsInItsMenu() async throws {
+        let run = try await USBAppRun.make()
+        defer { run.cleanUp() }
+        let mock = try await SerialMock.launch(link: run.link, model: "bcd436hp")
+        var app: Subprocess?
+        do {
+            // The mock's own pseudo-terminal behind the test's temporary link (never a real port).
+            try #require(run.link.path.hasPrefix(run.root.path + "/"))
+            let fd = open(run.link.path, O_RDWR | O_NOCTTY)
+            try #require(fd >= 0, "couldn't open the mock's port")
+            let command = Array("MNU,TOP,\r".utf8)
+            _ = command.withUnsafeBufferPointer { write(fd, $0.baseAddress, $0.count) }
+            let entered = await waitForLog(mock, within: 10) { $0.contains("control: MNU,TOP,") }
+            close(fd)
+            guard entered else {
+                Issue.record("the mock never saw MNU,TOP,; mock: \(mock.process.stderr)")
+                throw CocoaError(.featureUnsupported)
+            }
+            let launched = try run.launchApp()
+            app = launched
+            let read = await waitForLog(mock, within: 30) { $0.contains("control: MSI") }
+            guard read else {
+                Issue.record("the app never read the menu (MSI); mock: \(mock.process.stderr) app: \(launched.stderr)")
+                throw CocoaError(.featureUnsupported)
+            }
+            let stopped = await terminate(launched, within: 15) { mock.process.stderr }
+            app = nil
+            #expect(stopped.exited, "the app didn't exit within 15 s; app: \(stopped.stderr)")
+            #expect(stopped.status == 0, "exit status \(stopped.status); app: \(stopped.stderr)")
+        } catch let error as CocoaError where error.code == .featureUnsupported {
+            // Already recorded.
+        } catch {
+            Issue.record(error)
+        }
+        if let app {
+            app.kill()
+            _ = await app.finish()
+        }
+        await mock.shutdown()  // `active-subscriptions=0`
+        let commands = mock.commands
+        #expect(commands.filter { $0 == "MNU,TOP," }.count == 1, "only the test's own: \(commands)")
+        #expect(commands.last == "PSI,0", "\(commands)")
+        #expect(!commands.contains("KEY,L,P"), "\(commands)")
+        #expect(!commands.contains { $0.hasPrefix("MSB") || $0.hasPrefix("MSV") || $0.hasPrefix("KEY") || $0.hasPrefix("HLD") },
+                "\(commands)")
+        #expect(!commands.contains { $0.hasPrefix("KAL") || $0.hasPrefix("GCS") || $0.hasPrefix("MSM") || $0.hasPrefix("POF") },
+                "\(commands)")
+        #expect(run.cooldownFiles.isEmpty, "\(run.cooldownFiles)")
+    }
+
     // MARK: A USB station with a line-in (Plan 18 Task 14)
 
     /// A fictional audio input saved in the station; nothing in Core Audio has it.

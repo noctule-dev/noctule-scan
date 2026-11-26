@@ -182,6 +182,14 @@ final class ControlCore: @unchecked Sendable {
     /// mock's `unplug-after-psi` starts its clock here.
     var nextSubscription: (@Sendable () -> Void)?
     var menu = MockMenu()
+    /// The BCD436HP's holds, `"<LEVEL>:<index>"` (`SYS`, `DEPT`, `TGID`, `CFREQ`).
+    var holds: Set<String> = []
+    /// A single `KEY,A|B,P` press waiting out the 2 s pause before it holds (BCD436HP).
+    var pendingHold: (key: String, item: String, pressedAt: Double)?
+    /// How long a single System or Department press waits before it holds (hardware: 2 s).
+    static let holdPause = 2.0
+    /// Two presses this close count as a double-press. Assumed: 0.5 s (hardware: at least 95 ms).
+    static let doublePressWindow = 0.5
     var favorites = MockFavorites.default
     var dropReply: String?
     var dropReplyRemaining = 0
@@ -231,6 +239,8 @@ final class ControlCore: @unchecked Sendable {
             rebooting = false
             answering = true
             menu = MockMenu()
+            holds = []
+            pendingHold = nil
         }
     }
 
@@ -283,8 +293,8 @@ final class ControlCore: @unchecked Sendable {
         case ("VOL", 0):
             reply("VOL,\(volume)", to: peer)
         case ("VOL", 1):
-            if let level = Int(args[0]), personality.volumeRange.contains(level) {
-                volume = level
+            if let level = Int(args[0]), personality.clampsLevels || personality.volumeRange.contains(level) {
+                volume = min(max(level, personality.volumeRange.lowerBound), personality.volumeRange.upperBound)
                 reply("VOL,OK", to: peer)
             } else {
                 reply("VOL,NG", to: peer)
@@ -292,8 +302,8 @@ final class ControlCore: @unchecked Sendable {
         case ("SQL", 0):
             reply("SQL,\(squelch)", to: peer)
         case ("SQL", 1):
-            if let level = Int(args[0]), personality.squelchRange.contains(level) {
-                squelch = level
+            if let level = Int(args[0]), personality.clampsLevels || personality.squelchRange.contains(level) {
+                squelch = min(max(level, personality.squelchRange.lowerBound), personality.squelchRange.upperBound)
                 reply("SQL,OK", to: peer)
             } else {
                 reply("SQL,NG", to: peer)
@@ -305,16 +315,56 @@ final class ControlCore: @unchecked Sendable {
         case ("MSV", 2...) where args[0].isEmpty:
             reply(menu.setValue(args.dropFirst().joined(separator: ",")) ? "MSV,OK" : "MSV,NG", to: peer)
         case ("STS", 0) where menu.isActive:
-            reply(menu.statusFields() + Data("\r".utf8), to: peer)
+            let narrow = personality.displayForm == .bcd436hp
+            reply(menu.statusFields(columns: narrow ? 24 : 30, glyphBytes: personality.displayGlyphBytes) + Data("\r".utf8),
+                  to: peer)
         case ("STS", 0):
             let now = clock.now
+            if personality.displayForm == .bcd436hp {
+                reply(MockScreens.bcdDisplay(scenario.moment(at: now), scenario: scenario, seconds: now,
+                                             glyphBytes: personality.displayGlyphBytes) + Data("\r".utf8), to: peer)
+                return
+            }
             let screen = MockScreens.display(scenario.moment(at: now), scenario: scenario, volume: volume,
                                              squelch: squelch, seconds: now, glyphBytes: personality.displayGlyphBytes)
             reply(screen + Data("\r".utf8), to: peer)
+        case ("MNU", _) where personality.bcdCommands:
+            if args.count == 2, args[0] == "TOP", args[1].isEmpty {
+                menu.enterTop()
+                reply("MNU,OK", to: peer)
+            } else {
+                reply("MNU,NG", to: peer)
+            }
+        case ("MSB", 2) where personality.bcdCommands && args[0].isEmpty:
+            let done: Bool
+            switch args[1] {
+            case "": done = menu.back()
+            case "RETURN_PREVOUS_MODE": done = menu.leave()
+            default: done = false
+            }
+            reply(done ? "MSB,OK" : "MSB,NG", to: peer)
+        case ("MSB", _) where personality.bcdCommands:
+            reply("MSB,NG", to: peer)
+        case ("HLD", 3) where personality.bcdCommands:
+            settleHolds()
+            let match = MockScreens.holdLevels.first { $0.level == args[0] }
+            guard let match, !args[1].isEmpty,
+                  MockScreens.shows(plainScannerInfoXML(), tag: match.tag, index: args[1],
+                                    lineBreak: personality.xmlLineBreak) else {
+                reply("HLD,NG", to: peer)
+                return
+            }
+            toggleHold("\(match.level):\(args[1])")
+            reply("HLD,OK", to: peer)
+        case ("KEY", 2) where personality.bcdCommands && !menu.isActive && ["A", "B", "C"].contains(args[0].uppercased())
+            && args[1].uppercased() == "P":
+            pressHoldKey(args[0].uppercased())
+            reply("KEY,OK", to: peer)
         case ("KEY", 2):
             let known = Set(["M", "F", "L", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "E",
                              ">", "<", "^", "V", "Q", "Y", "A", "B", "C", "Z", "T", "R"])
-            guard known.contains(args[0].uppercased()), args[1].uppercased() == "P" else {
+            guard known.contains(args[0].uppercased()), !personality.missingKeys.contains(args[0].uppercased()),
+                  args[1].uppercased() == "P" else {
                 reply("KEY,NG", to: peer)
                 return
             }
@@ -365,10 +415,56 @@ final class ControlCore: @unchecked Sendable {
 
     private func scannerInfoXML() -> String {
         if menu.isActive { return menu.scannerInfoXML(lineBreak: personality.xmlLineBreak) }
+        settleHolds()
+        return MockScreens.applyHolds(plainScannerInfoXML(), holds: holds, lineBreak: personality.xmlLineBreak)
+    }
+
+    /// The scan screen's `ScannerInfo` with nothing held.
+    private func plainScannerInfoXML() -> String {
         let now = clock.now
         return MockScreens.scannerInfoXML(scenario.moment(at: now), scenario: scenario, volume: volume, squelch: squelch,
                                           lineBreak: personality.xmlLineBreak,
-                                          idleForm: personality.idleForm, seconds: now)
+                                          idleForm: personality.idleForm, seconds: now,
+                                          decimalRssi: personality.displayForm == .bcd436hp)
+    }
+
+    // MARK: Holds (BCD436HP)
+
+    func toggleHold(_ item: String) {
+        if !holds.insert(item).inserted { holds.remove(item) }
+    }
+
+    /// Carries out a single System or Department press whose 2 s pause has passed on the mock's clock.
+    func settleHolds() {
+        guard let pending = pendingHold, clock.now - pending.pressedAt >= Self.holdPause else { return }
+        pendingHold = nil
+        toggleHold(pending.item)
+    }
+
+    /// `KEY,A|B|C,P`: Channel toggles at once; System and Department toggle at once on a second
+    /// press inside the double-press window, else after the 2 s pause. A press names the item the
+    /// moment shows; with none shown it does nothing.
+    private func pressHoldKey(_ key: String) {
+        settleHolds()
+        let (level, tag) = key == "A" ? ("SYS", "System") : ("DEPT", "Department")
+        let xml = plainScannerInfoXML()
+        let lineBreak = personality.xmlLineBreak
+        if key == "C" {
+            if let index = MockScreens.shownIndex(xml, tag: "TGID", lineBreak: lineBreak) {
+                toggleHold("TGID:\(index)")
+            } else if let index = MockScreens.shownIndex(xml, tag: "ConvFrequency", lineBreak: lineBreak) {
+                toggleHold("CFREQ:\(index)")
+            }
+            return
+        }
+        guard let index = MockScreens.shownIndex(xml, tag: tag, lineBreak: lineBreak) else { return }
+        let item = "\(level):\(index)"
+        if let pending = pendingHold, pending.key == key, clock.now - pending.pressedAt <= Self.doublePressWindow {
+            pendingHold = nil
+            toggleHold(item)
+        } else {
+            pendingHold = (key, item, clock.now)
+        }
     }
 
     // MARK: Push

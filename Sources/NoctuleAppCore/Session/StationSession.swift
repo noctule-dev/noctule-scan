@@ -29,7 +29,8 @@ public enum SessionPhase: Equatable, Sendable {
     case stopped
 }
 
-/// The scanner's hold levels, each pressed through the soft key with that label.
+/// The scanner's hold levels: an SDS model presses the soft key with that label, the BCD436HP
+/// sends `HLD` by index.
 public enum HoldLevel: Sendable, CaseIterable {
     case system, department, channel
 
@@ -39,6 +40,15 @@ public enum HoldLevel: Sendable, CaseIterable {
         case .system: "SYSTEM"
         case .department: "DEPT"
         case .channel: "CHANNEL"
+        }
+    }
+
+    /// The level's name in a warning.
+    var holdName: String {
+        switch self {
+        case .system: "system"
+        case .department: "department"
+        case .channel: "channel"
         }
     }
 }
@@ -339,6 +349,9 @@ public final class StationSession {
     // Internal so tests can see the queue is gone (nil) while a USB scanner is away.
     @ObservationIgnored var keyTask: Task<Void, Never>?
     @ObservationIgnored var keyGate: KeyGate?
+    /// True while a BCD436HP `HLD` waits for its reply: a second click sends nothing, and
+    /// `canHold` is false. Observed, so the controls disable.
+    private(set) var holdInFlight = false
     /// Observed (unlike the rest of the run state) because views read `model`, which reads it.
     private var detectedModel: ScannerModel?
     @ObservationIgnored private var levelGenerations: [Level: Int] = [:]
@@ -700,6 +713,7 @@ public final class StationSession {
             detectedModel = ScannerModel(reported: model)
             startLiveLoops(runner)
             menu.destructiveItems = ModelProfile.profile(for: self.model).destructiveMenuItems
+            menu.navigation = ModelProfile.profile(for: self.model).menuNavigation
             menu.attach(control: { await runner.control() })
             let known = detectedModel ?? station.connection.modelOverride
             let hasQuickKeys = known.map { ModelProfile.profile(for: $0).supportsQuickKeys } ?? false
@@ -940,7 +954,9 @@ public final class StationSession {
             do {
                 let status = try await client.displayStatus()
                 guard !Task.isCancelled else { return }
-                display = DisplayModel(status: status, info: info)
+                // The layout follows the model once `MDL` names it (`detectedModel` is set before this
+                // loop starts), so a screen is never built with the wrong layout.
+                display = DisplayModel(status: status, info: info, layout: ModelProfile.profile(for: model).display)
             } catch {
                 // A missed or garbled reply: the next scheduled fetch tries again.
             }
@@ -1057,9 +1073,11 @@ public final class StationSession {
     public var model: ScannerModel { detectedModel ?? station.connection.modelOverride ?? .sds200 }
 
     /// Presses a front-panel key (`KEY,<code>,P`) through the run's `KeyPressQueue`, in order, one
-    /// at a time. Ignored unless connected; dropped while `maxQueuedKeys` are pending.
+    /// at a time. Ignored unless connected; dropped while `maxQueuedKeys` are pending, and dropped
+    /// when the model lacks the key (`ModelProfile.frontPanelKeys`; design §5.11).
     public func press(_ key: FrontPanelKey) {
-        guard isConnected, let keyInput else { return }
+        guard isConnected, let keyInput,
+              ModelProfile.profile(for: model).frontPanelKeys.contains(key) else { return }
         keyInput.yield(key)
     }
 
@@ -1079,16 +1097,65 @@ public final class StationSession {
     /// Sets the scanner's squelch (`SQL,<n>`), like `setScannerVolume(_:)`.
     public func setScannerSquelch(_ value: Int) { setLevel(.squelch, value) }
 
-    /// Presses the soft key labelled `SYSTEM`, `DEPT` or `CHANNEL` on the current display.
-    /// Does nothing when `canHold(level)` is false.
+    /// Holds the system, department or channel on the display. An SDS model presses the soft key
+    /// carrying the level's label (`KEY`); the BCD436HP, which has no soft keys, sends one
+    /// `HLD,<level>,<index>,` for the element the last push shows (design §3.5a): never resent,
+    /// refused while another `HLD` is in flight, withheld once the session's stop begins, and with
+    /// no extra `GSI` after it (the next push shows the hold). Does nothing when `canHold(level)`
+    /// is false.
     public func hold(_ level: HoldLevel) {
-        guard isConnected, let key = Self.holdKey(level, display: display) else { return }
-        press(key)
+        switch ModelProfile.profile(for: model).holdMethod {
+        case .softKeyLabel:
+            guard isConnected, let key = Self.holdKey(level, display: display) else { return }
+            press(key)
+        case .holdCommand:
+            guard canHold(level), let target = Self.holdTarget(level, info: info), let gate = keyGate else { return }
+            holdInFlight = true
+            Task { [weak self] in
+                // Only the run that set the flag clears it: a reconnect's run has its own gate.
+                defer { if let self, self.keyGate === gate || self.keyGate == nil { self.holdInFlight = false } }
+                guard let runner = self?.runner, let client = await runner.control() else { return }
+                do {
+                    try await client.hold(target, onlyIf: { gate.isOpen })
+                } catch ScannerClientError.withheld {
+                } catch {
+                    // A stop closing the transport under the reply is not a failed hold.
+                    guard gate.isOpen else { return }
+                    self?.handle(.warning("couldn't hold the \(level.holdName): \(error)"))
+                }
+            }
+        }
     }
 
-    /// True while connected and a soft key on the current display carries the level's label.
+    /// True while connected and the level can be held: an SDS model's display has a soft key with
+    /// the level's label; on the BCD436HP, no `HLD` is in flight and the last push names the
+    /// element (`holdTarget`).
     public func canHold(_ level: HoldLevel) -> Bool {
-        isConnected && Self.holdKey(level, display: display) != nil
+        guard isConnected else { return false }
+        switch ModelProfile.profile(for: model).holdMethod {
+        case .softKeyLabel: return Self.holdKey(level, display: display) != nil
+        case .holdCommand: return !holdInFlight && !menu.isBusy && keyGate != nil && Self.holdTarget(level, info: info) != nil
+        }
+    }
+
+    /// The `HLD` target for a level on the scanner's last push: nil with no push, in a menu, with
+    /// the element or its index missing, for an unprogrammed index (an idle talkgroup of 4294967295
+    /// is never sent), or for a channel that is neither a `TGID` nor a `ConvFrequency`.
+    static func holdTarget(_ level: HoldLevel, info: ScannerInfo?) -> HoldTarget? {
+        guard let info, !info.isMenu, let system = info.system, let systemIndex = system.index,
+              system.isProgrammed else { return nil }
+        switch level {
+        case .system:
+            return .system(index: systemIndex)
+        case .department:
+            guard let index = info.department?.index, info.department?.isProgrammed == true else { return nil }
+            return .department(index: index, system: systemIndex)
+        case .channel:
+            guard let channel = info.channel, let index = channel.index, channel.isProgrammed else { return nil }
+            if info.raw.child("TGID") != nil { return .trunkChannel(index: index) }
+            if info.raw.child("ConvFrequency") != nil { return .conventionalChannel(index: index) }
+            return nil
+        }
     }
 
     static func holdKey(_ level: HoldLevel, display: DisplayModel?) -> FrontPanelKey? {
@@ -1126,6 +1193,7 @@ public final class StationSession {
     /// Closes the gate (keys still queued are dropped) and ends the feeder. Synchronous, so it can
     /// be a stop's first step.
     func stopKeyQueue() {
+        holdInFlight = false
         keyGate?.close()
         keyGate = nil
         keyInput?.finish()

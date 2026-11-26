@@ -106,10 +106,13 @@ public enum CLIFormat {
     }
 
     /// Non-blank display lines (trailing spaces trimmed), then the soft-key labels.
-    public static func display(_ status: DisplayStatus) -> [String] {
-        var out = status.lines.dropLast()
+    /// A model with no soft-key line prints every line and no `soft keys:` line.
+    public static func display(_ status: DisplayStatus, layout: DisplayLayout = .sds) -> [String] {
+        let shown = layout.hasSoftKeyLine ? Array(status.lines.dropLast()) : status.lines
+        var out = shown
             .map { $0.text.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+        guard layout.hasSoftKeyLine else { return out }
         out.append("soft keys: " + status.softKeyLabels.joined(separator: " | "))
         return out
     }

@@ -312,6 +312,8 @@ struct USBSetup {
     var batteryPollInterval: Duration? = nil
     /// The mock's personality (`pushLifetime` is applied on top of it).
     var personality: MockPersonality = .sds150
+    /// The station's model override (nil: none).
+    var modelOverride: ScannerModel? = nil
     /// The input saved in the station's device settings (nil: none).
     var lineIn: LineInConfig? = nil
     /// The environment's line-in factory (tests: `FakeLineInSources`; nil: none).
@@ -456,6 +458,7 @@ func withUSBSession(_ setup: USBSetup = USBSetup(), _ body: (USBRig) async throw
     var station = Station()
     station.name = "Test Handheld"
     station.connection.transport = setup.transport
+    station.connection.modelOverride = setup.modelOverride
     let settings = LocalSettingsStore(directory: dir)
     try await settings.save(station)
     var device = StationDeviceSettings(stationID: station.id)

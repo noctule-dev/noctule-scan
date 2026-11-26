@@ -17,12 +17,14 @@ public enum MockScannerModel: String, Sendable, Equatable {
     case sds200
     case sds150
     case sds100
+    case bcd436hp
 
     public var personality: MockPersonality {
         switch self {
         case .sds200: .sds200
         case .sds150: .sds150
         case .sds100: .sds100
+        case .bcd436hp: .bcd436hp
         }
     }
 }
@@ -78,7 +80,7 @@ public struct MockScannerArguments: Sendable, Equatable {
                                     [--cooldown-seconds S] [--cooldown-after any|unclean]
                                     [--reboot-seconds S] [--wedge-mode timeout|refuse]
                                     [--no-delays] [--glt-page-size N] [--start-at S] [--verbose]
-               noctule-mock-scanner --serial [--model sds200|sds150|sds100] [--serial-link PATH] [--mdl-name NAME]
+               noctule-mock-scanner --serial [--model sds200|sds150|sds100|bcd436hp] [--serial-link PATH] [--mdl-name NAME]
                                     [--push-lifetime S] [--kal-after-expiry restarts|ignored]
                                     [--line-out PATH [--line-out-channel left|right|both]]
                                     [--scenario default|weather|PATH] [--glt-page-size N] [--start-at S]
@@ -90,19 +92,19 @@ public struct MockScannerArguments: Sendable, Equatable {
         hardware's hazards. It prints `udp-port=P` and `rtsp-port=P`, runs until Ctrl-C, then prints
         `leaked-sessions=N` (RTSP sessions that never got a TEARDOWN). Ports default to ephemeral ones.
 
-        With --serial, a mock scanner on a pseudo-terminal instead (an SDS150 or SDS100 on USB with --model
-        sds150 or sds100), and no UDP or RTSP server. It prints `serial-port=PATH` (the link, with --serial-link), runs until
+        With --serial, a mock scanner on a pseudo-terminal instead (an SDS150, SDS100 or BCD436HP on USB with --model
+        sds150, sds100 or bcd436hp), and no UDP or RTSP server. It prints `serial-port=PATH` (the link, with --serial-link), runs until
         Ctrl-C, then prints `active-subscriptions=N` (anything but 0: a client left a PSI running).
 
           --scenario           built-in `default` (fictional trunk traffic) or `weather`, or a JSON file
-          --model              sds200 (default), sds150 or sds100; the handhelds have no network port, so they need
+          --model              sds200 (default), sds150, sds100 or bcd436hp; the handhelds have no network port, so they need
                                --serial
           --serial             serve on a pseudo-terminal
           --serial-link PATH   a symlink to the pty that stays put across an unplug and replug; a symlink
                                already there is replaced, anything else is an error
           --mdl-name NAME      what MDL reports (say SDS150GBT, the form Uniden's spec gives)
-          --push-lifetime S    --model sds150 or sds100 only: PSI pushes stop S s (a positive number) after
-                               the PSI or the latest KAL (SDS150) or PSI (SDS100), in place of the 183 s
+          --push-lifetime S    --model sds150, sds100 or bcd436hp only: PSI pushes stop S s (a positive number) after
+                               the PSI or the latest KAL (SDS150) or PSI (SDS100, BCD436HP), in place of the 183 s
                                seen on hardware (KAL kept the SDS150 pushing for an hour, a repeated PSI
                                the SDS100; that each restarts the full count is assumed); the
                                subscription stays until PSI,0
@@ -263,13 +265,16 @@ public struct MockScannerArguments: Sendable, Equatable {
                 throw misuse("--fault \(form)=N:M (replug) needs --serial-link")
             }
             if pushLifetime != nil, model == .sds200 {
-                throw misuse("--push-lifetime needs --model sds150 or sds100 (the SDS200 has no push lifetime)")
+                throw misuse("--push-lifetime needs --model sds150, sds100 or bcd436hp (the SDS200 has no push lifetime)")
             }
             if keepAliveRevivesStoppedPushes != nil, model == .sds200 {
                 throw misuse("--kal-after-expiry needs --model sds150 (the mock's SDS200 has no push lifetime and answers KAL with ERR)")
             }
             if keepAliveRevivesStoppedPushes != nil, model == .sds100 {
                 throw misuse("--kal-after-expiry needs --model sds150 (the SDS100 answers KAL with ERR)")
+            }
+            if keepAliveRevivesStoppedPushes != nil, model == .bcd436hp {
+                throw misuse("--kal-after-expiry needs --model sds150 (the BCD436HP answers KAL with ERR)")
             }
             return
         }

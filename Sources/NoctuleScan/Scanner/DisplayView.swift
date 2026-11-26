@@ -15,19 +15,25 @@ extension Color {
 /// A menu screen is drawn the same way; underlined segments are a menu title.
 struct DisplayView: View {
     let display: DisplayModel?
+    /// The model's screen: its columns size the screen, and a model with no soft-key line gets no
+    /// soft-key buttons (hidden, not disabled).
+    var layout: DisplayLayout = .sds
+    /// The model's keys: a model with no soft-key line but soft keys 1–3 (the BCD436HP) gets its
+    /// fixed System, Dept and Channel keys in their place.
+    var keys: Set<FrontPanelKey> = Set(FrontPanelKey.allCases)
     let palette: DisplayPalette
     /// Shown in place of the rows when there is no display yet (connecting, no answer, …).
     let placeholder: String
     let keysEnabled: Bool
     let press: (FrontPanelKey) -> Void
 
-    static let columns = 30
     static var baseSize: CGFloat { DisplayRowsView.baseSize }
 
     var body: some View {
         VStack(spacing: 10) {
             screen
-            softKeys
+            if layout.hasSoftKeyLine { softKeys }
+            else if Self.showsFixedKeys(layout: layout, keys: keys) { fixedKeyRow }
         }
     }
 
@@ -44,7 +50,7 @@ struct DisplayView: View {
                     .padding()
             }
         }
-        .frame(width: Self.screenWidth, height: Self.screenHeight)
+        .frame(width: Self.screenWidth(columns: layout.columns), height: Self.screenHeight)
         .padding(7)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.black))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
@@ -52,8 +58,8 @@ struct DisplayView: View {
         .accessibilityLabel("Scanner display")
     }
 
-    /// Wide enough for 30 columns of the base font.
-    static var screenWidth: CGFloat { CGFloat(columns) * baseSize * 0.6 + 20 }
+    /// Wide enough for `columns` columns of the base font.
+    static func screenWidth(columns: Int) -> CGFloat { CGFloat(columns) * baseSize * 0.6 + 20 }
     static let screenHeight: CGFloat = 318
 
     /// The soft key's face: a bullet for an icon, the capitalised label, or a space when blank.
@@ -61,6 +67,33 @@ struct DisplayView: View {
         guard let key else { return " " }
         if key.isGlyph { return "•" }
         return key.label.isEmpty ? " " : key.label.capitalized
+    }
+
+    /// The BCD436HP's printed keys under its screen: `KEY,A|B|C` (its System, Dept and Channel).
+    static let fixedKeys: [PanelKey] = [
+        PanelKey(key: .soft1, label: "System", caption: nil),
+        PanelKey(key: .soft2, label: "Dept", caption: nil),
+        PanelKey(key: .soft3, label: "Channel", caption: nil),
+    ]
+
+    static func showsFixedKeys(layout: DisplayLayout, keys: Set<FrontPanelKey>) -> Bool {
+        !layout.hasSoftKeyLine && keys.isSuperset(of: [.soft1, .soft2, .soft3])
+    }
+
+    private var fixedKeyRow: some View {
+        HStack(spacing: 12) {
+            ForEach(Self.fixedKeys) { fixed in
+                Button { press(fixed.key) } label: {
+                    Text(fixed.label)
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PanelKeyStyle(height: 24))
+                .disabled(!keysEnabled)
+                .accessibilityLabel(fixed.label)
+            }
+        }
+        .frame(width: Self.screenWidth(columns: layout.columns) + 14)
     }
 
     private var softKeys: some View {
@@ -79,7 +112,7 @@ struct DisplayView: View {
                 .help(label.isEmpty ? "Soft key \(index + 1)" : "Soft key \(index + 1): \(label)")
             }
         }
-        .frame(width: Self.screenWidth + 14)
+        .frame(width: Self.screenWidth(columns: layout.columns) + 14)
     }
 }
 /// The rows of a scanner screen as `DisplayView` draws them (monospaced, large rows at 1.6×,

@@ -206,6 +206,6 @@ private func onEveryMock(
         #expect(ModelProfile.profile(for: .sds200).supportsQuickKeys)
         #expect(ModelProfile.profile(for: .sds150).supportsQuickKeys)
         #expect(ModelProfile.profile(for: .sds100).supportsQuickKeys)
-        #expect(!ModelProfile.profile(for: .bcd436hp).supportsQuickKeys)
+        #expect(ModelProfile.profile(for: .bcd436hp).supportsQuickKeys)
     }
 }

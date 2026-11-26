@@ -42,7 +42,7 @@ private func info(_ attrs: String = "", inner: String = "") throws -> ScannerInf
         #expect(sds200.menuMinInterval == policy.menuMinInterval && sds200.menuIdleInterval == policy.menuIdleInterval
                 && sds200.menuMaxKeyDeferral == policy.menuMaxKeyDeferral)
         #expect(DisplayRefreshPolicy(model: .sds100).minInterval == .milliseconds(100))
-        #expect(DisplayRefreshPolicy(model: .bcd436hp).minInterval == .seconds(1))
+        #expect(DisplayRefreshPolicy(model: .bcd436hp).minInterval == .milliseconds(100))
     }
 
     @Test func policyForcesMaxInterval() {

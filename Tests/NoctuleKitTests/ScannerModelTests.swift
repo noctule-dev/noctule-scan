@@ -26,7 +26,7 @@ import Testing
         #expect(b.volumeRange == 0...15); #expect(b.squelchRange == 0...15)
         #expect(b.transports == [.usbSerial, .bluetooth]); #expect(b.protocolVerifiedOnHardware)
         let c = ModelProfile.profile(for: .bcd436hp)
-        #expect(c.volumeRange == nil); #expect(c.squelchRange == nil)
+        #expect(c.volumeRange == 0...15); #expect(c.squelchRange == 0...15)
         #expect(c.transports == [.usbSerial]); #expect(!c.protocolVerifiedOnHardware)
         for m in ScannerModel.allCases { #expect(ModelProfile.profile(for: m).model == m) }
     }
@@ -44,6 +44,6 @@ import Testing
             #expect(d.contains(name), "\(name)")
         }
         for name in ["Set All Lists", "Review Avoids", "Undelete"] { #expect(!d.contains(name), "\(name)") }
-        for m in ScannerModel.allCases { #expect(ModelProfile.profile(for: m).destructiveMenuItems == d) }
+        for m in [ScannerModel.sds100, .sds150] { #expect(ModelProfile.profile(for: m).destructiveMenuItems == d) }
     }
 }

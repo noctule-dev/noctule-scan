@@ -33,7 +33,8 @@ import Foundation
 /// conventional scan (no SDS150 `STS` of a scan is captured), with three icon glyph bytes
 /// (`displayGlyphBytes`: 0x80, 0x81, 0x8D) at columns 0-2 of its first line: that the SDS150 draws
 /// icons as lone bytes like these, one per column, and which bytes it uses, is assumed (design
-/// §7.3; the hardware suite's read-only run measures the widths on the real unit).
+/// §7.3; the hardware suite's read-only run measures the widths on the real unit). It answers `KEY` with a code it lacks (`T`, `Q`, `R`) with `KEY,NG`
+/// (design §5.11; assumed, not hardware).
 ///
 /// - `.sds100`: the SDS100 over USB serial (SDS100 design §3, §5.4; fw 1.26.01, the owner's run of
 ///   2026-11-16). Seen on hardware: `MDL` `SDS100`; `VER` `1.26.01` (its `Version ` prefix is the
@@ -51,8 +52,35 @@ import Foundation
 /// `ERR`, as `KAL` is (the real answer wasn't usable; the product never sends `GCS` to an SDS100);
 /// `MSM,1` answered `MSM,NG` with nothing else happening, never sent; that each icon glyph takes
 /// one column (the hardware suite measures it, design §7 H1); and every scenario, menu, conventional
-/// and trunk shape, fault, unplug and replug, taken from the SDS150 mock's. The push lifetime's
+/// and trunk shape, fault, unplug and replug, taken from the SDS150 mock's; and that a `KEY` with a code
+/// it lacks (`T`, `Q`) is answered `KEY,NG` (design §5.11). The push lifetime's
 /// assumptions are in the next paragraph.
+///
+/// - `.bcd436hp`: the BCD436HP over USB serial (BCD436HP design §3, §5.7). Seen on hardware:
+///   `MDL` `BCD436HP`; the push lifetime of the SDS100's kind; `KAL` doing nothing useful; an
+///   out-of-range `VOL`/`SQL` set clamped and answered `OK` (`clampsLevels`); a `<Footer No="1"
+///   EOT="1"/>` on an `MSI` document (`xmlFooter`; `GSI` and pushes carry none); icon glyph bytes
+///   only during a transmission, 2 on line 1 and 4 on line 5, none while idle (only their counts
+///   were seen, design §3.6). It has no `T` or `Q` key (`missingKeys`; design §5.11). Seen too:
+///   `MNU,TOP,` and `MSB` (`MSB,,` back one level, `MSB,,RETURN_PREVOUS_MODE` leaving, `MSB,NG`
+///   outside a menu), `HLD` as a toggle by index for `SYS`, `DEPT` and `TGID`, a single `KEY,A,P`
+///   holding the System 2 s later, a double press holding or releasing it, and `KEY,C,P` toggling
+///   the channel at once, with ` Hold` on `Mode` for a channel only (design §3.5, §3.5a).
+///
+/// **Assumptions, not hardware** (BCD436HP): `VER`'s `Version ` prefix; `KAL` and `GCS` answered
+/// `ERR`; `MSM,1` answered `MSM,NG` with nothing else happening; that every `PSI` restarts the full
+/// 183 s; the glyph byte values (fictional); `GSI` and `PSI` without a footer; that a key the radio
+/// lacks is answered `KEY,NG` (the SDS100 and SDS150 `missingKeys` too, design §5.11); the
+/// scan screen's fictional line layout and text, a number entry's value mask spanning all 24
+/// columns, and `Rssi` as 0.1624 x the signal bars; the `MNU` ids other than `TOP` answered `MNU,NG`;
+/// `MSB,,` at the top menu staying there; an `MSB` of any other shape, or an `HLD` of an unknown
+/// level or an index the moment doesn't show, answered `NG`; `HLD`'s parent argument ignored;
+/// `HLD` accepted inside a menu (checked against the hidden scan screen); `HLD,CFREQ` toggling
+/// like the others (never tried); the double-press window of 0.5 s (hardware: at least 95 ms), a single System or
+/// Department press holding after 2 s on the mock's clock (a second press inside the window
+/// cancelling it), and a hold lasting until toggled off (the radio would lose a trunked channel's
+/// when the call ends); the SDS models answering `MNU`, `MSB` and `HLD` `ERR`; and the
+/// menus, scenarios, faults, unplug and replug, copied from the other serial mocks.
 ///
 /// **The push lifetime** (SDS150; `pushLifetime`, `pushLifetimeRestarts`, `silentCommands`). Seen
 /// on hardware (fw 1.01.02, 2026-11-12): pushes stop 183 s after the `PSI` (three timed runs), the
@@ -140,6 +168,25 @@ public struct MockPersonality: Sendable, Equatable {
     /// Commands the model takes without any reply (logged and carried out, nothing sent back);
     /// every other command it doesn't know is answered `ERR`.
     public var silentCommands: Set<String>
+    /// True: an out-of-range `VOL`/`SQL` set is clamped to the model's range and answered `OK`
+    /// (the BCD436HP, design §3); false: it is answered `NG` and changes nothing.
+    public var clampsLevels: Bool
+    /// Front-panel key codes the model has no key for: `KEY,<code>,P` is answered `KEY,NG`
+    /// (design §5.11; assumed that the radio answers so).
+    public var missingKeys: Set<String>
+    /// True: the model has the BCD436HP's `MNU`, `MSB` and `HLD` commands and its System, Dept and
+    /// Channel keys (`KEY,A|B|C,P`); every other model answers the commands `ERR`.
+    public var bcdCommands: Bool
+    /// The form of `STS` and `GSI`'s display text (Task 3 gives `.bcd436hp` behaviour).
+    public var displayForm: DisplayForm
+
+    /// Which family's display the mock draws.
+    public enum DisplayForm: Sendable, Equatable {
+        /// The SDS models': 4 lines of 20+ columns with soft keys.
+        case sds
+        /// The BCD436HP's: 24 columns, no soft-key line.
+        case bcd436hp
+    }
 
     /// What an idle moment of a trunk-mode scenario looks like in `ScannerInfo` (a weather
     /// scenario's idle is the same under every personality).
@@ -164,7 +211,9 @@ public struct MockPersonality: Sendable, Equatable {
                 xmlFooter: Bool, xmlLineBreak: String, chargeStatusReply: String?, restartReboots: Bool,
                 idleForm: IdleForm = .trunkSite,
                 pushLifetime: Double? = nil, pushLifetimeRestarts: Set<String> = [], silentCommands: Set<String> = [],
-                keepAliveRevivesStoppedPushes: Bool = true, displayGlyphBytes: [UInt8] = []) {
+                keepAliveRevivesStoppedPushes: Bool = true, displayGlyphBytes: [UInt8] = [],
+                clampsLevels: Bool = false, missingKeys: Set<String> = [], bcdCommands: Bool = false,
+                displayForm: DisplayForm = .sds) {
         self.reportedModel = reportedModel; self.firmware = firmware
         self.volumeRange = volumeRange; self.squelchRange = squelchRange
         self.xmlFooter = xmlFooter; self.xmlLineBreak = xmlLineBreak
@@ -174,6 +223,8 @@ public struct MockPersonality: Sendable, Equatable {
         self.silentCommands = silentCommands
         self.keepAliveRevivesStoppedPushes = keepAliveRevivesStoppedPushes
         self.displayGlyphBytes = displayGlyphBytes
+        self.clampsLevels = clampsLevels; self.missingKeys = missingKeys
+        self.bcdCommands = bcdCommands; self.displayForm = displayForm
     }
 
     public static let sds200 = MockPersonality(
@@ -186,7 +237,7 @@ public struct MockPersonality: Sendable, Equatable {
         xmlFooter: false, xmlLineBreak: "\r", chargeStatusReply: "GCS,CST=4,VOLT=4184mV:100%,CURR=0000mA,TEMP= 27.65C",
         restartReboots: false, idleForm: .conventionalScan,
         pushLifetime: 183, pushLifetimeRestarts: ["KAL"], silentCommands: ["KAL"],
-        displayGlyphBytes: [0x80, 0x81, 0x8D])
+        displayGlyphBytes: [0x80, 0x81, 0x8D], missingKeys: ["T", "Q", "R"])
 
     /// The SDS100 over USB serial (SDS100 design §3, §5.4). Its keep-alive is a repeated `PSI`
     /// (every `PSI` restarts the lifetime, in the core), so `KAL` is an unknown command: `ERR`,
@@ -195,7 +246,16 @@ public struct MockPersonality: Sendable, Equatable {
         reportedModel: "SDS100", firmware: "Version 1.26.01", volumeRange: 0...15, squelchRange: 0...15,
         xmlFooter: false, xmlLineBreak: "\r", chargeStatusReply: nil, restartReboots: false,
         idleForm: .trunkSite, pushLifetime: 183, pushLifetimeRestarts: [], silentCommands: [],
-        displayGlyphBytes: [0x06, 0x07, 0x1A, 0x1B])
+        displayGlyphBytes: [0x06, 0x07, 0x1A, 0x1B], missingKeys: ["T", "Q"])
+
+    /// The BCD436HP over USB serial (BCD436HP design §3, §5; fw 1.28.24). Its keep-alive is a
+    /// repeated `PSI` as the SDS100's is, so `KAL` is an unknown command (`ERR`).
+    public static let bcd436hp = MockPersonality(
+        reportedModel: "BCD436HP", firmware: "Version 1.28.24", volumeRange: 0...15, squelchRange: 0...15,
+        xmlFooter: true, xmlLineBreak: "\r", chargeStatusReply: nil, restartReboots: false,
+        idleForm: .trunkSite, pushLifetime: 183, pushLifetimeRestarts: [], silentCommands: [],
+        displayGlyphBytes: [0x8A, 0x8B], clampsLevels: true, missingKeys: ["T", "Q"],
+        bcdCommands: true, displayForm: .bcd436hp)
 
     /// This personality, reporting `scenario`'s model and firmware (the UDP mock's identity).
     func reporting(_ scenario: MockScenario) -> MockPersonality {

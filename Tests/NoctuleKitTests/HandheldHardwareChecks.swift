@@ -11,7 +11,7 @@ import NoctuleMockScanner
 @testable import NoctuleKit
 
 // The checks the handhelds' opt-in hardware suites run over USB serial (`SDS150HardwareTests`,
-// `SDS100HardwareTests`), and what their mock twins share: each check takes the model it expects,
+// `SDS100HardwareTests`, `BCD436HPHardwareTests`), and what their mock twins share: each check takes the model it expects,
 // and the port's path (the hardware suites pass the one `resolvePort(for:)` finds, the mock-backed
 // tests their pty).
 //
@@ -30,7 +30,7 @@ enum HandheldHardwareCheckError: Error, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .wrongModel(let expected, let reported):
-            "MDL answered \(reported), not an \(expected.rawValue); nothing more was sent"
+            "MDL answered \(reported), not \(expected == .bcd436hp ? "a" : "an") \(expected.rawValue); nothing more was sent"
         case .noPort(let why): why
         }
     }
@@ -103,12 +103,17 @@ enum HandheldHardwareChecks {
         /// The `Battery` attribute of the `GSI` document's `Property` element as written; nil when
         /// it has none.
         var batteryAttribute: String?
+        /// `STS`'s form: each line's size flag in order (digits), never text.
+        var displayForm: String = ""
+        /// The attribute names of `GSI`'s `Property` element, sorted; never their values.
+        var propertyAttributeNames: [String] = []
     }
 
     /// `MDL`, `VER`, `VOL`, `SQL`, `GSI`, `STS`, one each and in that order, then the port is
     /// closed. `MDL` must name `expected` (for the SDS150, `SDS150` or `SDS150GBT`), or nothing more
     /// is sent; `VER` is non-empty; `VOL` and `SQL` are within the expected model's ranges; `GSI`
-    /// and `STS` parse, and `STS`'s last line has soft-key labels, has at least two lines, and every
+    /// and `STS` parse, and `STS`'s last line has soft-key labels (a model with no soft-key line, the
+    /// BCD436HP, has none, and its lines are the layout's 24 columns wide with a mask that wide or empty), has at least two lines, and every
     /// line's text and mask are the same width in characters (SDS150 design §7.3: icon glyph bytes
     /// must keep one character per column once decoded, or the highlight shifts); the report holds
     /// the widths and `GSI`'s `Battery` attribute. A reply that fails to come or to parse ends the
@@ -152,18 +157,37 @@ enum HandheldHardwareChecks {
             return false
         }
         var battery: String?
-        if case .xml(_, let root) = gsi { battery = root.child("Property")?.attributes["Battery"] }
+        var propertyNames: [String] = []
+        if case .xml(_, let root) = gsi {
+            battery = root.child("Property")?.attributes["Battery"]
+            propertyNames = (root.child("Property")?.attributes.keys.sorted()) ?? []
+        }
         let display = try await client.displayStatus()
-        #expect(!display.softKeyLabels.isEmpty, "STS's last line has no soft-key labels")
         #expect(display.lines.count >= 2, "STS has \(display.lines.count) line(s)")
+        let layout = profile.display
         for (index, line) in display.lines.enumerated() {
-            // Counts only, never the text.
-            #expect(line.text.count == line.highlightMask.count,
-                    "STS line \(index): text is \(line.text.count) characters, its mask \(line.highlightMask.count)")
+            // Counts only, never the text. The SDS's mask is as wide as its text; the BCD436HP's is
+            // that wide or empty (BCD436HP design §3.6), and its text is the layout's columns wide.
+            if layout.hasSoftKeyLine {
+                #expect(line.text.count == line.highlightMask.count,
+                        "STS line \(index): text is \(line.text.count) characters, its mask \(line.highlightMask.count)")
+            } else {
+                #expect(line.text.count == layout.columns,
+                        "STS line \(index): text is \(line.text.count) characters, not \(layout.columns)")
+                #expect(line.highlightMask.isEmpty || line.highlightMask.count == line.text.count,
+                        "STS line \(index): text is \(line.text.count) characters, its mask \(line.highlightMask.count)")
+            }
+        }
+        // A model whose screen has no soft-key line (the BCD436HP) has no labels: its last line is
+        // an ordinary screen line.
+        let softKeys = layout.hasSoftKeyLine ? display.softKeyLabels : []
+        if layout.hasSoftKeyLine {
+            #expect(!softKeys.isEmpty, "STS's last line has no soft-key labels")
         }
         return ReadOnlyReport(model: reported, firmware: firmware, volume: volume, squelch: squelch,
-                              mode: info.mode, screen: info.screen, softKeys: display.softKeyLabels,
-                              displayWidths: display.lines.map(\.text.count), batteryAttribute: battery)
+                              mode: info.mode, screen: info.screen, softKeys: softKeys,
+                              displayWidths: display.lines.map(\.text.count), batteryAttribute: battery,
+                              displayForm: String(display.lines.map(\.sizeFlag)), propertyAttributeNames: propertyNames)
     }
 
     /// A level range as `0…15` (`none` for a model without one).
