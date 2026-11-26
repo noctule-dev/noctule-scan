@@ -355,7 +355,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
 
     /// `quick-keys` over USB (design §5.3): `MDL`, then reads of the tree and its key states and
     /// nothing else (never a set, `KAL`, `MSM` or `POF`), on both handhelds.
-    @Test(arguments: ["sds150", "sds100"])
+    @Test(arguments: ["sds150", "sds100", "bcd436hp"])
     func quickKeysOverSerial(model: String) async throws {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
@@ -649,6 +649,111 @@ private func lines(_ text: String, containing needle: String) -> [String] {
         #expect(commands.filter { $0 == "PSI,100" }.count >= 6, "\(commands)")
         #expect(commands.filter { $0 == "PSI,0" }.count == 1, "\(commands)")
         #expect(sds100Forbidden(commands) == [], "\(commands)")
+    }
+
+    // MARK: The BCD436HP (Plan 23)
+    //
+    // The BCD436HP is the SDS100's stack with a 24-column screen and no soft-key line, and its own
+    // menu and hold commands. None of these may send it `KAL`, `GCS`, `MSM`, `POF`, `MNU`, `MSB` or
+    // `HLD` (the product sends the last three only from a user's click in the app).
+
+    /// What nothing here may send a BCD436HP.
+    private func bcdForbidden(_ commands: [String]) -> [String] {
+        commands.filter { command in
+            ["KAL", "GCS", "MSM", "POF", "KEY", "MSV", "MNU", "MSB", "HLD"].contains { command.hasPrefix($0) }
+        }
+    }
+
+    @Test func bcd436hpInfo() async throws {
+        let dirs = try SerialDirs()
+        defer { dirs.cleanUp() }
+        let mock = try await SerialMock.launch(link: dirs.link, model: "bcd436hp")
+        do {
+            let info = try await serialNoctule(["info", "--serial", mock.port], dirs)
+            #expect(info.exited && info.status == 0, "\(info.stderr)")
+            #expect(info.stdout.hasPrefix("model: BCD436HP\nfirmware: 1.28.24\nvolume: "), "\(info.stdout)")
+            #expect(lines(info.stdout, containing: "squelch: ").count == 1, "\(info.stdout)")
+            #expect(!info.stdout.contains("battery"), "\(info.stdout)")
+            #expect(info.stderr.isEmpty, "\(info.stderr)")
+        } catch {
+            Issue.record(error)
+        }
+        await mock.shutdown()
+        #expect(mock.commands == ["MDL", "VER", "VOL", "SQL"], "\(mock.commands)")
+    }
+
+    /// `display` reads `MDL` first (for the 24-column layout) and prints the screen's lines with no
+    /// `soft keys:` line, since the BCD436HP's screen has none.
+    @Test func bcd436hpDisplayHasNoSoftKeys() async throws {
+        let dirs = try SerialDirs()
+        defer { dirs.cleanUp() }
+        let mock = try await SerialMock.launch(link: dirs.link, model: "bcd436hp")
+        do {
+            let display = try await serialNoctule(["display", "--serial", mock.port], dirs)
+            #expect(display.exited && display.status == 0, "\(display.stderr)")
+            #expect(!display.stdout.isEmpty, "the screen's lines")
+            #expect(!display.stdout.contains("soft keys:"), "\(display.stdout)")
+            let menu = try await serialNoctule(["menu", "--serial", mock.port], dirs)
+            #expect(menu.exited && menu.status == 0, "\(menu.stderr)")
+            #expect(menu.stdout.contains("type: error"), "\(menu.stdout)")
+        } catch {
+            Issue.record(error)
+        }
+        await mock.shutdown()
+        let commands = mock.commands
+        #expect(commands == ["MDL", "STS", "MSI"], "\(commands)")
+        #expect(bcdForbidden(commands) == [], "\(commands)")
+    }
+
+    /// Renewing `PSI,200` every 0.5 s takes `watch` through 40 updates past the 2 s lifetime; no
+    /// `KAL`, and `PSI,0` last.
+    @Test func bcd436hpWatchKeepsPushingPastTheLifetime() async throws {
+        let dirs = try SerialDirs()
+        defer { dirs.cleanUp() }
+        let mock = try await SerialMock.launch(link: dirs.link, model: "bcd436hp", ["--push-lifetime", "2"])
+        do {
+            let watch = try await serialNoctule(["watch", "--serial", mock.port, "--interval", "200", "--count", "40"],
+                                                dirs, extra: sds100Override)
+            #expect(watch.exited && watch.status == 0, "\(watch.status) \(watch.stderr)")
+            #expect(watch.stdout.split(separator: "\n").count == 40, "\(watch.stdout)")
+            #expect(!watch.stderr.contains("no PSI updates"), "\(watch.stderr)")
+        } catch {
+            Issue.record(error)
+        }
+        await mock.shutdown()
+        let commands = mock.commands
+        #expect(Array(commands.prefix(2)) == ["MDL", "PSI,200"], "\(commands)")
+        #expect(commands.last == "PSI,0", "\(commands)")
+        #expect(commands.dropFirst(1).dropLast().allSatisfy { $0 == "PSI,200" }, "\(commands)")
+        #expect(commands.filter { $0 == "PSI,200" }.count >= 5, "\(commands)")
+        #expect(bcdForbidden(commands) == [], "\(commands)")
+    }
+
+    @Test func bcd436hpLogKeepsPushingPastTheLifetime() async throws {
+        let dirs = try SerialDirs()
+        defer { dirs.cleanUp() }
+        let mock = try await SerialMock.launch(link: dirs.link, model: "bcd436hp", ["--push-lifetime", "2"])
+        do {
+            try await addUSBStation(dirs, port: mock.port)
+            let log = try await serialNoctule(["log", "--seconds", "8"] + dirs.logFlags, dirs, limit: 30,
+                                              extra: sds100Override)
+            #expect(log.exited && log.status == 0, "\(log.status) \(log.stdout) \(log.stderr)")
+            #expect(log.stderr.contains("log: connected to BCD436HP (firmware 1.28.24)\nlog: no audio over USB\n"),
+                    "\(log.stderr)")
+            #expect(!log.stderr.contains("warning:"), "\(log.stderr)")
+            #expect(!log.stderr.contains("subscribing again"), "\(log.stderr)")
+            let files = dirs.files()
+            #expect(!files.contains { $0.contains("cooldown") }, "\(files)")
+        } catch {
+            Issue.record(error)
+        }
+        await mock.shutdown()
+        let commands = mock.commands
+        #expect(Array(commands.prefix(3)) == ["MDL", "VER", "PSI,100"], "\(commands)")
+        #expect(commands.last == "PSI,0", "\(commands)")
+        #expect(commands.filter { $0 == "PSI,100" }.count >= 6, "\(commands)")
+        #expect(commands.filter { $0 == "PSI,0" }.count == 1, "\(commands)")
+        #expect(bcdForbidden(commands) == [], "\(commands)")
     }
 
     /// A stall names the port, and still ends the subscription.

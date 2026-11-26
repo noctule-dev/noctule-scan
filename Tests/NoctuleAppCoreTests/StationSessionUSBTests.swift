@@ -628,6 +628,39 @@ import NoctuleStore
         }
     }
 
+    /// Plan 23 Task 10: a BCD436HP session's level controls stay inside the radio's 0 to 15: a
+    /// value past the top, or below the bottom, is sent clamped, and nothing outside 0...15 is ever
+    /// written (`ModelProfile.volumeRange`, `squelchRange`). No `GCS`, `KAL`, `MNU`, `MSB` or `HLD`.
+    @Test func bcd436hpLevelsNeverLeaveZeroToFifteen() async throws {
+        var setup = USBSetup()
+        setup.personality = .bcd436hp
+        setup.batteryPollInterval = .milliseconds(100)
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            #expect(rig.session.model == .bcd436hp)
+            #expect(rig.session.battery == nil)
+            try await rig.waitForPush()
+            rig.session.setScannerVolume(29)
+            rig.session.setScannerSquelch(99)
+            try await waitUntil("VOL,15 and SQL,15") {
+                let commands = await rig.commands
+                return commands.contains("VOL,15") && commands.contains("SQL,15")
+            }
+            rig.session.setScannerVolume(-4)
+            try await waitUntil("VOL,0") { await rig.commands.contains("VOL,0") }
+        }
+        let levels = outcome.commands.filter { $0.hasPrefix("VOL,") || $0.hasPrefix("SQL,") }
+        for command in levels {
+            let value = Int(command.split(separator: ",").last ?? "")
+            #expect(value.map { (0...15).contains($0) } == true, "\(command) is outside 0...15: \(levels)")
+        }
+        #expect(levels.contains("VOL,15") && levels.contains("SQL,15") && levels.contains("VOL,0"), "\(levels)")
+        #expect(!outcome.commands.contains { $0.hasPrefix("GCS") || $0.hasPrefix("KAL") || $0.hasPrefix("MNU")
+                                              || $0.hasPrefix("MSB") || $0.hasPrefix("HLD") }, "\(outcome.commands)")
+        #expect(outcome.commands.last == "PSI,0", "\(outcome.commands.suffix(5))")
+    }
+
     /// An SDS100 station connects as an SDS150's does, minus the battery: no reading and no `GCS`
     /// however long it runs, and the knobs' 0–15 (a volume or squelch past it is sent as 15).
     @Test func sds100SessionConnectsWithNoBattery() async throws {

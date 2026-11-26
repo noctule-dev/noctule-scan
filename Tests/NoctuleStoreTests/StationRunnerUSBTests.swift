@@ -550,6 +550,19 @@ private func expectSDS100Rules(_ commands: [String], endsWithPSI0: Bool = true,
     if endsWithPSI0 { #expect(commands.last == "PSI,0", "\(commands)", sourceLocation: sourceLocation) }
 }
 
+/// What a BCD436HP must never be sent by the runner (BCD436HP design §5.8): no `KAL`, no `GCS`, no
+/// `MSM`, `POF`, `KEY` or `MSV`, and none of its own menu and hold commands (`MNU`, `MSB`, `HLD`,
+/// sent only from a user's click); and a run that ends connected ends with `PSI,0`.
+private func expectBCD436HPRules(_ commands: [String], endsWithPSI0: Bool = true,
+                                 sourceLocation: SourceLocation = #_sourceLocation) {
+    let forbidden = ["KAL", "GCS", "MSM", "POF", "KEY", "MSV", "MNU", "MSB", "HLD"]
+    let sent = commands.filter { command in forbidden.contains { command == $0 || command.hasPrefix($0 + ",") } }
+    #expect(sent == [], "\(commands)", sourceLocation: sourceLocation)
+    if endsWithPSI0 { #expect(commands.last == "PSI,0", "\(commands)", sourceLocation: sourceLocation) }
+}
+
+private let connectedBCD436HP = RunnerEvent.connected(model: "BCD436HP", firmware: "1.28.24")
+
 private let connectedSDS150 = RunnerEvent.connected(model: "SDS150", firmware: "1.01.02")
 private let connectedSDS100 = RunnerEvent.connected(model: "SDS100", firmware: "1.26.01")
 /// What a runner sends to connect and subscribe (the tests' push interval is 100 ms).
@@ -931,6 +944,79 @@ private let startCommands = ["MDL", "VER", "PSI,100"]
         #expect(commands[resumed...].filter { $0 == "PSI,100" }.count >= 3, "\(commands)")
         #expect(commands.filter { $0 == "MDL" }.count == 2, "\(commands)")
         expectSDS100Rules(commands)
+    }
+
+    /// Plan 23 Task 10: the BCD436HP's renewals that never reach the scanner: its pushes stop at the lifetime, and the D6 rule
+    /// replaces the subscription once (the stall warning, the resubscribe warning, `PSI,0`, the
+    /// "connected but isn't sending" disconnect, `MDL`, `VER` and a fresh `PSI,100`); pushes
+    /// then come again and a hit is logged.
+    @Test func bcd436hpDeadSubscriptionIsReplaced() async throws {
+        var setup = Setup()
+        setup.personality = .bcd436hp
+        setup.keepAliveInterval = .milliseconds(300)
+        let vanish = RenewalsVanish()
+        setup.renewalsVanish = vanish
+        let late = 7 * period  // past the 183 s since the first connection's PSI
+        let outcome = try await withUSBRunner(setup) { rig in
+            try await rig.waitForPush()
+            try await eventually(.seconds(3)) { vanish.renewalsDropped >= 1 }
+            rig.clock.set(late + 0.5)
+            try await rig.waitForConnections(2, limit: .seconds(15))
+            let all = rig.events.all
+            let stalled = try #require(all.firstIndex(of: .warning(StationRunner.stalledMessage)), "\(all)")
+            let warned = try #require(all.firstIndex(of: .warning(StationRunner.resubscribingMessage)), "\(all)")
+            let disconnected = try #require(all.firstIndex(of: .disconnected(hint: SerialPort.notSendingUpdatesHint)),
+                                            "\(all)")
+            let reconnected = try #require(all.lastIndex(of: connectedBCD436HP), "\(all)")
+            #expect(stalled < warned && warned < disconnected && disconnected < reconnected, "\(all)")
+            // The fresh subscription pushes: a transmission now is logged.
+            try await rig.play(at: late + firstAt, hold: .seconds(1), backTo: late + 0.5)
+            try await rig.waitForEnded(1)
+            let row = try #require(try await rig.rows().first)
+            #expect(row.hit.key.talkgroupID == "1201")
+            #expect(row.hit.endReason == .signalLost)
+            // Replaced once: still the second connection a while later.
+            try await Task.sleep(for: .seconds(1))
+            #expect(rig.events.connections == [connectedBCD436HP, connectedBCD436HP])
+            #expect(rig.events.disconnects == [SerialPort.notSendingUpdatesHint])
+            #expect(rig.events.warnings.filter { $0 == StationRunner.resubscribingMessage }.count == 1)
+            #expect(!rig.events.warnings.contains(StationRunner.notResumingMessage))
+        }
+        // Every renewal was dropped on its way, so the mock saw two subscriptions, each ended.
+        let cycle = startCommands + ["PSI,0"]
+        #expect(outcome.commands == cycle + cycle, "\(outcome.commands)")
+        #expect(vanish.renewalsDropped >= 2)
+        expectBCD436HPRules(outcome.commands)
+    }
+
+    /// Plan 23 Task 10: the BCD436HP is resumed after a replug as the SDS150 is: the same model answers, a fresh
+    /// `PSI,100`, and its renewals keep the new subscription going past the lifetime.
+    @Test func bcd436hpResumesAfterAReplug() async throws {
+        var setup = Setup()
+        setup.personality = .bcd436hp
+        setup.keepAliveInterval = .milliseconds(300)
+        let outcome = try await withUSBRunner(setup) { rig in
+            try await rig.waitForPush()
+            await rig.mock.unplug()
+            try await rig.waitForDisconnects(1)
+            _ = try await rig.mock.replug()
+            try await rig.waitForConnections(2)
+            #expect(rig.events.connections == [connectedBCD436HP, connectedBCD436HP])
+            let late = 7 * period
+            try await rig.stepWithRenewal(to: 4 * period + 0.5)
+            try await rig.stepWithRenewal(to: late + 0.5)
+            try await rig.play(at: late + firstAt, hold: .seconds(1), backTo: late + 0.5)
+            try await rig.waitForEnded(1)
+            #expect(rig.events.disconnects == [SerialPort.noneFoundHint])
+            #expect(rig.events.warnings == [], "\(rig.events.warnings)")
+        }
+        let commands = outcome.commands
+        let resumed = try #require(commands.lastIndex(of: "MDL"))
+        #expect(Array(commands[resumed...].prefix(3)) == startCommands, "\(commands)")
+        #expect(commands[resumed...].dropFirst(3).dropLast().allSatisfy { $0 == "PSI,100" }, "\(commands)")
+        #expect(commands[resumed...].filter { $0 == "PSI,100" }.count >= 3, "\(commands)")
+        #expect(commands.filter { $0 == "MDL" }.count == 2, "\(commands)")
+        expectBCD436HPRules(commands)
     }
 
     /// Review Focus 5: after an unplug, an SDS150 turns up behind the SDS100 station's port. It is

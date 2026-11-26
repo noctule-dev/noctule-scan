@@ -202,10 +202,10 @@ struct StationSessionQuickKeysTests {
 
     /// The owner-visible bug of 2026-11-19: over USB serial a `GLT` reply comes in pages, and with only the first
     /// page taken the next read got the rest, failed, and no list behind it ever loaded ("Checking…"). On the
-    /// paged serial mocks (four elements a page), every list's tree loads whole, on both handhelds.
+    /// paged serial mocks (four elements a page), every list's tree loads whole, on every handheld.
     @Test func everyListsTreeLoadsWholeOverUSB() async throws {
         let mock = MockFavorites.default
-        for personality in [MockPersonality.sds150, .sds100] {
+        for personality in [MockPersonality.sds150, .sds100, .bcd436hp] {
             try await withUSBSession(USBSetup(personality: personality, quickKeysPollInterval: pollInterval)) { rig in
                 let quickKeys = rig.session.quickKeys
                 rig.start()
@@ -226,6 +226,48 @@ struct StationSessionQuickKeysTests {
                 quickKeys.close()
             }
         }
+    }
+
+    /// Plan 23 Task 10: on a BCD436HP session the pop-over's model attaches once connected, reads
+    /// (`GLT,FL`, `FQK`, each list's paged tree), and one tile click sends exactly one `FQK` set
+    /// naming only that key (0 everywhere else), followed by a re-read; nothing else changes state.
+    @Test func bcd436hpTileClickSendsOneFQKSet() async throws {
+        var setup = USBSetup(personality: .bcd436hp, quickKeysPollInterval: pollInterval)
+        setup.personality = .bcd436hp
+        let outcome = try await withUSBSession(setup) { rig in
+            let quickKeys = rig.session.quickKeys
+            rig.start()
+            try await rig.waitConnected()
+            #expect(rig.session.supportsQuickKeys)
+            #expect(quickKeys.isAttached)
+            quickKeys.open()
+            try await waitUntil("every list read") { allFresh(quickKeys) }
+            let first = await rig.commands.filter(isQuickKeyCommand)
+            #expect(first.prefix(2) == ["GLT,FL", "FQK"], "\(first)")
+            #expect(quickKeys.lists.map(\.index) == defaultLists)
+            #expect(quickKeys.switchState(for: .list(4)) == .off)
+            // Poll reads may run beside the click; only the sets and what follows them matter.
+            let mark = await rig.commands.count
+            await quickKeys.toggle(.list(4))
+            let after = Array(await rig.commands.dropFirst(mark))
+            let sets = after.filter { $0.hasPrefix("FQK,") }
+            #expect(sets.count == 1, "\(after)")
+            let values = (sets.first ?? "").split(separator: ",").dropFirst().map { Int($0) ?? -1 }
+            #expect(values.count == 100, "\(sets)")
+            #expect(values.enumerated().filter { $0.element != 0 }.map(\.offset) == [1], "\(sets)")
+            // List 4's quick key is 1: "2" (on) there, "0" (leave alone) everywhere else.
+            #expect(values.count > 1 && values[1] == 2, "\(sets)")
+            #expect(after.filter { $0.hasPrefix("SQK,") && $0.split(separator: ",").count > 2 }.isEmpty, "\(after)")
+            #expect(quickKeys.switchState(for: .list(4)) == .on)
+            // The set was followed by a re-read of that scope.
+            let setAt = try #require(after.firstIndex { $0.hasPrefix("FQK,") })
+            #expect(after[(setAt + 1)...].contains("FQK"), "\(after)")
+            quickKeys.close()
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("KAL") || $0.hasPrefix("GCS") || $0.hasPrefix("MNU")
+                                              || $0.hasPrefix("MSB") || $0.hasPrefix("HLD") || $0.hasPrefix("KEY") },
+                "\(outcome.commands)")
+        #expect(outcome.commands.last == "PSI,0", "\(outcome.commands.suffix(5))")
     }
 
     @Test func noCooldownCall() async throws {
