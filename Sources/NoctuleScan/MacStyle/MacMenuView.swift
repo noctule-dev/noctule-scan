@@ -243,7 +243,8 @@ enum MacMenuText {
         return nil
     }
 
-    /// The Menu button (`KEY,M,P` unless the scanner is already in a menu).
+    /// The Menu button (the model's enter: `KEY,M,P` on an SDS, `MNU,TOP,` on the BCD436HP; nothing
+    /// is sent if the scanner is already in a menu).
     @discardableResult
     func enter() -> Task<Void, Never>? { run { try await menu.enter() } }
 

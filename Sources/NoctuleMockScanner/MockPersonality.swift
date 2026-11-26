@@ -74,8 +74,9 @@ import Foundation
 /// scan screen's fictional line layout and text, a number entry's value mask spanning all 24
 /// columns, and `Rssi` as 0.1624 x the signal bars; the `MNU` ids other than `TOP` answered `MNU,NG`;
 /// `MSB,,` at the top menu staying there; an `MSB` of any other shape, or an `HLD` of an unknown
-/// level or an index the moment doesn't show, answered `NG`; `HLD,CFREQ` toggling like the others
-/// (never tried); the double-press window of 0.5 s (hardware: at least 95 ms), a single System or
+/// level or an index the moment doesn't show, answered `NG`; `HLD`'s parent argument ignored;
+/// `HLD` accepted inside a menu (checked against the hidden scan screen); `HLD,CFREQ` toggling
+/// like the others (never tried); the double-press window of 0.5 s (hardware: at least 95 ms), a single System or
 /// Department press holding after 2 s on the mock's clock (a second press inside the window
 /// cancelling it), and a hold lasting until toggled off (the radio would lose a trunked channel's
 /// when the call ends); the SDS models answering `MNU`, `MSB` and `HLD` `ERR`; and the

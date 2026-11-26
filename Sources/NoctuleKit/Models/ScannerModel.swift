@@ -59,7 +59,7 @@ public struct DisplayLayout: Sendable, Equatable {
 
     /// The SDS models: 30 columns and a soft-key line.
     public static let sds = DisplayLayout(columns: 30, hasSoftKeyLine: true)
-    /// The BCD436HP: 24 columns, no soft-key line (design §3.3, §5.3).
+    /// The BCD436HP: 24 columns, no soft-key line (design §3.6, §5.3).
     public static let bcd436hp = DisplayLayout(columns: 24, hasSoftKeyLine: false)
 }
 
@@ -75,7 +75,7 @@ public enum MenuNavigation: Sendable, Equatable {
 public enum HoldMethod: Sendable, Equatable {
     /// The soft key whose label reads Hold, pressed with `KEY`: the SDS models.
     case softKeyLabel
-    /// The `HLD` command, naming what to hold: the BCD436HP (design §5.5).
+    /// The `HLD` command, naming what to hold: the BCD436HP (design §5.3).
     case holdCommand
 }
 

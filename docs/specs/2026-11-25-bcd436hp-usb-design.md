@@ -655,4 +655,9 @@ the owner rules after §7.
   A/B/C rather than nothing (refinement 4).
 - §5.7: the mock's BCD screens, glyph placement and `Rssi` (0.1624 per bar) are fictional; its hold keys use a 0.5 s
   window.
+- §5.11 and `display --serial`: `display` now sends `MDL` first on every serial model, the SDS150 and SDS100 too,
+  so the profile (display layout) is known. That is one read-only command more than before, beyond what §5.11
+  allows; for the owner to see.
+- §5.4 (refinement 1) relies on the BCD always writing a decimal point in `Rssi`: with no `rssiReading` field, a
+  bare `Rssi="0"` would parse as 0 dBm rather than "no signal". To watch in the hardware session (§7).
 - Nothing else in §5 changed. §7's hardware session has not run.
