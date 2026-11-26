@@ -54,6 +54,19 @@ import Foundation
 /// and trunk shape, fault, unplug and replug, taken from the SDS150 mock's. The push lifetime's
 /// assumptions are in the next paragraph.
 ///
+/// - `.bcd436hp`: the BCD436HP over USB serial (BCD436HP design §3, §5.7). Seen on hardware:
+///   `MDL` `BCD436HP`; the push lifetime of the SDS100's kind; `KAL` doing nothing useful; an
+///   out-of-range `VOL`/`SQL` set clamped and answered `OK` (`clampsLevels`); a `<Footer No="1"
+///   EOT="1"/>` on an `MSI` document (`xmlFooter`; `GSI` and pushes carry none); two icon glyph
+///   bytes on the idle screen (only their count was seen, design §3.6). It has no `T` or `Q` key
+///   (`missingKeys`; design §5.11).
+///
+/// **Assumptions, not hardware** (BCD436HP): `VER`'s `Version ` prefix; `KAL` and `GCS` answered
+/// `ERR`; `MSM,1` answered `MSM,NG` with nothing else happening; that every `PSI` restarts the full
+/// 183 s; the glyph byte values (fictional); `GSI` and `PSI` without a footer; that a key the radio
+/// lacks is answered `KEY,NG` (the SDS100 and SDS150 `missingKeys` too, design §5.11); and the
+/// menus, scenarios, faults, unplug and replug, copied from the other serial mocks.
+///
 /// **The push lifetime** (SDS150; `pushLifetime`, `pushLifetimeRestarts`, `silentCommands`). Seen
 /// on hardware (fw 1.01.02, 2026-11-12): pushes stop 183 s after the `PSI` (three timed runs), the
 /// port stays open, the scanner goes on answering, and a new `PSI` starts them again; with `KAL`
@@ -140,6 +153,24 @@ public struct MockPersonality: Sendable, Equatable {
     /// Commands the model takes without any reply (logged and carried out, nothing sent back);
     /// every other command it doesn't know is answered `ERR`.
     public var silentCommands: Set<String>
+    /// True: an out-of-range `VOL`/`SQL` set is clamped to the model's range and answered `OK`
+    /// (the BCD436HP, design §3); false: it is answered `NG` and changes nothing.
+    public var clampsLevels: Bool
+    /// Front-panel key codes the model has no key for: `KEY,<code>,P` is answered `KEY,NG`
+    /// (design §5.11; assumed that the radio answers so).
+    public var missingKeys: Set<String>
+    /// True: the model has the BCD436HP's `MNU`, `MSB` and `HLD` commands (Task 4 gives it behaviour).
+    public var bcdCommands: Bool
+    /// The form of `STS` and `GSI`'s display text (Task 3 gives `.bcd436hp` behaviour).
+    public var displayForm: DisplayForm
+
+    /// Which family's display the mock draws.
+    public enum DisplayForm: Sendable, Equatable {
+        /// The SDS models': 4 lines of 20+ columns with soft keys.
+        case sds
+        /// The BCD436HP's: 24 columns, no soft-key line.
+        case bcd436hp
+    }
 
     /// What an idle moment of a trunk-mode scenario looks like in `ScannerInfo` (a weather
     /// scenario's idle is the same under every personality).
@@ -164,7 +195,9 @@ public struct MockPersonality: Sendable, Equatable {
                 xmlFooter: Bool, xmlLineBreak: String, chargeStatusReply: String?, restartReboots: Bool,
                 idleForm: IdleForm = .trunkSite,
                 pushLifetime: Double? = nil, pushLifetimeRestarts: Set<String> = [], silentCommands: Set<String> = [],
-                keepAliveRevivesStoppedPushes: Bool = true, displayGlyphBytes: [UInt8] = []) {
+                keepAliveRevivesStoppedPushes: Bool = true, displayGlyphBytes: [UInt8] = [],
+                clampsLevels: Bool = false, missingKeys: Set<String> = [], bcdCommands: Bool = false,
+                displayForm: DisplayForm = .sds) {
         self.reportedModel = reportedModel; self.firmware = firmware
         self.volumeRange = volumeRange; self.squelchRange = squelchRange
         self.xmlFooter = xmlFooter; self.xmlLineBreak = xmlLineBreak
@@ -174,6 +207,8 @@ public struct MockPersonality: Sendable, Equatable {
         self.silentCommands = silentCommands
         self.keepAliveRevivesStoppedPushes = keepAliveRevivesStoppedPushes
         self.displayGlyphBytes = displayGlyphBytes
+        self.clampsLevels = clampsLevels; self.missingKeys = missingKeys
+        self.bcdCommands = bcdCommands; self.displayForm = displayForm
     }
 
     public static let sds200 = MockPersonality(
@@ -186,7 +221,7 @@ public struct MockPersonality: Sendable, Equatable {
         xmlFooter: false, xmlLineBreak: "\r", chargeStatusReply: "GCS,CST=4,VOLT=4184mV:100%,CURR=0000mA,TEMP= 27.65C",
         restartReboots: false, idleForm: .conventionalScan,
         pushLifetime: 183, pushLifetimeRestarts: ["KAL"], silentCommands: ["KAL"],
-        displayGlyphBytes: [0x80, 0x81, 0x8D])
+        displayGlyphBytes: [0x80, 0x81, 0x8D], missingKeys: ["T", "Q", "R"])
 
     /// The SDS100 over USB serial (SDS100 design §3, §5.4). Its keep-alive is a repeated `PSI`
     /// (every `PSI` restarts the lifetime, in the core), so `KAL` is an unknown command: `ERR`,
@@ -195,7 +230,16 @@ public struct MockPersonality: Sendable, Equatable {
         reportedModel: "SDS100", firmware: "Version 1.26.01", volumeRange: 0...15, squelchRange: 0...15,
         xmlFooter: false, xmlLineBreak: "\r", chargeStatusReply: nil, restartReboots: false,
         idleForm: .trunkSite, pushLifetime: 183, pushLifetimeRestarts: [], silentCommands: [],
-        displayGlyphBytes: [0x06, 0x07, 0x1A, 0x1B])
+        displayGlyphBytes: [0x06, 0x07, 0x1A, 0x1B], missingKeys: ["T", "Q"])
+
+    /// The BCD436HP over USB serial (BCD436HP design §3, §5; fw 1.28.24). Its keep-alive is a
+    /// repeated `PSI` as the SDS100's is, so `KAL` is an unknown command (`ERR`).
+    public static let bcd436hp = MockPersonality(
+        reportedModel: "BCD436HP", firmware: "Version 1.28.24", volumeRange: 0...15, squelchRange: 0...15,
+        xmlFooter: true, xmlLineBreak: "\r", chargeStatusReply: nil, restartReboots: false,
+        idleForm: .trunkSite, pushLifetime: 183, pushLifetimeRestarts: [], silentCommands: [],
+        displayGlyphBytes: [0x8A, 0x8B], clampsLevels: true, missingKeys: ["T", "Q"],
+        bcdCommands: true, displayForm: .bcd436hp)
 
     /// This personality, reporting `scenario`'s model and firmware (the UDP mock's identity).
     func reporting(_ scenario: MockScenario) -> MockPersonality {

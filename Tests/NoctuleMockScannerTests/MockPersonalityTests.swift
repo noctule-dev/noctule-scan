@@ -742,3 +742,90 @@ private func assemble(_ bytes: Data) -> [ScannerResponse] {
         #expect(rig.pushes(to: .stream).count == stopped)
     }
 }
+
+// MARK: The BCD436HP (design `2026-11-25-bcd436hp-usb-design.md` §3, §5.7, §5.11)
+
+@Suite(.timeLimit(.minutes(1))) struct MockBCD436HPPersonalityTests {
+    @Test func bcdIdentity() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("MDL") == "MDL,BCD436HP\r")
+        #expect(rig.reply("VER") == "VER,Version 1.28.24\r")
+        let bcd = MockPersonality.bcd436hp
+        #expect(bcd.volumeRange == 0...15)
+        #expect(bcd.squelchRange == 0...15)
+        #expect(bcd.clampsLevels)
+        #expect(bcd.missingKeys == ["T", "Q"])
+        #expect(bcd.bcdCommands)
+        #expect(bcd.displayForm == .bcd436hp)
+        #expect(bcd.displayGlyphBytes.count == 2)
+        #expect(!bcd.restartReboots)
+        #expect(bcd.pushLifetime == 183)
+        #expect(MockPersonality.sds100.displayForm == .sds)
+        #expect(!MockPersonality.sds100.clampsLevels)
+        #expect(!MockPersonality.sds100.bcdCommands)
+    }
+
+    @Test func bcdClampsLevels() {
+        let rig = CoreRig(.bcd436hp)
+        #expect(rig.reply("VOL,16") == "VOL,OK\r")
+        #expect(rig.reply("VOL") == "VOL,15\r")
+        #expect(rig.reply("SQL,16") == "SQL,OK\r")
+        #expect(rig.reply("SQL") == "SQL,15\r")
+        #expect(rig.reply("VOL,7") == "VOL,OK\r")
+        #expect(rig.reply("VOL") == "VOL,7\r")
+        let sds100 = CoreRig(.sds100)
+        #expect(sds100.reply("VOL,16") == "VOL,NG\r")
+    }
+
+    @Test func bcdRefusesKeysItHasNot() {
+        let bcd = CoreRig(.bcd436hp)
+        #expect(bcd.reply("KEY,T,P") == "KEY,NG\r")
+        #expect(bcd.reply("KEY,Q,P") == "KEY,NG\r")
+        #expect(bcd.reply("KEY,R,P") == "KEY,OK\r")
+        #expect(bcd.reply("KEY,M,P") == "KEY,OK\r")
+        let sds100 = CoreRig(.sds100)
+        #expect(sds100.reply("KEY,T,P") == "KEY,NG\r")
+        #expect(sds100.reply("KEY,Q,P") == "KEY,NG\r")
+        #expect(sds100.reply("KEY,R,P") == "KEY,OK\r")
+        let sds150 = CoreRig(.sds150)
+        for key in ["T", "Q", "R"] { #expect(sds150.reply("KEY,\(key),P") == "KEY,NG\r") }
+        let sds200 = CoreRig(.sds200)
+        for key in ["T", "Q", "R"] { #expect(sds200.reply("KEY,\(key),P") == "KEY,OK\r") }
+    }
+
+    @Test func bcdAnswersKALAndGCSWithERR() async throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        defer { rig.stop() }
+        #expect(rig.reply("KAL") == "ERR\r")
+        #expect(rig.reply("GCS") == "ERR\r")
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        rig.clock.set(100)
+        #expect(rig.reply("KAL") == "ERR\r")
+        rig.clock.set(184)
+        try await expectNotPushing(rig)
+    }
+
+    @Test func bcdMSICarriesAFooter() throws {
+        let rig = CoreRig(.bcd436hp)
+        let msi = try #require(rig.reply("MSI"))
+        #expect(msi.contains("<Footer No=\"1\" EOT=\"1\"/>"), "\(msi)")
+        #expect(msi.contains("\r"))
+        let gsi = try #require(rig.reply("GSI"))
+        #expect(!gsi.contains("<Footer"))
+    }
+
+    @Test func bcdPushLifetime() async throws {
+        let rig = CoreRig(.bcd436hp, at: 0)
+        defer { rig.stop() }
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        try await expectPushing(rig)
+        rig.clock.set(100)
+        #expect(rig.reply("PSI,20") == "PSI,OK\r")
+        #expect(rig.core.sync { $0.subscribers.count } == 1)
+        rig.clock.set(182)
+        try await expectPushing(rig)
+        rig.clock.set(284)
+        try await expectNotPushing(rig)
+        #expect(rig.core.sync { $0.subscribers.count } == 1)
+    }
+}

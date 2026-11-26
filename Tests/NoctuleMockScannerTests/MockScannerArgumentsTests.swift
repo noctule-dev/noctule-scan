@@ -354,4 +354,20 @@ import NoctuleKit
         }
         #expect(MockScannerArguments.usage.contains("--glt-page-size"))
     }
+
+    /// `--model bcd436hp --serial`: the SDS100's rules (no network port, a push lifetime, no `KAL`).
+    @Test func parsesTheBCD436HP() throws {
+        let args = try MockScannerArguments.parse(["--model", "bcd436hp", "--serial"])
+        #expect(args.model == .bcd436hp)
+        #expect(args.personality == .bcd436hp)
+        #expect(MockScannerArguments.usage.contains("sds200|sds150|sds100|bcd436hp"))
+        let short = try MockScannerArguments.parse(["--model", "bcd436hp", "--serial", "--push-lifetime", "5"])
+        #expect(short.personality.pushLifetime == 5)
+        #expect(throws: MockScannerArgumentsError.usage("the BCD436HP has no network port: add --serial")) {
+            try MockScannerArguments.parse(["--model", "bcd436hp"])
+        }
+        #expect(throws: MockScannerArgumentsError.usage("--kal-after-expiry needs --model sds150 (the BCD436HP answers KAL with ERR)")) {
+            try MockScannerArguments.parse(["--model", "bcd436hp", "--serial", "--kal-after-expiry", "ignored"])
+        }
+    }
 }

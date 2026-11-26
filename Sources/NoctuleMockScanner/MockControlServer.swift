@@ -283,8 +283,8 @@ final class ControlCore: @unchecked Sendable {
         case ("VOL", 0):
             reply("VOL,\(volume)", to: peer)
         case ("VOL", 1):
-            if let level = Int(args[0]), personality.volumeRange.contains(level) {
-                volume = level
+            if let level = Int(args[0]), personality.clampsLevels || personality.volumeRange.contains(level) {
+                volume = min(max(level, personality.volumeRange.lowerBound), personality.volumeRange.upperBound)
                 reply("VOL,OK", to: peer)
             } else {
                 reply("VOL,NG", to: peer)
@@ -292,8 +292,8 @@ final class ControlCore: @unchecked Sendable {
         case ("SQL", 0):
             reply("SQL,\(squelch)", to: peer)
         case ("SQL", 1):
-            if let level = Int(args[0]), personality.squelchRange.contains(level) {
-                squelch = level
+            if let level = Int(args[0]), personality.clampsLevels || personality.squelchRange.contains(level) {
+                squelch = min(max(level, personality.squelchRange.lowerBound), personality.squelchRange.upperBound)
                 reply("SQL,OK", to: peer)
             } else {
                 reply("SQL,NG", to: peer)
@@ -314,7 +314,8 @@ final class ControlCore: @unchecked Sendable {
         case ("KEY", 2):
             let known = Set(["M", "F", "L", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "E",
                              ">", "<", "^", "V", "Q", "Y", "A", "B", "C", "Z", "T", "R"])
-            guard known.contains(args[0].uppercased()), args[1].uppercased() == "P" else {
+            guard known.contains(args[0].uppercased()), !personality.missingKeys.contains(args[0].uppercased()),
+                  args[1].uppercased() == "P" else {
                 reply("KEY,NG", to: peer)
                 return
             }
