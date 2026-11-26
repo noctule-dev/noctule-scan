@@ -193,9 +193,8 @@ private actor KeepAliveLink: ScannerTransport {
     @Test func profileKeepAlive() {
         #expect(ModelProfile.profile(for: .sds150).pushKeepAlive == PushKeepAlive(command: "KAL", interval: .seconds(60)))
         #expect(ModelProfile.profile(for: .sds100).pushKeepAlive == PushKeepAlive(action: .renewSubscription, interval: .seconds(60)))
-        for model in [ScannerModel.sds200, .bcd436hp] {
-            #expect(ModelProfile.profile(for: model).pushKeepAlive == nil, "\(model)")
-        }
+        #expect(ModelProfile.profile(for: .bcd436hp).pushKeepAlive == PushKeepAlive(action: .renewSubscription, interval: .seconds(60)))
+        #expect(ModelProfile.profile(for: .sds200).pushKeepAlive == nil)
     }
 
     /// Without `keepAlive:` nothing but `PSI` goes out, as before.

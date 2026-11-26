@@ -385,11 +385,11 @@ private func lines(_ text: String, containing needle: String) -> [String] {
     @Test func quickKeysRefusedOnAModelWithoutThem() async throws {
         let dirs = try SerialDirs()
         defer { dirs.cleanUp() }
-        let mock = try await SerialMock.launch(link: dirs.link, ["--mdl-name", "BCD436HP"])
+        let mock = try await SerialMock.launch(link: dirs.link, ["--mdl-name", "UBC9999"])
         do {
             let run = try await serialNoctule(["quick-keys", "--serial", mock.port], dirs)
             #expect(run.exited && run.status == 1, "\(run.stderr)")
-            #expect(run.stderr == "quick-keys: the BCD436HP has no quick keys\n", "\(run.stderr)")
+            #expect(run.stderr == "quick-keys: the UBC9999 has no quick keys\n", "\(run.stderr)")
             #expect(run.stdout.isEmpty, "\(run.stdout)")
         } catch {
             Issue.record(error)

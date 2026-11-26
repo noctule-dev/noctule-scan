@@ -714,13 +714,13 @@ private let startCommands = ["MDL", "VER", "PSI,100"]
         #expect(commands.last == "PSI,0", "\(commands)")
     }
 
-    /// A scanner whose model has no keep-alive (here the mock says `BCD436HP`) is never sent one,
+    /// A scanner whose model has no keep-alive (here the mock says `UBC9999`) is never sent one,
     /// even with the interval overridden; and so the mock's lifetime stops its pushes, which the
     /// runner reports as a stall.
     @Test func modelWithoutAKeepAliveGetsNone() async throws {
         var setup = Setup()
         setup.keepAliveInterval = .milliseconds(100)
-        setup.reportedModel = "BCD436HP"
+        setup.reportedModel = "UBC9999"
         let outcome = try await withUSBRunner(setup) { rig in
             try await rig.waitForPush()
             rig.clock.set(4 * period + 0.5)
@@ -741,7 +741,7 @@ private let startCommands = ["MDL", "VER", "PSI,100"]
 
     /// With no push interval given, the runner subscribes at the model's (`ModelProfile.pushInterval`):
     /// `PSI,100` to an SDS150 or an SDS100, `PSI,500` to a model that reports another name.
-    @Test(arguments: [("SDS150", "PSI,100"), ("SDS100", "PSI,100"), ("BCD436HP", "PSI,500")])
+    @Test(arguments: [("SDS150", "PSI,100"), ("SDS100", "PSI,100"), ("UBC9999", "PSI,500")])
     func subscribesAtTheModelsPushInterval(reported: String, subscribe: String) async throws {
         var setup = Setup()
         setup.pushInterval = nil

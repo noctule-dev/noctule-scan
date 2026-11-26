@@ -246,7 +246,7 @@ struct StationSessionQuickKeysTests {
     /// A model whose profile lacks quick keys never attaches the model: an open sends nothing.
     @Test func aModelWithoutQuickKeysNeverReads() async throws {
         var personality = MockPersonality.sds150
-        personality.reportedModel = "BCD436HP"
+        personality.reportedModel = "UBC9999"
         try await withUSBSession(USBSetup(personality: personality, quickKeysPollInterval: pollInterval)) { rig in
             rig.start()
             try await rig.waitConnected()
@@ -278,11 +278,11 @@ struct StationSessionQuickKeysTests {
         }
     }
 
-    /// The model `MDL` names wins over the station's override: a BCD436HP on a station overridden as an
-    /// SDS150 has no quick keys, so nothing attaches or reads.
-    @Test func theDetectedModelWinsOverTheOverride() async throws {
+    /// An `MDL` that names no known model falls back to the station's override, so the override's quick keys
+    /// attach (every known model has them now, so no model can show the detected one winning).
+    @Test func anUnknownModelFallsBackToTheOverride() async throws {
         var personality = MockPersonality.sds150
-        personality.reportedModel = "BCD436HP"
+        personality.reportedModel = "UBC9999"
         try await withUSBSession(USBSetup(personality: personality, quickKeysPollInterval: pollInterval)) { rig in
             var station = rig.station
             station.connection.modelOverride = .sds150
@@ -296,12 +296,8 @@ struct StationSessionQuickKeysTests {
                     if case .connected = session.phase { return true }
                     return false
                 }
-                #expect(!session.supportsQuickKeys)
-                #expect(!session.quickKeys.isAttached)
-                session.quickKeys.open()
-                try await Task.sleep(for: pollInterval * 4)
-                #expect(await rig.commands.filter(isQuickKeyCommand).isEmpty)
-                session.quickKeys.close()
+                #expect(session.supportsQuickKeys)
+                #expect(session.quickKeys.isAttached)
             } catch { failure = error }
             await session.stop()
             try await waitUntil("start() to return") { done.value }
@@ -320,7 +316,7 @@ struct StationSessionQuickKeysTests {
         station.connection.modelOverride = .sds100
         #expect(StationSession(station: station, environment: environment).supportsQuickKeys)
         station.connection.modelOverride = .bcd436hp
-        #expect(!StationSession(station: station, environment: environment).supportsQuickKeys)
+        #expect(StationSession(station: station, environment: environment).supportsQuickKeys)
         station.connection.modelOverride = nil
         #expect(!StationSession(station: station, environment: environment).supportsQuickKeys)
     }

@@ -102,7 +102,7 @@ import NoctuleStore
                 #expect(KeepAliveOverride.forWatch(reportedModel: "SDS150", invocation: invocation, environment: environment) == nil)
                 #expect(KeepAliveOverride.forWatch(reportedModel: "SDS200", invocation: invocation, environment: environment) == nil)
             }
-            for reported in ["SDS200", "BCD436HP", "Mystery"] {
+            for reported in ["SDS200", "Mystery"] {
                 #expect(KeepAliveOverride.forWatch(reportedModel: reported, invocation: serial, environment: environment) == nil)
             }
         }

@@ -82,6 +82,7 @@ private let second = port("/dev/cu.usbmodemB1")
         // The product name wins: the SDS100 and the SDS150 share product ID 0x001A.
         #expect(port(path, name: "SDS100 Serial Port").knownModel == .sds100)
         #expect(port(path, name: "SDS150 Serial Port").knownModel == .sds150)
+        #expect(port(path, name: "BCD436HP Serial Port").knownModel == .bcd436hp)
         #expect(port(path, productID: 0x9999, name: "SDS200 Serial Port").knownModel == .sds200)
         // With no name, the product ID names a model only when exactly one model lists it.
         // Two models list 0x001A (the SDS100 and the SDS150), so the ID alone names neither.
