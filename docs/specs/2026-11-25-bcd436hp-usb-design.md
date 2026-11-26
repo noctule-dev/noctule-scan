@@ -38,7 +38,9 @@ Goals:
 4. The Scanner view draws its screen correctly: 24 columns, every line a row, no soft keys.
 5. A mock personality that behaves as §3 found, so every feature is tested on the mock first.
 6. Hold works from the Mac-style view at system, department and channel level, by `HLD` (§5.3).
-7. Its hardware session (§7) closes what §3 couldn't check.
+7. The Scanner view's panel matches each handheld's real keys and encoder, the SDS100 and SDS150
+   included (§5.11). **(the owner's call, 2026-11-25: "let's fix the sds100/sds150")**
+8. Its hardware session (§7) closes what §3 couldn't check.
 
 Non-goals:
 
@@ -51,7 +53,8 @@ Non-goals:
 
 Anti-goals (a failure even if it works):
 
-- Any change in what the SDS200, SDS150 or SDS100 send, or how their screens draw.
+- Any change in what the SDS200 sends or how its panel and screen draw; any change in what the
+  SDS150 or SDS100 send beyond §5.11 (their panel no longer offers keys they don't have).
 - Any command its spec doesn't list sent to the BCD436HP by the product: no `KAL`, `GCS`, `MSM` or
   `POF`.
 - A menu Exit that can press Avoid on a scanning screen (§5.2 removes the case on this model).
@@ -469,6 +472,30 @@ BCD436HP (`config/dev-scanner.env.example` gains the key):
 - **`docs/specs/README.md`**: this design and its plan.
 - **`LESSONS.md`**: the 2026-11-25 entry, written during the spike.
 
+### 5.11 The handhelds' panel and encoder (the SDS100 and SDS150 too)
+
+The SDS100, SDS150 and BCD436HP have one multifunction encoder on top: turning it scrolls, one
+press makes turning set volume, Func then a press makes it set squelch **(the owner, 2026-11-25;
+SDS150 owner's manual: "Press FUNCTION then tap scroll to display the squelch level")**. Its press
+is `^`. None of them has a squelch-knob push (`Q`) or a Service Type key (`T`). Today the Scanner
+view gives the SDS100 and SDS150 the SDS200's whole panel, so their Services button and squelch
+knob push send codes the radios don't have, and their scroll knob's push reads "Func".
+
+| Model | Keys it lacks | Encoder push caption | Source |
+|---|---|---|---|
+| SDS200 | none | Func (unchanged) | |
+| SDS100 | `T`, `Q` | Vol | [spec] SDS V2.00 key sheet: `T` and `Q` "(none)", `V` Backlight |
+| SDS150 | `T`, `Q`, `R` | Vol | SDS150 owner's manual: ZIP/SERVICES is one key (Func then Zip for Services), no Range key listed, Power/Light taps the backlight; that it has no `R` and that `V` is its Power/Light tap are **[assumed]** until §7 H11 |
+| BCD436HP | `T`, `Q` | Vol | [spec] BCDx36HP V1.05 key sheet |
+
+- Per-model data (`ModelProfile`): the keys the model has, and the encoder push's caption. The
+  Scanner view's keypad leaves out a key the model lacks (the row closes up), the squelch knob has
+  no push without `Q`, and the SCROLL knob's push keeps sending `^`, captioned per model, with the
+  help text "Press: volume. Func, then press: squelch." on the handhelds.
+- `StationSession.press(_:)` drops a key the model lacks, so a key-map chord for one sends nothing.
+- The VOL and SQL knobs keep setting the level directly (`VOL,<n>`, `SQL,<n>`) on every model.
+- The SDS handhelds' soft keys, menus and Hold are unchanged.
+
 ## 6. Tests
 
 Written first, against the mock, per task. At least:
@@ -504,6 +531,8 @@ Written first, against the mock, per task. At least:
 - `SerialIntegrationTests` and `AppLifecycleIntegrationTests`: `ports`, `info`, `display`, `watch`,
   `log` and `quick-keys` against `noctule-mock-scanner --model bcd436hp --serial`, one app launch
   on it (and one with a menu entered and left), with the usual end-of-run checks.
+- The panel per model (§5.11): each model's key set and caption; the SDS100 and SDS150 sessions
+  drop `T` and `Q` (and the SDS150 `R`); the SDS200's panel and presses unchanged.
 - `RealNamesTests` and `PrivateWordsTests` pass; the iOS build of `NoctuleAppCore` builds.
 
 ## 7. Hardware session (the owner's, after the build)
@@ -528,6 +557,9 @@ Each item at the owner's go-ahead; results into this document, the protocol note
 - **H9** Line-in on the owner's rig (the jack is wired to the USB audio interface): recordings
   line up with the hits (`lineInAudioOffset`), and the level at the radio's volume.
 - **H10** The BCD436HP and an SDS handheld at once: two stations, each with a saved port.
+- **H11** On the SDS150 and the SDS100 (the owner's, in the app): the panel shows no Services key
+  and no squelch push, the SDS150 no Range key (the owner confirms it has none), the scroll knob's
+  push sets volume as on the radio, and the light key toggles the backlight.
 
 After the session the owner rules whether the BCD436HP is verified, and
 `protocolVerifiedOnHardware` follows.
