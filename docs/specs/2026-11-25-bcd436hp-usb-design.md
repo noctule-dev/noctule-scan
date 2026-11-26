@@ -1,7 +1,8 @@
 # The BCD436HP over USB — design
 
-Date: 2026-11-25. Status: **approved by the owner in chat, 2026-11-25**. Nothing is built yet. The checks in §3 ran on
-throwaway edits and a throwaway probe that were reverted and never committed.
+Date: 2026-11-25. Status: **approved by the owner in chat, 2026-11-25**. **Built against the mock (Plan 23, §10); the hardware
+session (§7) is pending.** The checks in §3 ran on throwaway edits and a throwaway probe that were reverted and never
+committed.
 
 Labels: **(the owner's call)** is a decision the owner made in the brainstorm on 2026-11-25;
 **(designer's call)** is a default the designer chose that the owner hasn't ruled on and can
@@ -588,3 +589,70 @@ Type, case and method names (the menu navigation kind, the display layout, the `
 text; whether the handheld hardware-check file is split or renamed; the wording of comments and
 of the `AGENTS.md` sections within the rules above; task order, provided the mock personality and
 its tests come before any product path that uses them.
+
+## 10. What was built (Plan 23, 2026-11-25)
+
+Built on `feature/bcd436hp-usb` (`47cb210..`), against the mock only: no agent opened the real radio. The BCD436HP
+is a fourth `ModelProfile`, its differences per-model data, as §4 chose. `protocolVerifiedOnHardware` is false until
+the owner rules after §7.
+
+- **Profile** (`ModelProfile` for `.bcd436hp`): volume and squelch 0–15; the renewal keep-alive (`PSI,<ms>` every 60 s);
+  quick keys; push interval and display refresh 100 ms; no `GCS`, `MSM` or network audio. New per-model data:
+  `display` (`DisplayLayout`: `.sds` 30 columns with a soft-key line, `.bcd436hp` 24 columns and none),
+  `menuNavigation` (`.keys` / `.menuCommands`), `holdMethod` (`.softKeyLabel` / `.holdCommand`), `frontPanelKeys` and
+  `encoderPushCaption`; `DestructiveMenuItems.bcd436hp` (§5.5).
+- **Menus:** `ScannerClient.openMenu`, `menuBack`, `leaveMenu` and `hold(_:onlyIf:)` (with `HoldTarget`), each decided at
+  the request slot. `MenuModel.navigation` is set by `StationSession` at connect; the BCD enters with `MNU,TOP,`, goes
+  back with `MSB,,` and leaves with `MSB,,RETURN_PREVOUS_MODE`, every `MenuModel` rule unchanged. A test pins that the
+  session wires it (without it a BCD Exit would press Avoid).
+- **Screen:** `DisplayModel(layout:)`; `DisplayView` and `MacMenuView` hide the soft keys when the layout has none;
+  `noctule display --serial` sends `MDL` first (network unchanged); `CLIFormat.display(_:layout:)`.
+- **Hold:** on the BCD the Mac-style controls send `HLD` by index (§5.3); the SDS models press the labelled soft key as
+  before.
+- **Scanner view:** the keypad drops keys a model lacks; the BCD's System, Dept and Channel buttons stand where the soft
+  keys would be (`KEY,A|B|C,P`); no squelch-knob push without `Q`; the SCROLL push is captioned per model with the help
+  text "Press: volume. Func, then press: squelch."; `StationSession.press` drops a key the model lacks. SDS100 and
+  SDS150 follow §5.11.
+- **Mock:** `--model bcd436hp --serial` (`MockPersonality.bcd436hp`); its type comment lists what was seen and the
+  "Assumptions, not hardware". The SDS100 and SDS150 mocks answer `KEY,T` and `KEY,Q` (SDS150 also `KEY,R`) with
+  `KEY,NG`, and the SDS mocks answer `MNU`, `MSB` and `HLD` with `ERR`. The mock's hold keys use a 0.5 s double-press
+  window (assumed; the hardware's is at least 95 ms).
+- **Tests:** `BCD436HPHardwareTests` (`NOCTULE_BCD436HP_HARDWARE_TESTS`, `NOCTULE_BCD436HP_PUSH_TEST`,
+  `NOCTULE_BCD436HP_KEEPALIVE_TEST`; port `SCANNER_SERIAL_BCD436HP`) with `OnTheMock` twins that run in every
+  `swift test`; `SerialIntegrationTests` and `AppLifecycleIntegrationTests` cases (including the app quitting while the
+  BCD is in its menu); BCD-mock `StationRunner` tests for dropped renewals (the replace rule, Plan 8 D6) and an unplug
+  and replug.
+
+### 10.1 Plan-time refinements (designer's calls, made while planning; for the owner to see)
+
+1. **`Rssi` (§5.4):** `ScannerInfo` already parses `Rssi` as an integer, so the BCD's decimals are already nil. There is
+   no `rssiReading` profile field; a test pins it.
+2. **Hold re-read (§5.3):** the next push (about every 160 ms) shows the hold state; **no extra `GSI` is sent after an
+   `HLD`**. A Hold click is refused while an `HLD` is in flight (a double-click would toggle it straight back off).
+3. **Channel hold and ID search (§5.3):** on hardware `HLD,TGID,<index>,` held a programmed talkgroup during an ID
+   search, so the Channel control is disabled only for an unprogrammed talkgroup (`ScannerInfo.unprogrammedIndex`,
+   whose hold would need `STGID`, untried), not for ID search as a whole.
+4. **Soft-key chords (§5.3):** on the BCD, `A`, `B` and `C` are its System, Dept and Channel keys, so a key-map chord
+   bound to Soft key 1–3 presses them instead of being dropped. Chords for keys the model lacks (`T`, `Q`) send
+   nothing.
+5. **The knobs (§5.11):** the Scanner view keeps its direct VOL and SQL knobs (one `VOL,<n>` or `SQL,<n>` each), and
+   its SCROLL knob stands for the encoder: the push still sends `^`, captioned Vol, with the help text above. The
+   squelch knob has no push; the volume knob's push stays `V` (Backlight, "Light").
+
+### 10.2 Rulings made during the build
+
+- **R2:** the encoder push caption is Func on the SDS200 and Vol on the SDS100, SDS150 and BCD436HP (§5.11).
+- **R3:** Hold follows refinements 2 and 3.
+- **R4:** Soft key 1–3 chords press A/B/C on the BCD (refinement 4); the key-map editor keeps its rows.
+- **R5:** a test pins that `display --serial` sends `MDL` before `STS` (§6).
+- **R6:** BCD-mock tests for dropped renewals and an unplug and replug resume (§5.7, §6); `VOL` and `SQL` never leave
+  0–15 (a session test).
+
+### 10.3 Differences from §5
+
+- §5.4: no `rssiReading` field (refinement 1).
+- §5.3: Hold's re-read and the Channel control's disabling (refinements 2 and 3); a soft-key chord on the BCD presses
+  A/B/C rather than nothing (refinement 4).
+- §5.7: the mock's BCD screens, glyph placement and `Rssi` (0.1624 per bar) are fictional; its hold keys use a 0.5 s
+  window.
+- Nothing else in §5 changed. §7's hardware session has not run.
