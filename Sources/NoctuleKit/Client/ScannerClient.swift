@@ -443,6 +443,32 @@ public actor ScannerClient {
         try await expectOK(try ScannerCommand("DQK", arguments: prefix + values), onlyIf: proceed)
     }
 
+    // MARK: BCD436HP menu and hold commands
+
+    /// `MNU,TOP,`: opens the top menu. State-changing: never resent, even after a timeout (re-read `GSI`
+    /// to see whether it took effect). Only for a model whose profile enters menus this way, never an
+    /// SDS model. `onlyIf`: see `send(_:onlyIf:)`.
+    public func openMenu(onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(try ScannerCommand("MNU", "TOP", ""), onlyIf: proceed)
+    }
+
+    /// `MSB,,`: back one menu level. Same rules as `openMenu`; outside a menu the scanner answers `NG`
+    /// (`rejected`).
+    public func menuBack(onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(try ScannerCommand("MSB", "", ""), onlyIf: proceed)
+    }
+
+    /// `MSB,,RETURN_PREVOUS_MODE` (Uniden's spelling): leaves the menu. Same rules as `menuBack`.
+    public func leaveMenu(onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(try ScannerCommand("MSB", "", "RETURN_PREVOUS_MODE"), onlyIf: proceed)
+    }
+
+    /// `HLD,…` for a target: holds on it (or releases it). Same rules as `openMenu`; only for a model
+    /// whose profile supports it, never an SDS model.
+    public func hold(_ target: HoldTarget, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        try await expectOK(try target.command, onlyIf: proceed)
+    }
+
     private func checkedKey(_ key: Int) throws -> Int {
         guard (0...99).contains(key) else {
             throw ScannerClientError.invalidArgument("a quick key is 0 to 99, got \(key)")
