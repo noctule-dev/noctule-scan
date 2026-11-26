@@ -154,6 +154,18 @@ private func sds150GSI() throws -> ScannerInfo {
         #expect(!lines.dropLast().contains { $0.contains("SYSTEM      DEPT") })
     }
 
+    @Test func displayWithoutASoftKeyLine() throws {
+        let flags = "0011"
+        let fields = [flags, "Lakeview Fire   ", "", "System One", "", "", "", " SYSTEM DEPT CHANNEL ", ""]
+        let status = try DisplayStatus(fields: fields)
+        let bcd = CLIFormat.display(status, layout: .bcd436hp)
+        #expect(bcd == ["Lakeview Fire", "System One", "SYSTEM DEPT CHANNEL"])
+        #expect(!bcd.contains { $0.hasPrefix("soft keys:") })
+        let sds = CLIFormat.display(status)
+        #expect(sds == ["Lakeview Fire", "System One", "soft keys: SYSTEM | DEPT | CHANNEL"])
+        #expect(CLIFormat.display(status, layout: .sds) == sds)
+    }
+
     /// `menu`: the `MSI` screen as the scanner sent it, every item with its own index (an index
     /// the scanner left out shows as a gap), values where it gave them.
     @Test func menuLines() throws {

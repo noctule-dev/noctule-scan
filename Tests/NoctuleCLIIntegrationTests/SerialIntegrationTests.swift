@@ -332,7 +332,8 @@ private func lines(_ text: String, containing needle: String) -> [String] {
             Issue.record(error)
         }
         await mock.shutdown()
-        #expect(mock.commands == ["GSI", "STS"], "\(mock.commands)")
+        // `display` over serial reads `MDL` first, for the model's layout (BCD436HP design §6).
+        #expect(mock.commands == ["GSI", "MDL", "STS"], "\(mock.commands)")
     }
 
     /// `menu` sends one `MSI` and nothing else; outside a menu the scanner answers a `TypeError`
@@ -571,7 +572,7 @@ private func lines(_ text: String, containing needle: String) -> [String] {
             Issue.record(error)
         }
         await mock.shutdown()
-        #expect(mock.commands == ["GSI", "STS", "MSI"], "\(mock.commands)")
+        #expect(mock.commands == ["GSI", "MDL", "STS", "MSI"], "\(mock.commands)")
     }
 
     /// The mock's pushes stop 2 s after the latest `PSI`; renewing the subscription's own

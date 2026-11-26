@@ -235,7 +235,13 @@ do {
     case .status:
         CLIFormat.status(try await client.scannerInfo()).forEach { print($0) }
     case .display:
-        CLIFormat.display(try await client.displayStatus()).forEach { print($0) }
+        // Over serial `MDL` comes first, so the layout is the model's (unknown: the SDS's); over
+        // the network only `STS` is sent.
+        var layout = DisplayLayout.sds
+        if invocation.serial != nil, let known = try await client.modelInfo().model {
+            layout = ModelProfile.profile(for: known).display
+        }
+        CLIFormat.display(try await client.displayStatus(), layout: layout).forEach { print($0) }
     case .menu:
         CLIFormat.menu(try await client.menuScreen()).forEach { print($0) }
     case .quickKeys:

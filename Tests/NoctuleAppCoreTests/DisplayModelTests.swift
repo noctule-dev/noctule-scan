@@ -206,6 +206,40 @@ private func numberEntrySTS() throws -> DisplayStatus {
         #expect(few.softKey(labelled: "DEPT") == nil)
     }
 
+    /// The BCD436HP's scan screen (design §3.6): 14 lines of 24 columns, form `00110110110000`.
+    private func bcdScanSTS() throws -> DisplayStatus {
+        let flags = "00110110110000"
+        let texts = ["Lakeview Fire", "System One", "Dept Two", "Chan Three", "UID: ---", "TG 1234",
+                     "", "", "", "", "", "", "S1  S2  S3", " SYSTEM  DEPT  CHANNEL"]
+        #expect(texts.count == flags.count)
+        return try DisplayStatus(fields: [flags] + texts.flatMap { [$0.padding(toLength: 24, withPad: " ", startingAt: 0), ""] }
+                                 + trailingFields)
+    }
+
+    /// Review Focus 4: line 14 of a 14-line BCD screen is a row, never three soft-key labels; the
+    /// SDS layout on the same status (the first `STS` before `MDL` named the model) takes it so.
+    @Test func bcdScanScreenHasNoSoftKeys() throws {
+        let s = try bcdScanSTS()
+        let bcd = DisplayModel(status: s, info: nil, layout: .bcd436hp)
+        #expect(bcd.rows.count == 14)
+        #expect(bcd.softKeys.isEmpty)
+        #expect(bcd.layout == .bcd436hp)
+        let sds = DisplayModel(status: s, info: nil, layout: .sds)
+        #expect(sds.rows.count == 13)
+        #expect(sds.softKeys.count == 3)
+        #expect(sds.layout == .sds)
+    }
+
+    @Test func bcdEntryScreenHasNoSoftKeys() throws {
+        let rows: [(String, String)] = [("Set Range", "_"), ("12", String(repeating: "*", count: 24)), ("", ""), ("", ""),
+                                        ("miles", ""), ("", ""), ("", ""), ("", ""), ("", ""), ("", "")]
+        let s = try DisplayStatus(fields: [String(repeating: "1", count: 10)] + rows.flatMap { [$0.0, $0.1] } + trailingFields)
+        let m = DisplayModel(status: s, info: try menuInfo("menu_input", title: "Set Range"), layout: .bcd436hp)
+        #expect(m.rows.count == 10)
+        #expect(m.softKeys.isEmpty)
+        #expect(m.isMenu)
+    }
+
     @Test func nonASCIIGlyphsReplaced() throws {
         let s = try status([("\u{01}AB\u{7F}é C", "")])
         let m = DisplayModel(status: s, info: nil)

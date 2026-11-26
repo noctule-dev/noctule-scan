@@ -611,6 +611,23 @@ import NoctuleStore
         #expect(!outcome.commands.contains { $0.hasPrefix("KAL") || $0.hasPrefix("GCS") || $0.hasPrefix("MSM") || $0.hasPrefix("POF") })
     }
 
+    /// Review Focus 4: a BCD436HP session's display takes the BCD layout once connected: 14 rows of
+    /// the scan screen, never three soft-key labels made from its line 14.
+    @Test func bcdSessionDisplayHasNoSoftKeys() async throws {
+        var setup = USBSetup()
+        setup.personality = .bcd436hp
+        _ = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await waitUntil("the display") { rig.session.display != nil }
+            try await rig.waitForPush()
+            try await waitUntil("the BCD layout") { rig.session.display?.layout == .bcd436hp }
+            let display = try #require(rig.session.display)
+            #expect(display.softKeys.isEmpty)
+            #expect(display.rows.count == 14)
+        }
+    }
+
     /// An SDS100 station connects as an SDS150's does, minus the battery: no reading and no `GCS`
     /// however long it runs, and the knobs' 0–15 (a volume or squelch past it is sent as 15).
     @Test func sds100SessionConnectsWithNoBattery() async throws {

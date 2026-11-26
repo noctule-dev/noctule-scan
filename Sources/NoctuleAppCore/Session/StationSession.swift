@@ -941,7 +941,9 @@ public final class StationSession {
             do {
                 let status = try await client.displayStatus()
                 guard !Task.isCancelled else { return }
-                display = DisplayModel(status: status, info: info)
+                // The layout follows the model once `MDL` names it (`detectedModel` is set before this
+                // loop starts), so a screen is never built with the wrong layout.
+                display = DisplayModel(status: status, info: info, layout: ModelProfile.profile(for: model).display)
             } catch {
                 // A missed or garbled reply: the next scheduled fetch tries again.
             }

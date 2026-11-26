@@ -14,6 +14,10 @@ import Testing
 @MainActor @Suite(.timeLimit(.minutes(3))) struct ScannerViewHelpersTests {
     // MARK: Indicators
 
+    @Test func screenWidthFollowsTheColumns() {
+        #expect(DisplayView.screenWidth(columns: 24) < DisplayView.screenWidth(columns: 30))
+    }
+
     @Test func phaseIndicatorText() {
         let name = "Test Station"
         #expect(ScannerIndicators.phase(.connecting, stationName: name).text == "Connecting…")

@@ -481,6 +481,7 @@ struct MacMenuView: View {
     // MARK: Mirrored
 
     private var mirroredBody: some View {
+        let layout = ModelProfile.profile(for: session.model).display
         let palette = DisplayPalette.factory(model: session.model, mode: session.station.appearance.colorMode)
         return VStack(alignment: .leading, spacing: 8) {
             ZStack {
@@ -489,21 +490,23 @@ struct MacMenuView: View {
                     DisplayRowsView(display: display, palette: palette)
                 }
             }
-            .frame(width: DisplayView.screenWidth, height: DisplayView.screenHeight)
+            .frame(width: DisplayView.screenWidth(columns: layout.columns), height: DisplayView.screenHeight)
             .accessibilityElement(children: .combine)
             .accessibilityLabel("Scanner display")
-            HStack(spacing: 8) {
-                ForEach(Array([FrontPanelKey.soft1, .soft2, .soft3].enumerated()), id: \.offset) { index, key in
-                    let softKey = session.display?.softKeys.first(where: { $0.key == key })
-                    Button { actions.press(key) } label: {
-                        Text(DisplayView.softKeyTitle(softKey)).frame(minWidth: 70)
+            if layout.hasSoftKeyLine {
+                HStack(spacing: 8) {
+                    ForEach(Array([FrontPanelKey.soft1, .soft2, .soft3].enumerated()), id: \.offset) { index, key in
+                        let softKey = session.display?.softKeys.first(where: { $0.key == key })
+                        Button { actions.press(key) } label: {
+                            Text(DisplayView.softKeyTitle(softKey)).frame(minWidth: 70)
+                        }
+                        .disabled(menu.isBusy)
+                        .tracksKeyboardFocus()
+                        .help("Soft key \(index + 1)")
                     }
-                    .disabled(menu.isBusy)
-                    .tracksKeyboardFocus()
-                    .help("Soft key \(index + 1)")
                 }
+                .frame(width: DisplayView.screenWidth(columns: layout.columns))
             }
-            .frame(width: DisplayView.screenWidth)
             Text(MacMenuText.mirroredNote)
                 .font(.callout)
                 .foregroundStyle(.secondary)

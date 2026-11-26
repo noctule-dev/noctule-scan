@@ -79,7 +79,7 @@ struct ScannerView: View {
             }
             .padding(.top, 6)
 
-            DisplayView(display: session.display,
+            DisplayView(display: session.display, layout: profile.display,
                         palette: DisplayPalette.factory(model: model, mode: session.station.appearance.colorMode),
                         placeholder: ScannerIndicators.phase(session.phase, stationName: session.station.name).text,
                         keysEnabled: connected, press: session.press)

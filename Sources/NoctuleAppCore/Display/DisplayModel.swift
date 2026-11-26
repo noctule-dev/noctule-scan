@@ -34,13 +34,16 @@ public struct DisplayModel: Equatable, Sendable {
     public var rows: [DisplayRow]
     public var softKeys: [SoftKey]
     public var isMenu: Bool
+    /// The model's screen: with no soft-key line, every `STS` line is a row and `softKeys` is empty.
+    public var layout: DisplayLayout
 
-    public init(status: DisplayStatus, info: ScannerInfo?) {
+    public init(status: DisplayStatus, info: ScannerInfo?, layout: DisplayLayout = .sds) {
         let menu = info?.isMenu ?? false
         isMenu = menu
+        self.layout = layout
         let keys: [FrontPanelKey] = [.soft1, .soft2, .soft3]
-        if menu && info?.menuScreenKind != .input {
-            // A menu list has no soft-key row: every line is a row.
+        if !layout.hasSoftKeyLine || (menu && info?.menuScreenKind != .input) {
+            // A menu list (or a model with no soft-key line) has no soft-key row: every line is a row.
             rows = status.lines.map(Self.row)
             softKeys = []
         } else {
