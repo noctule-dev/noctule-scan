@@ -671,3 +671,111 @@ private final class Box<Value> { var value: Value? }
         #expect(outcome.leaked == [])
     }
 }
+
+// MARK: Hold by HLD on the BCD436HP (Plan 23 Task 8)
+
+private func holdInfo(_ body: String, mode: String = "Scan Mode", screen: String = "trunk_scan") throws -> ScannerInfo {
+    try ScannerInfo(xml: XMLNode.parse(Data("<ScannerInfo Mode=\"\(mode)\" V_Screen=\"\(screen)\">\(body)</ScannerInfo>".utf8)))
+}
+
+private let holdSystem = "<System Name=\"Fictional\" Index=\"101\" Hold=\"Off\"/>"
+private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
+
+@MainActor
+@Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionHoldCommandTests {
+    @Test func holdTargetMapsEachLevel() throws {
+        let trunk = try holdInfo(holdSystem + holdDept + "<TGID Name=\"TG\" Index=\"1000\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.system, info: trunk) == .system(index: 101))
+        #expect(StationSession.holdTarget(.department, info: trunk) == .department(index: 200, system: 101))
+        #expect(StationSession.holdTarget(.channel, info: trunk) == .trunkChannel(index: 1000))
+        let conv = try holdInfo(holdSystem + holdDept + "<ConvFrequency Name=\"C\" Index=\"1000\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.channel, info: conv) == .conventionalChannel(index: 1000))
+        #expect(StationSession.holdTarget(.system, info: nil) == nil)
+        let noDept = try holdInfo(holdSystem)
+        #expect(StationSession.holdTarget(.department, info: noDept) == nil)
+        #expect(StationSession.holdTarget(.channel, info: noDept) == nil)
+    }
+
+    @Test func noHoldTargetForAnUnprogrammedTalkgroup() throws {
+        let info = try holdInfo(holdSystem + holdDept + "<TGID Name=\"\" Index=\"4294967295\" Hold=\"Off\"/>")
+        #expect(StationSession.holdTarget(.channel, info: info) == nil)
+        #expect(StationSession.holdTarget(.system, info: info) == .system(index: 101))
+    }
+
+    @Test func noHoldInAMenu() throws {
+        let info = try holdInfo(holdSystem + holdDept + "<TGID Name=\"TG\" Index=\"1000\" Hold=\"Off\"/>",
+                                mode: "Menu Tree", screen: "menu_selection")
+        for level in HoldLevel.allCases { #expect(StationSession.holdTarget(level, info: info) == nil) }
+    }
+
+    private func bcdSetup() -> USBSetup {
+        var setup = USBSetup()
+        setup.personality = .bcd436hp
+        return setup
+    }
+
+    @Test func holdSendsOneHLDAndTheNextPushShowsIt() async throws {
+        let outcome = try await withUSBSession(bcdSetup()) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            let system = try #require(rig.session.info?.system?.index)
+            #expect(rig.session.canHold(.system))
+            rig.session.hold(.system)
+            try await waitUntil("HLD sent") { await rig.received("HLD") == 1 }
+            try await waitUntil("the push shows the hold") { rig.session.info?.system?.hold == true }
+            #expect(await rig.commands.contains("HLD,SYS,\(system),"))
+            #expect(await rig.mock.holds == ["SYS:\(system)"])
+            try await waitUntil("flag clear") { rig.session.canHold(.system) }
+            rig.session.hold(.system)
+            try await waitUntil("released") { rig.session.info?.system?.hold == false }
+            #expect(await rig.received("HLD") == 2)
+            #expect(await rig.received("KEY") == 0)
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    @Test func doubleClickSendsOneHLD() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["HLD": .milliseconds(600)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            rig.session.hold(.system)
+            #expect(!rig.session.canHold(.system), "in flight")
+            rig.session.hold(.system)
+            rig.session.hold(.department)
+            try await Task.sleep(for: .milliseconds(1200))
+            #expect(await rig.received("HLD") == 1)
+            #expect(rig.session.canHold(.system), "the flag clears after the reply")
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    @Test func holdAfterStopSendsNothing() async throws {
+        var setup = bcdSetup()
+        setup.replyDelays = ["STS": .seconds(2)]
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            try await rig.stopSession()
+            rig.session.hold(.system)
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(await rig.received("HLD") == 0)
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+
+    @Test func sdsHoldUnchanged() async throws {
+        let outcome = try await withSession { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await waitUntil("display") { rig.session.display != nil }
+            rig.session.hold(.system)
+            try await waitUntil("KEY,A,P") { await rig.commands.contains("KEY,A,P") }
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("HLD") })
+    }
+}
