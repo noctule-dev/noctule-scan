@@ -74,19 +74,23 @@ struct ScannerView: View {
                 } else {
                     volumeKnob
                 }
-                levelKnob(title: "SQL", push: "Menu", key: .squelchPush, current: session.info?.squelch,
+                levelKnob(title: "SQL", push: hasSquelchPush ? "Menu" : " ",
+                          key: hasSquelchPush ? .squelchPush : nil,
+                          current: session.info?.squelch,
                           pending: $pendingSquelch, range: profile.squelchRange, set: session.setScannerSquelch)
             }
             .padding(.top, 6)
 
             DisplayView(display: session.display, layout: profile.display,
+                        keys: profile.frontPanelKeys,
                         palette: DisplayPalette.factory(model: model, mode: session.station.appearance.colorMode),
                         placeholder: ScannerIndicators.phase(session.phase, stationName: session.station.name).text,
                         keysEnabled: connected, press: session.press)
 
-            KeypadView(enabled: connected, press: session.press)
+            KeypadView(enabled: connected, keys: profile.frontPanelKeys, press: session.press)
 
-            KnobView(title: "SCROLL", pushCaption: "Func", readout: nil, angle: Double(scrollTurns) * 18,
+            KnobView(title: "SCROLL", pushCaption: profile.encoderPushCaption,
+                     help: Self.scrollPushHelp(caption: profile.encoderPushCaption), readout: nil, angle: Double(scrollTurns) * 18,
                      enabled: connected,
                      onSteps: turnScroll, onPush: { session.press(.scrollPush) }, diameter: 66)
                 .padding(.top, 6)
@@ -105,12 +109,14 @@ struct ScannerView: View {
         .environment(\.colorScheme, .dark)
     }
 
+    private var hasSquelchPush: Bool { profile.frontPanelKeys.contains(.squelchPush) }
+
     private var volumeKnob: some View {
         levelKnob(title: "VOL", push: "Light", key: .volumePush, current: session.info?.volume,
                   pending: $pendingVolume, range: profile.volumeRange, set: session.setScannerVolume)
     }
 
-    private func levelKnob(title: String, push: String, key: FrontPanelKey, current: Int?, pending: Binding<Int?>,
+    private func levelKnob(title: String, push: String, key: FrontPanelKey?, current: Int?, pending: Binding<Int?>,
                            range: ClosedRange<Int>?, set: @escaping (Int) -> Void) -> some View {
         let shown = pending.wrappedValue ?? current
         let enabled = connected && range != nil
@@ -124,7 +130,13 @@ struct ScannerView: View {
                             lastTurn = Date()
                             set(target)
                         },
-                        onPush: { session.press(key) })
+                        onPush: { if let key { session.press(key) } })
+    }
+
+    /// The handhelds' one encoder: a press makes turning set volume, Func then a press squelch
+    /// (design §5.11). The SDS200's SCROLL push is Func and needs no such help.
+    static func scrollPushHelp(caption: String) -> String? {
+        caption == "Vol" ? "Press: volume. Func, then press: squelch." : nil
     }
 
     /// -135° at the bottom of the range to +135° at the top.

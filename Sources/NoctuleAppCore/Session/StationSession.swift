@@ -1073,9 +1073,11 @@ public final class StationSession {
     public var model: ScannerModel { detectedModel ?? station.connection.modelOverride ?? .sds200 }
 
     /// Presses a front-panel key (`KEY,<code>,P`) through the run's `KeyPressQueue`, in order, one
-    /// at a time. Ignored unless connected; dropped while `maxQueuedKeys` are pending.
+    /// at a time. Ignored unless connected; dropped while `maxQueuedKeys` are pending, and dropped
+    /// when the model lacks the key (`ModelProfile.frontPanelKeys`; design §5.11).
     public func press(_ key: FrontPanelKey) {
-        guard isConnected, let keyInput else { return }
+        guard isConnected, let keyInput,
+              ModelProfile.profile(for: model).frontPanelKeys.contains(key) else { return }
         keyInput.yield(key)
     }
 

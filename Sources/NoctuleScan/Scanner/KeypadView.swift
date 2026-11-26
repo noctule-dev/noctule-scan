@@ -20,9 +20,12 @@ struct PanelKey: Identifiable {
 /// scroll steps (`KnobView`).
 struct KeypadView: View {
     let enabled: Bool
+    /// The keys the model has; a key it lacks is left off the panel and its row closes up.
+    var keys: Set<FrontPanelKey> = Set(FrontPanelKey.allCases)
     let press: (FrontPanelKey) -> Void
 
-    static let rows: [[PanelKey]] = [
+    /// The SDS200's whole keypad (the rows of a model with every key).
+    static let allRows: [[PanelKey]] = [
         [PanelKey(key: .menu, label: "Menu", caption: nil),
          PanelKey(key: .function, label: "Func", caption: nil),
          PanelKey(key: .avoid, label: "Avoid", caption: nil)],
@@ -42,6 +45,10 @@ struct KeypadView: View {
          PanelKey(key: .digit0, label: "0", caption: nil),
          PanelKey(key: .enterYes, label: "E / Yes", caption: nil)],
     ]
+    /// `allRows` without the keys the model lacks (design §5.11); a row left empty is dropped.
+    static func rows(keys: Set<FrontPanelKey>) -> [[PanelKey]] {
+        allRows.map { $0.filter { keys.contains($0.key) } }.filter { !$0.isEmpty }
+    }
     static let replay = PanelKey(key: .replay, label: "Replay", caption: "Record")
 
     static let keyWidth: CGFloat = 62
@@ -49,7 +56,7 @@ struct KeypadView: View {
 
     var body: some View {
         VStack(spacing: Self.spacing) {
-            ForEach(Array(Self.rows.enumerated()), id: \.offset) { _, row in
+            ForEach(Array(Self.rows(keys: keys).enumerated()), id: \.offset) { _, row in
                 HStack(spacing: Self.spacing) {
                     ForEach(row) { key in button(key).frame(width: Self.keyWidth) }
                 }

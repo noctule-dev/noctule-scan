@@ -18,6 +18,9 @@ struct DisplayView: View {
     /// The model's screen: its columns size the screen, and a model with no soft-key line gets no
     /// soft-key buttons (hidden, not disabled).
     var layout: DisplayLayout = .sds
+    /// The model's keys: a model with no soft-key line but soft keys 1–3 (the BCD436HP) gets its
+    /// fixed System, Dept and Channel keys in their place.
+    var keys: Set<FrontPanelKey> = Set(FrontPanelKey.allCases)
     let palette: DisplayPalette
     /// Shown in place of the rows when there is no display yet (connecting, no answer, …).
     let placeholder: String
@@ -30,6 +33,7 @@ struct DisplayView: View {
         VStack(spacing: 10) {
             screen
             if layout.hasSoftKeyLine { softKeys }
+            else if Self.showsFixedKeys(layout: layout, keys: keys) { fixedKeyRow }
         }
     }
 
@@ -63,6 +67,33 @@ struct DisplayView: View {
         guard let key else { return " " }
         if key.isGlyph { return "•" }
         return key.label.isEmpty ? " " : key.label.capitalized
+    }
+
+    /// The BCD436HP's printed keys under its screen: `KEY,A|B|C` (its System, Dept and Channel).
+    static let fixedKeys: [PanelKey] = [
+        PanelKey(key: .soft1, label: "System", caption: nil),
+        PanelKey(key: .soft2, label: "Dept", caption: nil),
+        PanelKey(key: .soft3, label: "Channel", caption: nil),
+    ]
+
+    static func showsFixedKeys(layout: DisplayLayout, keys: Set<FrontPanelKey>) -> Bool {
+        !layout.hasSoftKeyLine && keys.isSuperset(of: [.soft1, .soft2, .soft3])
+    }
+
+    private var fixedKeyRow: some View {
+        HStack(spacing: 12) {
+            ForEach(Self.fixedKeys) { fixed in
+                Button { press(fixed.key) } label: {
+                    Text(fixed.label)
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PanelKeyStyle(height: 24))
+                .disabled(!keysEnabled)
+                .accessibilityLabel(fixed.label)
+            }
+        }
+        .frame(width: Self.screenWidth(columns: layout.columns) + 14)
     }
 
     private var softKeys: some View {

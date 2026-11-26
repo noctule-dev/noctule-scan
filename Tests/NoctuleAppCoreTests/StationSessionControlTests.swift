@@ -708,6 +708,47 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
         for level in HoldLevel.allCases { #expect(StationSession.holdTarget(level, info: info) == nil) }
     }
 
+    // MARK: Keys per model (design §5.11)
+
+    private func keysSent(_ setup: USBSetup, _ keys: [FrontPanelKey]) async throws -> [String] {
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            try await rig.waitForPush()
+            for key in keys { rig.session.press(key) }
+            // Presses are queued one at a time; give a sent one time to reach the mock.
+            try await Task.sleep(for: .milliseconds(700))
+        }
+        return outcome.commands.filter { $0.hasPrefix("KEY") }
+    }
+
+    @Test func bcdPressesItsOwnKeysOnly() async throws {
+        let sent = try await keysSent(bcdSetup(), [.serviceType, .squelchPush, .scrollPush, .soft1])
+        #expect(sent == ["KEY,^,P", "KEY,A,P"])
+    }
+
+    @Test func sds100DropsServicesAndSquelchPushKeepsRange() async throws {
+        var setup = USBSetup()
+        setup.personality = .sds100
+        let sent = try await keysSent(setup, [.serviceType, .squelchPush, .range])
+        #expect(sent == ["KEY,R,P"])
+    }
+
+    @Test func sds150DropsRange() async throws {
+        let sent = try await keysSent(USBSetup(), [.range, .serviceType, .zip])
+        #expect(sent == ["KEY,Z,P"])
+    }
+
+    @Test func sds200StillSendsServices() async throws {
+        let outcome = try await withSession { rig in
+            rig.start()
+            try await rig.waitConnected()
+            rig.session.press(.serviceType)
+            try await waitUntil("KEY,T,P") { await rig.commands.contains("KEY,T,P") }
+        }
+        #expect(outcome.commands.last == "PSI,0")
+    }
+
     private func bcdSetup() -> USBSetup {
         var setup = USBSetup()
         setup.personality = .bcd436hp

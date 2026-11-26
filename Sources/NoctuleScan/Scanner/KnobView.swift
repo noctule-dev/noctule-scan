@@ -62,6 +62,8 @@ struct KnobView: View {
     let title: String
     /// The push function's name, shown as a second-function caption.
     let pushCaption: String
+    /// Help text in place of the default tooltip, or nil.
+    var help: String? = nil
     /// A readout under the knob (the level), or nil.
     let readout: String?
     let angle: Double
@@ -89,7 +91,8 @@ struct KnobView: View {
             }
             .frame(width: diameter, height: diameter)
             .opacity(enabled ? 1 : 0.55)
-            .help("\(title): scroll or drag to turn, click to push (\(pushCaption))")
+            .help(help.map { "\(title): scroll or drag to turn, click to push. \($0)" }
+                    ?? "\(title): scroll or drag to turn, click to push (\(pushCaption))")
 
             VStack(spacing: 1) {
                 Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(Color(white: 0.88))
