@@ -47,7 +47,8 @@ public enum MenuActionError: Error, Equatable, Sendable {
 /// flight. A read whose `GSI` goes unanswered leaves `content` as it was, and is tried again after
 /// `refreshInterval`.
 ///
-/// **Actions** each send at most one state-changing command (`KEY` or `MSV`) and never resend it.
+/// **Actions** each send at most one state-changing command (`KEY`, `MSV`, `MNU` or `MSB`) and never
+/// resend it.
 /// Each throws `.notConnected` unless attached, `.notInMenu` unless `content` is non-nil (`enter`
 /// and `refresh` excepted), and `.busy` while another action runs; `isBusy` covers the whole action,
 /// its re-read included. The destructive and value checks come before any traffic; `choose` and
@@ -60,8 +61,8 @@ public enum MenuActionError: Error, Equatable, Sendable {
 /// **Lifecycle.** `attach(control:)` on `.connected`; `detach()` on any other phase (stop,
 /// suspend, a restart, a failed run) clears `content` and the breadcrumb, cancels the refresh
 /// loop and makes every action in flight throw `.notConnected` at its next step, so nothing more
-/// is sent. That includes a `KEY` or `MSV` already waiting for the client's request slot (behind
-/// another reader's command, for up to a command timeout): each carries its run's `SendPermit`,
+/// is sent. That includes a `KEY`, `MSV`, `MNU` or `MSB` already waiting for the client's request
+/// slot (behind another reader's command, for up to a command timeout): each carries its run's `SendPermit`,
 /// which `detach()` revokes, and the client writes it only if the permit still holds once it has
 /// the slot (`ScannerClient.send(_:onlyIf:)`; flaky-sweep review I2, 2026-11-22). The client
 /// comes only from `control` (the runner's `control()`, nil once its stop begins).
@@ -246,8 +247,9 @@ public final class MenuModel {
 
     // MARK: Actions
 
-    /// Enters the menu (`KEY,M,P`, or `MNU,TOP,` where the model has menu commands). Reads `GSI` first: if the scanner is already in a menu it only
-    /// re-reads (nothing is sent). Throws `.noAnswer`, sending nothing, if that read goes unanswered.
+    /// Enters the menu (`KEY,M,P`, or `MNU,TOP,` where the model has menu commands). Reads `GSI`
+    /// first: if the scanner is already in a menu it only re-reads (nothing is sent). Throws
+    /// `.noAnswer`, sending nothing, if that read goes unanswered.
     @discardableResult
     public func enter() async throws -> MenuContent? {
         try await perform(inMenu: false) { link in
@@ -326,11 +328,11 @@ public final class MenuModel {
         }
     }
 
-    /// Leaves the menu from any depth (`KEY,L,P`, or `MSB,,RETURN_PREVOUS_MODE`); scanning resumes. Reads `GSI` first, since
-    /// outside a menu that key is Avoid and `content` can lag the scanner (the radio's panel left
-    /// the menu, or an earlier Exit took effect but its replies were lost): if the scanner is no
-    /// longer in a menu nothing is sent, `content` turns nil and nil is returned. Throws
-    /// `.noAnswer`, sending nothing, if that read goes unanswered.
+    /// Leaves the menu from any depth (`KEY,L,P`, or `MSB,,RETURN_PREVOUS_MODE`); scanning resumes.
+    /// Reads `GSI` first, since outside a menu that key is Avoid and `content` can lag the scanner
+    /// (the radio's panel left the menu, or an earlier Exit took effect but its replies were lost):
+    /// if the scanner is no longer in a menu nothing is sent, `content` turns nil and nil is
+    /// returned. Throws `.noAnswer`, sending nothing, if that read goes unanswered.
     @discardableResult
     public func exit() async throws -> MenuContent? {
         try await perform(inMenu: true) { link in

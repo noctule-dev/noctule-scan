@@ -1541,7 +1541,7 @@ private func navCommands(_ commands: [String]) -> [String] {
     }
 
     @Test func exitSendsMSBReturnOnlyInAMenu() async throws {
-        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, _, mock in
+        try await withMenuModel(personality: .bcd436hp, model: .bcd436hp) { menu, client, mock in
             _ = try await menu.enter()
             let mark = await mock.receivedCommands.count
             _ = try await menu.exit()
@@ -1551,6 +1551,14 @@ private func navCommands(_ commands: [String]) -> [String] {
             #expect(after[..<msb].contains("GSI"))
             #expect(!(await mock.isInMenu))
             #expect(menu.content == nil)
+            // Scanning again (the panel left): exit() reads GSI, sends nothing, content stays nil.
+            _ = try await menu.enter()
+            try await client.leaveMenu()
+            let before = await mock.receivedCommands.filter { $0.hasPrefix("MSB") }.count
+            let none = try await menu.exit()
+            #expect(none == nil)
+            #expect(menu.content == nil)
+            #expect(await mock.receivedCommands.filter { $0.hasPrefix("MSB") }.count == before)
         }
     }
 
@@ -1578,6 +1586,7 @@ private func navCommands(_ commands: [String]) -> [String] {
             let error = await menuError { try await menu.exit() }
             #expect(left.withLock { $0 }, "the panel left the menu")
             if case .rejected = error {} else { Issue.record("expected .rejected, got \(String(describing: error))") }
+            if case .rejected = menu.lastError {} else { Issue.record("lastError: \(String(describing: menu.lastError))") }
             let log = await mock.receivedCommands
             #expect(log.filter { $0 == "MSB,,RETURN_PREVOUS_MODE" }.count == 2, "the panel's and the model's, never resent: \(log)")
             #expect(menu.content == nil)
@@ -1588,7 +1597,8 @@ private func navCommands(_ commands: [String]) -> [String] {
     @Test func notResentAfterADroppedReply() async throws {
         try await withMenuModel(personality: .bcd436hp, model: .bcd436hp, commandTimeout: .milliseconds(400)) { menu, _, mock in
             await mock.setFaults(MockFaults(dropNextReply: "MNU"))
-            _ = await menuError { try await menu.enter() }
+            let error = await menuError { try await menu.enter() }
+            #expect(error == .noAnswer)
             let log = await mock.receivedCommands
             #expect(log.filter { $0 == "MNU,TOP," }.count == 1, "\(log)")
         }
@@ -1618,7 +1628,9 @@ private func navCommands(_ commands: [String]) -> [String] {
             }
             menu.detach()
             held.withLock { $0?.cancel() }
-            _ = await task.result
+            let result = await task.result
+            if case .failure(let error) = result { #expect(error as? MenuActionError == .notConnected) }
+            else { Issue.record("expected .notConnected, got \(result)") }
             await held.withLock { $0 }?.value
             #expect(!(await mock.receivedCommands.contains("MSB,,RETURN_PREVOUS_MODE")))
             #expect(await mock.isInMenu)

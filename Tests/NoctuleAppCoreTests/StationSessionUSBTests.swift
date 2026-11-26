@@ -592,6 +592,25 @@ import NoctuleStore
         #expect(outcome.commands.last == "PSI,0", "\(outcome.commands.suffix(5))", sourceLocation: sourceLocation)
     }
 
+    /// Plan 23 Task 6: a BCD436HP session's menu navigates by `MNU`/`MSB`, never by `KEY,M,P`/`KEY,L,P`
+    /// (Exit by Avoid would be wrong): `StationSession` hands the profile's navigation to the menu.
+    @Test func bcd436hpSessionMenuUsesMenuCommands() async throws {
+        var setup = USBSetup()
+        setup.personality = .bcd436hp
+        let outcome = try await withUSBSession(setup) { rig in
+            rig.start()
+            try await rig.waitConnected()
+            #expect(rig.session.menu.navigation == .menuCommands)
+            _ = try await rig.session.menu.enter()
+            _ = try await rig.session.menu.exit()
+            let commands = await rig.commands
+            #expect(commands.contains("MNU,TOP,"), "\(commands)")
+            #expect(commands.contains("MSB,,RETURN_PREVOUS_MODE"), "\(commands)")
+            #expect(!commands.contains("KEY,L,P") && !commands.contains("KEY,M,P"), "\(commands)")
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("KAL") || $0.hasPrefix("GCS") || $0.hasPrefix("MSM") || $0.hasPrefix("POF") })
+    }
+
     /// An SDS100 station connects as an SDS150's does, minus the battery: no reading and no `GCS`
     /// however long it runs, and the knobs' 0–15 (a volume or squelch past it is sent as 15).
     @Test func sds100SessionConnectsWithNoBattery() async throws {
