@@ -59,6 +59,7 @@ struct StationContentView: View {
                                       macMenuShowing: { [session, view] in
                                           view == .macStyle && (session.menu.isInMenu || session.info?.isMenu == true)
                                       },
+                                      menuShortcutsAllowed: view == .scanner,
                                       stepsAside: quickKeysShown) { session.press($0) })
     }
 }

@@ -18,20 +18,12 @@ import Testing
         #expect(DisplayView.screenWidth(columns: 24) < DisplayView.screenWidth(columns: 30))
     }
 
-    @Test func keypadRowsFollowTheModelsKeys() {
-        func keys(_ model: ScannerModel) -> [FrontPanelKey] {
-            KeypadView.rows(keys: ModelProfile.profile(for: model).frontPanelKeys).flatMap { $0 }.map(\.key)
+    @Test func everyModelShowsZipServicesRange() {
+        for model in ScannerModel.allCases {
+            let rows = KeypadView.rows(keys: ModelProfile.profile(for: model).frontPanelKeys)
+            #expect(rows[1].map(\.key) == [.zip, .serviceType, .range], "\(model)")
+            #expect(rows.allSatisfy { !$0.isEmpty })
         }
-        #expect(KeypadView.rows(keys: ModelProfile.profile(for: .sds200).frontPanelKeys).map { $0.map(\.key) }
-                == KeypadView.allRows.map { $0.map(\.key) })
-        let bcd = keys(.bcd436hp)
-        #expect(!bcd.contains(.serviceType) && bcd.contains(.zip) && bcd.contains(.range))
-        let sds100 = keys(.sds100)
-        #expect(!sds100.contains(.serviceType) && sds100.contains(.range))
-        let sds150 = keys(.sds150)
-        #expect(!sds150.contains(.serviceType) && !sds150.contains(.range) && sds150.contains(.zip))
-        // The row closes up and none is left empty.
-        #expect(KeypadView.rows(keys: ModelProfile.profile(for: .sds150).frontPanelKeys).allSatisfy { !$0.isEmpty })
     }
 
     @Test func bcdFixedKeysLabels() {

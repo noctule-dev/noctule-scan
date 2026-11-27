@@ -154,6 +154,20 @@ import Testing
                           menuChords: menuChords, macMenuActive: macMenu)
     }
 
+    @Test func macStyleSwallowsShortcutChords() throws {
+        var map = KeyMap()
+        map.overrides[FrontPanelKey.range.rawValue] = "⌘8"
+        let r = KeyboardRouter(map: map.resolved(for: .sds200))
+        let chord = try #require(KeyChord("⌘8")), digit = try #require(KeyChord("4"))
+        func go(_ c: KeyChord, _ allowed: Bool) -> KeyRouting.Decision {
+            KeyRouting.decide(chord: c, router: r, isRepeat: false, focusElsewhere: false, menuChords: [],
+                              menuShortcutsAllowed: allowed)
+        }
+        #expect(go(chord, false) == .swallow)
+        #expect(go(chord, true) == .press(.range))
+        #expect(go(digit, false) == .press(.digit4))
+    }
+
     @Test func macMenuTakesArrowsReturnAndEscape() throws {
         let up = try #require(KeyChord("↑")), down = try #require(KeyChord("↓")), ret = try #require(KeyChord("↩"))
         let esc = KeyRouting.escape
