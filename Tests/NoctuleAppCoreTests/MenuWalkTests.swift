@@ -520,6 +520,19 @@ private func servicesWire(_ enter: String) -> [String] {
         }
     }
 
+    @Test func wrongArrivalStops() async throws {
+        try await withWalk(.sds200) { rig in
+            let path = MenuPath(steps: MenuPath.range.steps, destination: "Set Rang")
+            let error = await walkError { try await rig.menu.walk(path) }
+            #expect(error == .walkStopped(expected: "Set Rang", found: "Set Range"))
+            #expect(rig.menu.lastError == .walkStopped(expected: "Set Rang", found: "Set Range"))
+            let log = await rig.log()
+            #expect(stateChanging(log) == ["KEY,M,P", "MSV,,1", "MSV,,0"], "\(log)")
+            #expect(wire(log) == rangeWire("KEY,M,P") + ["GSI", "MSI"], "one re-read after the stop: \(log)")
+            #expect(await rig.menuPath().last == "Set Range", "left where it stopped")
+        }
+    }
+
     // MARK: A slow redraw
 
     /// The panel puts the scanner back on the top menu just as the first `MSV`'s re-read starts, so
@@ -612,6 +625,43 @@ private func servicesWire(_ enter: String) -> [String] {
             #expect(stateChanging(log) == ["MNU,TOP,"], "the MSV was withheld: \(log)")
             #expect(await rig.menuPath().count == 1)
         }
+    }
+
+    /// The enter queued for the client's request slot behind a `GSI` the mock never answers (on the
+    /// `control()` call after the walk's first `GSI`); a detach then withholds it.
+    private func enterWithheldOnceDetached(_ target: WalkTarget) async throws {
+        let armed = Mutex(false)
+        let held = Mutex<Task<Void, Never>?>(nil)
+        let mockFaults = Mutex<(@Sendable (MockFaults) async -> Void)?>(nil)
+        try await withWalk(target, commandTimeout: .seconds(10), control: { client, log in
+            guard log == ["GSI"], armed.withLock({ let was = $0; $0 = true; return !was }),
+                  let setFaults = mockFaults.withLock({ $0 }) else { return }
+            await setFaults(MockFaults(dropNextRequest: "GSI"))
+            held.withLock { $0 = Task { _ = try? await client.scannerInfo() } }
+            try? await Task.sleep(for: .milliseconds(100))
+        }) { rig in
+            mockFaults.withLock { $0 = rig.setFaults }
+            let menu = rig.menu
+            let task = Task { try await menu.walk(.range) }
+            try await waitUntil("the enter queued behind the held GSI", .seconds(5)) {
+                await rig.client.requestsWaitingForTheSlot == 1
+            }
+            menu.detach()
+            held.withLock { $0?.cancel() }
+            let result = await task.result
+            if case .failure(let error) = result { #expect(error as? MenuActionError == .notConnected) }
+            else { Issue.record("expected .notConnected, got \(result)") }
+            await held.withLock { $0 }?.value
+            let log = await rig.log()
+            #expect(stateChanging(log).isEmpty, "the enter was withheld: \(log)")
+            #expect(log == ["GSI", "GSI"], "the walk's GSI and the held one: \(log)")
+            #expect(await !rig.isInMenu())
+        }
+    }
+
+    @Test func detachWhileTheEnterWaitsForTheSlotWithholdsIt() async throws {
+        try await enterWithheldOnceDetached(.sds200)
+        try await enterWithheldOnceDetached(.bcd436hp)
     }
 
     @Test func walkIsOneAction() async throws {

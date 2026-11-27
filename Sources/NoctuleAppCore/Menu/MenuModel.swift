@@ -276,12 +276,15 @@ public final class MenuModel {
                 self.apply(snapshot)
                 return snapshot.content
             }
-            return try await self.command(link) { client, permit in
-                switch self.navigation {
-                case .keys: try await client.press(.menu, onlyIf: permit)
-                case .menuCommands: try await client.openMenu(onlyIf: permit)
-                }
-            }
+            return try await self.command(link) { try await self.sendEnter($0, onlyIf: $1) }
+        }
+    }
+
+    /// The enter command (`KEY,M,P`, or `MNU,TOP,`), carrying the run's permit: `enter()`'s and a walk's.
+    private func sendEnter(_ client: ScannerClient, onlyIf permit: @escaping @Sendable () -> Bool) async throws {
+        switch navigation {
+        case .keys: try await client.press(.menu, onlyIf: permit)
+        case .menuCommands: try await client.openMenu(onlyIf: permit)
         }
     }
 
@@ -445,12 +448,7 @@ public final class MenuModel {
             }
             if info.functionOn == true { throw MenuActionError.functionPending }
 
-            var current = try await self.commandSnapshot(link) { client, permit in
-                switch self.navigation {
-                case .keys: try await client.press(.menu, onlyIf: permit)
-                case .menuCommands: try await client.openMenu(onlyIf: permit)
-                }
-            }
+            var current = try await self.commandSnapshot(link) { try await self.sendEnter($0, onlyIf: $1) }
             // The screen the latest command was sent on: none (scanning) for the enter.
             var previousTitle: String?
             for step in path.steps {
