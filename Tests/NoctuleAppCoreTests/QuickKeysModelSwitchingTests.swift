@@ -208,6 +208,18 @@ private func sets(_ commands: [String]) -> [String] {
     commands.filter { setValues($0) != nil }
 }
 
+/// One of the open pop-over's background polls: `FQK`, `SQK,<list key>` or `DQK,<list key>,<system key>`, with
+/// no values (never a `GLT`, never a set).
+private func isPollRead(_ command: String) -> Bool {
+    let parts = command.split(separator: ",", omittingEmptySubsequences: false)
+    switch parts.first?.uppercased() {
+    case "FQK": return parts.count == 1
+    case "SQK": return parts.count == 2
+    case "DQK": return parts.count == 3
+    default: return false
+    }
+}
+
 /// The 100 values of a quick-key set, or nil for anything else.
 private func setValues(_ command: String) -> [String]? {
     let parts = command.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
@@ -969,7 +981,9 @@ private func clickHeldAtTheSlot(_ rig: QKSwitchRig, _ row: QuickKeyRow, checkRea
                                      .child(list: 1, system: 999, child: 1)] {
                 await model.toggle(row)
             }
-            #expect(await rig.commands().count == mark, "nothing sent (\(rig.label))")
+            // The open pop-over's polls go on meanwhile (every `pollInterval`); only they may have been sent.
+            #expect(Array(await rig.commands().dropFirst(mark)).filter { !isPollRead($0) } == [],
+                    "nothing sent but the polls (\(rig.label))")
             // A list that isn't monitored keeps a working tile.
             #expect(model.lists.first { $0.index == 8 }?.monitored == false, "\(rig.label)")
             #expect(model.switchState(for: .list(8)) == .off, "\(rig.label)")
