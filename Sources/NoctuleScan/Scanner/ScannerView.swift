@@ -21,10 +21,12 @@ struct ScannerView: View {
     let session: StationSession
 
     /// Levels asked for by a knob turn and not yet reported back by the scanner.
-    @State private var hiddenShortcutMessage: String?
     @State private var pendingVolume: Int?
     @State private var pendingSquelch: Int?
     @State private var lastTurn = Date.distantPast
+    /// The walk message the caption no longer shows (5 s passed, or a keypad click came since):
+    /// `shownShortcutMessage` hides the session's message while it is this one.
+    @State private var hiddenShortcutMessage: String?
     @State private var scrollTurns = 0
 
     private var connected: Bool {

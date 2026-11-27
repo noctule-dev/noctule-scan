@@ -1137,8 +1137,9 @@ public final class StationSession {
 
     /// Opens the shortcut's screen by `MenuModel.walk(_:)` with the model's path
     /// (`ModelProfile.menuShortcuts`). Throws `.notConnected` unless connected; `.busy` while a walk
-    /// runs or a key press is queued or sending (`pendingKeyPresses`; design §5.1 step 0), with
-    /// nothing sent; `.walkStopped(expected: <destination>, found: nil)` when the model has no path.
+    /// runs, a key press is queued or sending (`pendingKeyPresses`), a BCD436HP `HLD` is in flight
+    /// (`holdInFlight`) or a quick-key click is under way (`QuickKeysModel.hasPendingChange`; design
+    /// §5.1 step 0), with nothing sent; `.walkStopped(expected: <destination>, found: nil)` when the model has no path.
     /// Otherwise `menuShortcutInFlight` is set with no await after those checks, and cleared when the
     /// walk ends, however it ends.
     @discardableResult
@@ -1150,7 +1151,8 @@ public final class StationSession {
     /// `openMenuShortcut`'s checks, and the flag; synchronous, so two presses can't both pass.
     private func beginMenuShortcut(_ shortcut: MenuShortcut) throws(MenuActionError) -> MenuPath {
         guard isConnected else { throw .notConnected }
-        guard menuShortcutInFlight == nil, pendingKeyPresses == 0 else { throw .busy }
+        guard menuShortcutInFlight == nil, pendingKeyPresses == 0, !holdInFlight,
+              !quickKeys.hasPendingChange else { throw .busy }
         guard let path = ModelProfile.profile(for: model).menuShortcuts[shortcut] else {
             throw .walkStopped(expected: MenuShortcutText.destination(of: shortcut), found: nil)
         }
@@ -1211,13 +1213,15 @@ public final class StationSession {
     }
 
     /// True while connected and the level can be held: an SDS model's display has a soft key with
-    /// the level's label; on the BCD436HP, no `HLD` is in flight and the last push names the
-    /// element (`holdTarget`).
+    /// the level's label; on the BCD436HP, no `HLD`, menu action or menu walk
+    /// (`menuShortcutInFlight`) is in flight and the last push names the element (`holdTarget`).
     public func canHold(_ level: HoldLevel) -> Bool {
         guard isConnected else { return false }
         switch ModelProfile.profile(for: model).holdMethod {
         case .softKeyLabel: return Self.holdKey(level, display: display) != nil
-        case .holdCommand: return !holdInFlight && !menu.isBusy && keyGate != nil && Self.holdTarget(level, info: info) != nil
+        case .holdCommand:
+            return !holdInFlight && !menu.isBusy && menuShortcutInFlight == nil && keyGate != nil
+                && Self.holdTarget(level, info: info) != nil
         }
     }
 

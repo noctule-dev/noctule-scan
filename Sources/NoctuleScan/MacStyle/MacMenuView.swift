@@ -163,7 +163,7 @@ enum MacMenuText {
         case .alreadyInMenu: "The scanner is already in a menu. Nothing was sent."
         case .functionPending: "Func is on at the scanner. Nothing was sent."
         case .walkStopped(let expected, let found):
-            "Couldn't open \(expected): the scanner showed \(found ?? "no menu"). Nothing more was sent."
+            "The menu walk stopped at \(expected): the scanner showed \(found ?? "no menu"). Nothing more was sent."
         case .busy, .needsConfirmation, .notInMenu, .notConnected: nil
         }
     }

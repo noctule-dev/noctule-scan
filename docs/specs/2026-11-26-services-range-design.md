@@ -115,7 +115,8 @@ Range) and runs, under `perform`'s rules (connected, not busy, `isBusy` for its 
 
 0. **Refused before anything is read** (`.busy`, nothing sent) while the session's key queue holds
    or is sending a press (`KeyPressQueue`), **(designer's call)**: a queued `KEY` could otherwise
-   land between a step's check and its `MSV`. §5.4 drops new presses for the walk's length.
+   land between a step's check and its `MSV`. §5.4 drops new presses for the walk's length. Since
+   the final review also while a BCD436HP `HLD` or a quick-key click is under way (§10).
 1. **Read `GSI`.** Unanswered: throw `.noAnswer`, nothing sent. **In a menu: send nothing**, show
    the menu as `refresh()` would, and throw a new error (name the builder's, e.g.
    `.alreadyInMenu`) so the view can say why nothing happened **(issue #14; designer's call for the
@@ -300,8 +301,10 @@ Scanner view only (nothing added to the Mac-style view), and the approval of thi
   relies on `GSI`'s and `MSI`'s names agreeing on hardware (§7 S4).
 - **`MenuActionError.walkStopped(expected:found:)`.** `expected` is the screen needed at the failing
   step (for example `Menu`), or the destination at arrival; the Scanner view's text always names the
-  destination (`MenuShortcutText`). An unanswered `MSI` on a step's new screen is `.walkStopped`, not
-  `.noAnswer`. `alreadyInMenu` and `functionPending` stop the walk before anything is sent.
+  destination (`MenuShortcutText`); the Mac-style view's text (`MacMenuText`, shown when the user
+  switches views after a failed walk) names no destination: "The menu walk stopped at <expected>: the
+  scanner showed <found>." An unanswered or unparsable `MSI` on a step's new screen is
+  `.walkStopped`, not `.noAnswer` (an unanswered `GSI` re-read is `.noAnswer`). `alreadyInMenu` and `functionPending` stop the walk before anything is sent.
 - **`enter()` and the walk share one `sendEnter`** helper (same permit, same request slot).
 - **The key-queue refusal (§5.1 step 0) lives in `StationSession`**, not `MenuModel`
   (`pendingKeyPresses`, counted in the run's `KeyGate`: +1 before the yield, -1 exactly once when the
@@ -323,5 +326,16 @@ Scanner view only (nothing added to the Mac-style view), and the approval of thi
 - **Hand check (Task 5).** The app launched and quit cleanly on the network mock and the BCD436HP
   serial mock (no stray commands, `PSI,0` last, counters 0). The click-through and screenshots were
   not done: the build session had no computer-use tools and no Screen Recording (§7 S5).
-- **A known window, accepted for now:** between `startMenuShortcut` and the walk setting
-  `menu.isBusy` (one main-actor turn), the BCD436HP Hold controls' `canHold` is still true.
+- **A walk, a BCD436HP `HLD` and a quick-key click exclude each other (final review; designer's
+  call).** `canHold` on the BCD436HP is false while `menuShortcutInFlight` is set (so from the press,
+  before the walk's `perform` sets `menu.isBusy`), and `beginMenuShortcut` refuses `.busy`, nothing
+  sent, while an `HLD` is in flight (`holdInFlight`) or a quick-key click is queued or under way
+  (`QuickKeysModel.hasPendingChange`: its checks, its one set and its re-read), alongside the
+  key-queue refusal of §5.1 step 0. So no `HLD` and no set clicked before the walk can be written
+  after its `MNU,TOP,` or `KEY,M,P`.
+- **A residual window, accepted (final review):** a quick-key click made *while* a walk runs is not
+  refused by the walk; its set is withheld only once the walk's first re-read shows the menu
+  (`menu.onInMenuChanged` revokes its `SendPermit`), so a set waiting for the request slot behind the
+  walk's enter can still take the slot before that re-read and be written in the menu. The same window
+  already exists for a keypad `KEY,M,P` (pre-Plan 24). Closing it would mean the walk revoking the
+  quick keys' permit as it starts, a change to `QuickKeysModel`'s menu state not made here.

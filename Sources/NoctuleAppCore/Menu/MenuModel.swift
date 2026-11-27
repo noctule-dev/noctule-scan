@@ -36,7 +36,9 @@ public enum MenuActionError: Error, Equatable, Sendable {
     case functionPending
     /// A walk stopped: the screen it needed (`expected`, a step's screen or the destination) wasn't
     /// what the scanner showed (`found`, the title `GSI` gave; nil outside a menu). Nothing more
-    /// was sent, the screen was re-read, and the scanner was left where it was.
+    /// was sent, the screen was re-read, and the scanner was left where it was. An `MSI` on a
+    /// step's new screen that goes unanswered or doesn't parse (the screen is then `.mirrored`, with
+    /// no list to check) also ends here, not as `.noAnswer`; an unanswered `GSI` re-read is `.noAnswer`.
     case walkStopped(expected: String, found: String?)
 }
 
