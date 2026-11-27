@@ -27,7 +27,8 @@ enum MockScreens {
     static func scannerInfoXML(_ moment: MockMoment, scenario: MockScenario, volume: Int, squelch: Int,
                                lineBreak: String = "\n",
                                idleForm: MockPersonality.IdleForm = .trunkSite, seconds: Double = 0,
-                               decimalRssi: Bool = false) -> String {
+                               decimalRssi: Bool = false, functionOn: Bool = false) -> String {
+        let func_ = functionOn ? "On" : "Off"
         var lines = ["<?xml version=\"1.0\" encoding=\"utf-8\"?>"]
         let idleScan: Bool
         if scenario.mode == .trunk, idleForm == .conventionalScan, case .idle = moment { idleScan = true } else { idleScan = false }
@@ -97,11 +98,11 @@ enum MockScreens {
         // The BCD436HP's `Rssi` is a decimal, a fictional 0.1624 a signal bar (design §3.4, §5.7).
         let rssiText = decimalRssi ? String(format: "%.3f", Double(bars) * 0.1624) : String(rssi)
         if idleScan {
-            lines.append("<Property F=\"Off\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"0\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
+            lines.append("<Property F=\"\(func_)\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"0\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
                 + "P25Status=\"None\" Mute=\"Mute\" Backlight=\"100\" A_Led=\"Off\" Dir=\"Up\" Rssi=\"-999\"/>")
             lines += ["<ViewDescription>", "<OverWrite Text=\"Scanning...\" />", "</ViewDescription>"]
         } else {
-            lines.append("<Property F=\"Off\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"\(bars)\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
+            lines.append("<Property F=\"\(func_)\" VOL=\"\(volume)\" SQL=\"\(squelch)\" Sig=\"\(bars)\" Att=\"Off\" Rec=\"Off\" KeyLock=\"Off\" "
                 + "P25Status=\"\(scenario.mode == .trunk ? "PT1" : "None")\" Mute=\"Unmute\" Backlight=\"100\" A_Led=\"Off\" Dir=\"Up\" Rssi=\"\(rssiText)\"/>")
             lines.append("<ViewDescription></ViewDescription>")
         }

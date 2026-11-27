@@ -14,7 +14,8 @@ import NoctuleStore
 // a refused action must send no KEY or MSV. Every wait is bounded and every test stops the session
 // and the mock in all paths. All names and values are fictional.
 
-private let topItems = ["Set Scan Selection", "Set Your Location", "Search for...", "Display Options", "Settings"]
+private let topItems = ["Set Scan Selection", "Set Your Location", "Select Service Types", "Search for...", "Display Options",
+                          "Settings"]
 
 private func screen(_ content: MenuContent?) -> MenuScreen? {
     switch content {
@@ -200,7 +201,7 @@ private func menuActionHeldAtTheSlot(
             guard case .list(let top) = content else {
                 Issue.record("not a list: \(String(describing: content))"); return
             }
-            #expect(top.items.count == 5)
+            #expect(top.items.count == 6)
             #expect(top.items.map(\.name) == topItems)
             #expect(menu.content == content)
             #expect(menu.breadcrumb == ["Menu"])
@@ -220,15 +221,15 @@ private func menuActionHeldAtTheSlot(
             let menu = rig.session.menu
             let top = try #require(screen(try await menu.enter()))
             let item = try #require(top.items.first { $0.name == "Display Options" })
-            #expect(item.index == 4, "MSI omits Analyze (3); the rest keep their indexes")
+            #expect(item.index == 5, "MSI omits Analyze (4); the rest keep their indexes")
             let mark = await commandMark(rig.mock)
             let content = try await menu.choose(item, on: top)
             #expect(isList(content))
             #expect(title(content) == "Display Options")
             #expect(menu.content == content)
             let commands = await menuCommands(rig.mock, since: mark)
-            #expect(states(commands) == ["MSV,,4"], "\(commands)")
-            let msv = try #require(commands.firstIndex(of: "MSV,,4"))
+            #expect(states(commands) == ["MSV,,5"], "\(commands)")
+            let msv = try #require(commands.firstIndex(of: "MSV,,5"))
             #expect(msv > 0 && commands[..<msv].allSatisfy { $0 == "MSI" }, "an MSI re-check first: \(commands)")
             #expect(commands[(msv + 1)...].allSatisfy { $0 == "MSI" }, "then reads only: \(commands)")
             #expect(commands[(msv + 1)...].count >= 1, "the screen is re-read after the action")
@@ -478,6 +479,7 @@ private func menuActionHeldAtTheSlot(
                 #expect(menu.breadcrumb == ["Menu"])
                 try await panel.press(.scrollRight)
                 try await panel.press(.scrollRight)
+                try await panel.press(.scrollRight)
                 try await panel.press(.enterYes)
                 try await waitUntil("the model follows the panel to Search for...", .seconds(3)) {
                     title(menu.content) == "Search for..."
@@ -490,7 +492,7 @@ private func menuActionHeldAtTheSlot(
             // The model only read; every key was the panel's.
             let commands = await menuCommands(rig.mock)
             #expect(msvs(commands).isEmpty)
-            #expect(keys(commands) == ["KEY,M,P", "KEY,>,P", "KEY,>,P", "KEY,E,P", "KEY,L,P"])
+            #expect(keys(commands) == ["KEY,M,P", "KEY,>,P", "KEY,>,P", "KEY,>,P", "KEY,E,P", "KEY,L,P"])
         }
         #expect(outcome.leaked == [])
     }
@@ -501,7 +503,7 @@ private func menuActionHeldAtTheSlot(
             let menu = rig.session.menu
             try await withPanel(rig) { panel in
                 try await panel.press(.menu)
-                for _ in 0..<3 { try await panel.press(.scrollRight) }
+                for _ in 0..<4 { try await panel.press(.scrollRight) }
                 try await panel.press(.enterYes)
             }
             #expect(await rig.mock.menuPath.last == "Analyze")
@@ -880,16 +882,16 @@ private func menuActionHeldAtTheSlot(
             let item = try #require(top.items.first { $0.name == "Display Options" })
             let mark = await commandMark(rig.mock)
             let first = Task { try await menu.choose(item, on: top) }
-            try await waitUntil("MSV sent", .seconds(5)) { await rig.commands.contains("MSV,,4") }
+            try await waitUntil("MSV sent", .seconds(5)) { await rig.commands.contains("MSV,,5") }
             try await waitUntil("the re-read's MSI sent", .seconds(5)) {
                 let since = await menuCommands(rig.mock, since: mark)
-                return since.lastIndex(of: "MSI").map { $0 > (since.firstIndex(of: "MSV,,4") ?? Int.max) } ?? false
+                return since.lastIndex(of: "MSI").map { $0 > (since.firstIndex(of: "MSV,,5") ?? Int.max) } ?? false
             }
             #expect(menu.isBusy)
             #expect(await menuError { try await menu.choose(item, on: top) } == .busy)
             #expect(await menuError { try await menu.back() } == .busy)
             #expect(title(try await first.value) == "Display Options")
-            #expect(states(await menuCommands(rig.mock, since: mark)) == ["MSV,,4"])
+            #expect(states(await menuCommands(rig.mock, since: mark)) == ["MSV,,5"])
         }
         #expect(outcome.leaked == [])
     }
@@ -914,7 +916,7 @@ private func menuActionHeldAtTheSlot(
             #expect(title(content) == "Display Options")
             #expect(!menu.isBusy)
             #expect(menu.lastError == nil, "a refusal for busy doesn't overwrite the running action's outcome")
-            #expect(states(await menuCommands(rig.mock, since: mark)) == ["MSV,,4"])
+            #expect(states(await menuCommands(rig.mock, since: mark)) == ["MSV,,5"])
         }
         #expect(outcome.leaked == [])
     }
@@ -1400,7 +1402,7 @@ private func menuActionHeldAtTheSlot(
             let top = try #require(screen(try await menu.enter()))
             let item = try #require(top.items.first { $0.name == "Display Options" })
             let action = Task { try await menu.choose(item, on: top) }
-            try await waitUntil("MSV sent", .seconds(3)) { await rig.commands.contains("MSV,,4") }
+            try await waitUntil("MSV sent", .seconds(3)) { await rig.commands.contains("MSV,,5") }
             let mark = await commandMark(rig.mock)
             try await rig.stopSession()
             let result = await action.result
