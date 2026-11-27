@@ -21,7 +21,11 @@ import Foundation
 /// append after, `E` saves (digits on the name entry do nothing); an action's effect beyond the
 /// action log (only Set All Lists Off/On change anything); the `Index` and `MenuSummary` indexes
 /// (fixed fictional numbers per screen); the entry titles' `MenuSummary` name on list screens
-/// (the screen title); a pick-one screen listing plain option names.
+/// (the screen title); a pick-one screen listing plain option names; Select Service Types as a
+/// plain on/off list placed after Set Your Location (its names, the generic categories, and their
+/// states are fictional, and the radio's own screen is unverified); and, outside this type, that
+/// `Property F` reads On after a `KEY,F,P` until the next `KEY` of any code is handled (a second
+/// `KEY,F,P` sets it On again), without changing what that next key does.
 struct MockMenu: Sendable {
     static let mainTitle = "       --- M E N U ---"
     static let rowsOnScreen = 9
@@ -100,6 +104,13 @@ struct MockMenu: Sendable {
         let location = add(Node(name: "Set Your Location", kind: .menu), under: root)
         add(Node(name: "Set Range", kind: .number, value: "30.0", maxLength: 5, enableKeys: "0123456789.",
                  addedInformation: "          (mile)", leavesMenuOnSave: true), under: location)
+
+        // Select Service Types (design §5.5): the type-select list the Services key opens.
+        let services = add(Node(name: "Select Service Types", kind: .toggleList), under: root)
+        for (name, isOn) in [("Multi-Dispatch", true), ("Law Dispatch", true), ("Fire Dispatch", true),
+                             ("EMS Dispatch", true), ("Custom 1", true), ("Hospital", false), ("Railroad", false)] {
+            add(Node(name: name, kind: .toggle, isOn: isOn), under: services)
+        }
 
         let search = add(Node(name: "Search for...", kind: .menu), under: root)
         let custom = add(Node(name: "Edit Custom", screenTitle: "Select Custom", kind: .menu), under: search)

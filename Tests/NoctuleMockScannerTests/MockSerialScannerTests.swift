@@ -329,12 +329,22 @@ private final class RawPort: Sendable {
             let screen = try await rig.client.menuScreen()
             #expect(screen.kind == .select)
             #expect(screen.title == mainTitle)
-            #expect(screen.items.map(\.name) == ["Set Scan Selection", "Set Your Location", "Search for...",
-                                                  "Display Options", "Settings"])
+            #expect(screen.items.map(\.name) == ["Set Scan Selection", "Set Your Location", "Select Service Types",
+                                                  "Search for...", "Display Options", "Settings"])
             #expect(await rig.mock.isInMenu)
             #expect(await rig.mock.menuPath == [mainTitle])
             try await rig.client.press(.avoid)
             #expect(!(await rig.mock.isInMenu))
+        }
+    }
+
+    @Test(arguments: [MockPersonality.sds150, .bcd436hp]) func funcKeyShowsInProperty(personality: MockPersonality) async throws {
+        try await withSerialMock(personality: personality) { rig in
+            #expect(try await rig.client.scannerInfo().functionOn == false)
+            try await rig.client.press(.function)
+            #expect(try await rig.client.scannerInfo().functionOn == true)
+            try await rig.client.press(.digit1)
+            #expect(try await rig.client.scannerInfo().functionOn == false)
         }
     }
 

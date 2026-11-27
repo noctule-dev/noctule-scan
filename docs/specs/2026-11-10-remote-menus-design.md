@@ -215,6 +215,8 @@ Everything else — `TypeLocation`, `TypeError` while `GSI` reports a menu (§4.
 
 While the Mac-style view shows and the scanner is in a menu, the station window's keyboard shortcuts never press a scanner key: ↑ ↓ Return Esc are the menu's, and every other mapped key is swallowed, also in the moments when the menu area isn't ready to take keys (before the first read, or while pushes stall) **(designer's call, made during the build)**. A raw Return there would be the Enter key with no destructive check.
 
+
+> **Note, 2026-11-26 (Plan 24):** §5.4 and §5.5's "one action, one state-changing command, never resent" gets one exception, the menu walk behind the Scanner view's Services and Range buttons: at most four commands, one per step, each only after a re-read proves the screen and item, none resent, stopping at the first mismatch, refusal or lost reply. Wording and what was built: `2026-11-26-services-range-design.md` §5.2, §10. The Mac-style view is unchanged.
 ### 5.4 "Are you sure?" (Mac-style view only)
 
 Before sending the action for a destructive item, the Mac-style view shows a confirmation naming the item; Cancel sends nothing. Which items count is per-model data in `ModelProfile` (AGENTS.md: model knowledge lives in data), matched on the item's name, ignoring case and surrounding spaces. The SDS200 list **(designer's call; the owner asked for "super destructive" items and didn't enumerate them)**:

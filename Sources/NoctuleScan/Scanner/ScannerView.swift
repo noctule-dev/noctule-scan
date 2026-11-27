@@ -24,6 +24,9 @@ struct ScannerView: View {
     @State private var pendingVolume: Int?
     @State private var pendingSquelch: Int?
     @State private var lastTurn = Date.distantPast
+    /// The walk message the caption no longer shows (5 s passed, or a keypad click came since):
+    /// `shownShortcutMessage` hides the session's message while it is this one.
+    @State private var hiddenShortcutMessage: String?
     @State private var scrollTurns = 0
 
     private var connected: Bool {
@@ -87,7 +90,25 @@ struct ScannerView: View {
                         placeholder: ScannerIndicators.phase(session.phase, stationName: session.station.name).text,
                         keysEnabled: connected, press: session.press)
 
-            KeypadView(enabled: connected, keys: profile.frontPanelKeys, press: session.press)
+            VStack(spacing: 6) {
+                KeypadView(enabled: connected, keys: profile.frontPanelKeys,
+                           walking: session.menuShortcutInFlight != nil) { key in
+                    hiddenShortcutMessage = session.menuShortcutMessage
+                    session.press(key)
+                }
+                // A fixed-height line, so a message never moves the keypad.
+                Text(shownShortcutMessage ?? " ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(width: KeypadView.keyWidth * 3 + KeypadView.spacing * 2, height: 28, alignment: .top)
+                    .task(id: session.menuShortcutMessage) {
+                        guard let message = session.menuShortcutMessage else { hiddenShortcutMessage = nil; return }
+                        try? await Task.sleep(for: .seconds(5))
+                        if !Task.isCancelled { hiddenShortcutMessage = message }
+                    }
+            }
 
             KnobView(title: "SCROLL", pushCaption: profile.encoderPushCaption,
                      help: Self.scrollPushHelp(caption: profile.encoderPushCaption), readout: nil, angle: Double(scrollTurns) * 18,
@@ -107,6 +128,12 @@ struct ScannerView: View {
         )
         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
         .environment(\.colorScheme, .dark)
+    }
+
+    /// A failed Services or Range walk's message, while connected, until 5 s pass or the next click.
+    private var shownShortcutMessage: String? {
+        guard connected, let message = session.menuShortcutMessage, message != hiddenShortcutMessage else { return nil }
+        return message
     }
 
     private var hasSquelchPush: Bool { profile.frontPanelKeys.contains(.squelchPush) }

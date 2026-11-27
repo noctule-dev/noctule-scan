@@ -63,9 +63,9 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
             #expect(status.lines[0].highlightMask == underscores)
             #expect(status.lines[1].text == "Set Scan Selection            ")
             #expect(status.lines[1].highlightMask == stars)
-            #expect(status.lines[4].text == "Analyze                       ")
+            #expect(status.lines[5].text == "Analyze                       ")
             #expect(status.lines[2].highlightMask == String(repeating: " ", count: 30))
-            #expect(status.lines[7].text == String(repeating: " ", count: 30))
+            #expect(status.lines[8].text == String(repeating: " ", count: 30))
             #expect(status.trailing == ["1", "1", "0", "0", "", "", "0", "OFF", "3"])
         }
     }
@@ -98,10 +98,43 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
             let screen = try await client.menuScreen()
             #expect(screen.kind == .select)
             #expect(screen.title == mainTitle)
-            #expect(screen.items.map(\.name) == ["Set Scan Selection", "Set Your Location", "Search for...",
-                                                  "Display Options", "Settings"])
-            #expect(screen.items.map(\.index) == [0, 1, 2, 4, 5])
+            #expect(screen.items.map(\.name) == ["Set Scan Selection", "Set Your Location", "Select Service Types",
+                                                  "Search for...", "Display Options", "Settings"])
+            #expect(screen.items.map(\.index) == [0, 1, 2, 3, 5, 6])
             #expect(screen.selectedIndex == 0)
+        }
+    }
+
+    @Test func topMenuListsSelectServiceTypes() async throws {
+        try await withMock { _, client in
+            try await client.press(.menu)
+            let top = try await client.menuScreen()
+            let entry = try #require(top.items.first { $0.name == "Select Service Types" })
+            #expect(top.items.map(\.name).firstIndex(of: "Select Service Types")
+                    == top.items.map(\.name).firstIndex(of: "Set Your Location")! + 1)
+            try await client.setMenuValue(String(entry.index))
+            let screen = try await client.menuScreen()
+            #expect(screen.title == "Select Service Types")
+            #expect(screen.items.map(\.name) == ["Multi-Dispatch", "Law Dispatch", "Fire Dispatch", "EMS Dispatch",
+                                                  "Custom 1", "Hospital", "Railroad"])
+            #expect(screen.items.map(\.value) == ["On", "On", "On", "On", "On", "Off", "Off"])
+            try await client.setMenuValue("5")  // Hospital on
+            try await client.setMenuValue("0")  // Multi-Dispatch off
+            let after = try await client.menuScreen()
+            #expect(after.items.map(\.value) == ["Off", "On", "On", "On", "On", "On", "Off"])
+        }
+    }
+
+    @Test func funcKeyShowsInProperty() async throws {
+        try await withMock { _, client in
+            #expect(try await client.scannerInfo().functionOn == false)
+            try await client.press(.function)
+            #expect(try await client.scannerInfo().functionOn == true)
+            try await client.press(.digit1)
+            #expect(try await client.scannerInfo().functionOn == false)
+            try await client.press(.function)
+            try await client.press(.function)
+            #expect(try await client.scannerInfo().functionOn == true, "a second F is itself an F")
         }
     }
 
@@ -118,7 +151,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
     @Test func msvOpensSubmenuAndPicksValue() async throws {
         try await withMock { mock, client in
             try await client.press(.menu)
-            try await client.setMenuValue("4")
+            try await client.setMenuValue("5")
             try await client.setMenuValue("0")
             #expect(try await client.menuScreen().items.map(\.name) == ["Decimal Format", "Hex Format"])
             #expect(try await client.menuScreen().selectedIndex == 0)
@@ -162,7 +195,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
     @Test func msvSetsNameAndReturnsToParent() async throws {
         try await withMock { mock, client in
             try await client.press(.menu)
-            try await client.setMenuValue("2")
+            try await client.setMenuValue("3")
             try await client.setMenuValue("0")
             #expect(try await client.menuScreen().title == "Select Custom")
             #expect(try await client.menuScreen().items.map(\.name) == (0..<10).map { "Custom \($0)" })
@@ -220,7 +253,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
 
             try await client.press(.menu)  // back to Set Your Location
             try await client.press(.menu)  // back to the top
-            try await client.setMenuValue("2")
+            try await client.setMenuValue("3")
             try await client.setMenuValue("0")
             try await client.setMenuValue("0")
             try await client.setMenuValue("0")
@@ -244,7 +277,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
         defer { socket.close() }
         var failure: (any Error)?
         do {
-            for command in ["KEY,M,P", "MSV,,2", "MSV,,0", "MSV,,0", "MSV,,0"] {
+            for command in ["KEY,M,P", "MSV,,3", "MSV,,0", "MSV,,0", "MSV,,0"] {
                 #expect(await socket.exchange(command) != nil)
             }
             let reply = try #require(await socket.exchange("STS"))
@@ -306,7 +339,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
     @Test func analyzeAnswersTypeError() async throws {
         try await withMock { _, client in
             try await client.press(.menu)
-            for _ in 0..<3 { try await client.press(.scrollRight) }
+            for _ in 0..<4 { try await client.press(.scrollRight) }
             try await client.press(.enterYes)
             let screen = try await client.menuScreen()
             #expect(screen.kind == .error)
@@ -336,7 +369,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
             }
             try await rejects("0")  // outside a menu
             try await client.press(.menu)
-            try await rejects("3")  // Analyze is on the screen but not in MSI
+            try await rejects("4")  // Analyze is on the screen but not in MSI
             try await rejects("99")
             try await rejects("-1")
             try await rejects("abc")
@@ -346,7 +379,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
             try await rejects("1a")  // outside EnableKeys
             try await client.press(.menu)
             try await client.press(.menu)
-            try await client.setMenuValue("2")
+            try await client.setMenuValue("3")
             try await client.setMenuValue("0")
             try await client.setMenuValue("0")
             try await client.setMenuValue("0")
@@ -357,7 +390,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
             // Analyze's screens can't be remote-controlled either.
             try await client.press(.avoid)
             try await client.press(.menu)
-            for _ in 0..<3 { try await client.press(.scrollRight) }
+            for _ in 0..<4 { try await client.press(.scrollRight) }
             try await client.press(.enterYes)
             try await rejects("0")
             #expect(await mock.menuActions.isEmpty)
@@ -367,7 +400,7 @@ private func highlightedRow(_ status: DisplayStatus) -> Int? {
     @Test func actionItemsRun() async throws {
         try await withMock { mock, client in
             try await client.press(.menu)
-            try await client.setMenuValue("5")
+            try await client.setMenuValue("6")
             try await client.setMenuValue("0")
             #expect(await mock.menuActions.last == "run Clear User Data")
             #expect(await mock.menuPath == [mainTitle, "Settings"])  // assumed: an action stays put

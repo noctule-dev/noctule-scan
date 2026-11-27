@@ -87,6 +87,15 @@ import NoctuleKit
         #expect(km.resolved(for: .sds200).count == 27)
     }
 
+    @Test func oldKeyMapChordsRunTheWalk() throws {
+        let json = #"{"overrides": {"T": "⌘7", "R": "⌘8"}}"#
+        let km = try JSONDecoder().decode(KeyMap.self, from: Data(json.utf8))
+        for model in ScannerModel.allCases {
+            let r = km.resolved(for: model)
+            #expect(r[.serviceType] == "⌘7" && r[.range] == "⌘8", "\(model)")
+        }
+    }
+
     @Test func validationFindsIssues() {
         var s = Station()
         #expect(s.validate() == [.missingHost])

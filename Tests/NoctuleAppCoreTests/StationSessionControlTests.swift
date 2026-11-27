@@ -681,6 +681,65 @@ private func holdInfo(_ body: String, mode: String = "Scan Mode", screen: String
 private let holdSystem = "<System Name=\"Fictional\" Index=\"101\" Hold=\"Off\"/>"
 private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
 
+/// The four models, for tests that run a session on each one's mock.
+enum SessionModel: String, CaseIterable, Sendable, CustomStringConvertible {
+    case sds200, sds100, sds150, bcd436hp
+    var description: String { rawValue }
+}
+
+/// A session on one model's mock, with the mock's log and menu state.
+@MainActor
+struct ModelSessionRig {
+    let session: StationSession
+    let commands: () async -> [String]
+    let menuPath: () async -> [String]
+    let isInMenu: () async -> Bool
+}
+
+/// Runs `body` with a session on `model`'s mock (the network MockSDS200, or MockSerialScanner with
+/// that personality), connected (and, on USB, past its first push) unless `connect` is false; the
+/// session and the mock are stopped on every path. Returns every command the mock received.
+@MainActor
+func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [:], faults: MockFaults = .none,
+                      connect: Bool = true,
+                      _ body: (ModelSessionRig) async throws -> Void) async throws -> [String] {
+    switch model {
+    case .sds200:
+        var setup = Setup()
+        setup.replyDelays = replyDelays
+        setup.faults = faults
+        let outcome = try await withSession(setup) { rig in
+            if connect {
+                rig.start()
+                try await rig.waitConnected()
+            }
+            try await body(ModelSessionRig(session: rig.session, commands: { await rig.commands },
+                                           menuPath: { await rig.mock.menuPath }, isInMenu: { await rig.mock.isInMenu }))
+        }
+        #expect(outcome.leaked == [])
+        return outcome.commands
+    case .sds100, .sds150, .bcd436hp:
+        var setup = USBSetup()
+        setup.replyDelays = replyDelays
+        setup.faults = faults
+        setup.personality = switch model {
+        case .sds100: .sds100
+        case .sds150: .sds150
+        default: .bcd436hp
+        }
+        let outcome = try await withUSBSession(setup) { rig in
+            if connect {
+                rig.start()
+                try await rig.waitConnected()
+                try await rig.waitForPush()
+            }
+            try await body(ModelSessionRig(session: rig.session, commands: { await rig.commands },
+                                           menuPath: { await rig.mock.menuPath }, isInMenu: { await rig.mock.isInMenu }))
+        }
+        return outcome.commands
+    }
+}
+
 @MainActor
 @Suite(.serialized, .timeLimit(.minutes(3))) struct StationSessionHoldCommandTests {
     @Test func holdTargetMapsEachLevel() throws {
@@ -726,31 +785,188 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
         return outcome.commands.filter { $0.hasPrefix("KEY") }
     }
 
-    @Test func bcdPressesItsOwnKeysOnly() async throws {
-        let sent = try await keysSent(bcdSetup(), [.serviceType, .squelchPush, .scrollPush, .soft1], expecting: 2)
-        #expect(sent == ["KEY,^,P", "KEY,A,P"])
-    }
-
-    @Test func sds100DropsServicesAndSquelchPushKeepsRange() async throws {
-        var setup = USBSetup()
-        setup.personality = .sds100
-        let sent = try await keysSent(setup, [.serviceType, .squelchPush, .range], expecting: 1)
-        #expect(sent == ["KEY,R,P"])
-    }
-
-    @Test func sds150DropsRange() async throws {
-        let sent = try await keysSent(USBSetup(), [.range, .serviceType, .zip], expecting: 1)
-        #expect(sent == ["KEY,Z,P"])
-    }
-
-    @Test func sds200StillSendsServices() async throws {
-        let outcome = try await withSession { rig in
-            rig.start()
-            try await rig.waitConnected()
-            rig.session.press(.serviceType)
-            try await waitUntil("KEY,T,P") { await rig.commands.contains("KEY,T,P") }
+    /// Keys a handheld lacks still send nothing; the keys it has still go out as `KEY`.
+    @Test func handheldsStillDropKeysTheyLack() async throws {
+        let bcd = try await keysSent(bcdSetup(), [.squelchPush, .scrollPush, .soft1], expecting: 2)
+        #expect(bcd == ["KEY,^,P", "KEY,A,P"])
+        for personality in [MockPersonality.sds100, .sds150] {
+            var setup = USBSetup()
+            setup.personality = personality
+            let sent = try await keysSent(setup, [.squelchPush, .zip], expecting: 1)
+            #expect(sent == ["KEY,Z,P"], "\(personality.reportedModel)")
         }
-        #expect(outcome.commands.last == "PSI,0")
+    }
+
+    // MARK: Services and Range run the menu walk (Plan 24, Task 4; services-range design §5.4)
+
+    /// Services and Range on every model: the walk, never `KEY,T` or `KEY,R`.
+    @Test(arguments: SessionModel.allCases)
+    func servicesAndRangeWalkOnEveryModel(_ model: SessionModel) async throws {
+        let commands = try await withModelSession(model) { rig in
+            let session = rig.session
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range, "set as the press returns")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+            #expect(session.menu.lastError == nil)
+            _ = try await session.menu.exit()
+            try await waitUntil("out of the menu") { await !rig.isInMenu() }
+
+            session.press(.serviceType)
+            #expect(session.menuShortcutInFlight == .serviceTypes)
+            try await waitUntil("Select Service Types") {
+                await rig.menuPath().last == "Select Service Types" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+            _ = try await session.menu.exit()
+            try await waitUntil("out of the menu") { await !rig.isInMenu() }
+        }
+        #expect(!commands.contains { $0.uppercased().hasPrefix("KEY,T") || $0.uppercased().hasPrefix("KEY,R") },
+                "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// A key still queued (its reply held back): the walk is refused `.busy` and sends nothing;
+    /// once the key's send ends, the count is back to zero.
+    @Test func walkRefusedWhileKeysQueued() async throws {
+        let commands = try await withModelSession(.sds150, replyDelays: ["KEY": .milliseconds(600)]) { rig in
+            let session = rig.session
+            session.press(.digit1)
+            #expect(session.pendingKeyPresses == 1)
+            await #expect(throws: MenuActionError.busy) { try await session.openMenuShortcut(.range) }
+            #expect(session.menuShortcutInFlight == nil)
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == nil, "the press is refused too")
+            #expect(session.menuShortcutMessage == nil, "busy says nothing")
+            try await waitUntil("KEY,1,P") { await rig.commands().contains("KEY,1,P") }
+            try await waitUntil("the key's send ends", .seconds(5)) { session.pendingKeyPresses == 0 }
+        }
+        #expect(!commands.contains("KEY,M,P"), "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// A key whose reply is lost (about 1 UDP command in 12 on the SDS200) still ends its pending
+    /// count when its send times out, so the next Range press runs the walk.
+    @Test func unansweredKeyStillLetsAWalkRun() async throws {
+        let commands = try await withModelSession(.sds200, faults: MockFaults(dropNextReply: "KEY")) { rig in
+            let session = rig.session
+            session.press(.digit1)
+            #expect(session.pendingKeyPresses == 1)
+            try await waitUntil("KEY,1,P") { await rig.commands().contains("KEY,1,P") }
+            try await waitUntil("the key's send times out", .seconds(10)) { session.pendingKeyPresses == 0 }
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range, "not refused busy")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+        }
+        #expect(count(commands, "KEY,1") == 1, "never resent: \(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// More presses than the queue holds (replies held back): the dropped ones end their count at
+    /// once, the sent ones when their sends end, and then a walk runs.
+    @Test func fullQueueStillLetsAWalkRun() async throws {
+        let presses = StationSession.maxQueuedKeys + 2
+        let commands = try await withModelSession(.sds150, replyDelays: ["KEY": .milliseconds(200)]) { rig in
+            let session = rig.session
+            for _ in 0..<presses { session.press(.digit2) }
+            try await waitUntil("every send ends", .seconds(15)) { session.pendingKeyPresses == 0 }
+            #expect(count(await rig.commands(), "KEY,2") == StationSession.maxQueuedKeys, "the queue dropped the rest")
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range, "not refused busy")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+        }
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// A key pressed while a walk runs (its first `MSV`'s reply held back) is dropped: never sent.
+    @Test func keysDroppedDuringAWalk() async throws {
+        let commands = try await withModelSession(.sds150, replyDelays: ["MSV": .milliseconds(600)]) { rig in
+            let session = rig.session
+            session.press(.range)
+            try await waitUntil("the first MSV") { await rig.commands().contains { $0.hasPrefix("MSV,") } }
+            #expect(session.menuShortcutInFlight == .range)
+            session.press(.digit1)
+            session.press(.scrollPush)
+            #expect(session.pendingKeyPresses == 0, "nothing queued")
+            try await waitUntil("the walk ends", .seconds(10)) { session.menuShortcutInFlight == nil }
+            #expect(session.menuShortcutMessage == nil)
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        #expect(!commands.contains("KEY,1,P") && !commands.contains("KEY,^,P"), "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// Two presses back to back: the second is refused by the session (`.busy`, nothing said), so
+    /// one walk, one enter.
+    @Test func doubleClickRunsOneWalk() async throws {
+        let commands = try await withModelSession(.sds150) { rig in
+            let session = rig.session
+            session.press(.range)
+            session.press(.range)
+            await #expect(throws: MenuActionError.busy) { try await session.openMenuShortcut(.range) }
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        #expect(count(commands, "KEY,M") == 1, "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// A walk that stops says why, naming the destination; the next start clears the message.
+    @Test func failedWalkSetsTheMessage() async throws {
+        _ = try await withModelSession(.sds150) { rig in
+            let session = rig.session
+            _ = try await session.menu.enter()
+            try await waitUntil("in the menu") { await rig.isInMenu() }
+            session.press(.range)
+            try await waitUntil("the walk ends") { session.menuShortcutInFlight == nil }
+            #expect(session.menuShortcutMessage == "Already in a menu. Exit it first.")
+            _ = try await session.menu.exit()
+            try await waitUntil("out of the menu") { await !rig.isInMenu() }
+            session.press(.range)
+            #expect(session.menuShortcutMessage == nil, "cleared as the walk starts")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+        }
+    }
+
+    @Test func noWalkUnlessConnected() async throws {
+        _ = try await withModelSession(.sds150, connect: false) { rig in
+            let session = rig.session
+            await #expect(throws: MenuActionError.notConnected) { try await session.openMenuShortcut(.range) }
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == nil)
+            #expect(session.menuShortcutMessage == nil, "press is ignored unless connected")
+            #expect(await rig.commands().isEmpty)
+        }
+    }
+
+    /// A stop while a walk waits for its `MSV` reply: the walk ends, nothing more is sent after
+    /// the stop's `PSI,0`, and the flag is clear.
+    @Test func stopDuringAWalkClearsTheFlag() async throws {
+        let commands = try await withModelSession(.sds150, replyDelays: ["MSV": .milliseconds(600)]) { rig in
+            let session = rig.session
+            session.press(.range)
+            try await waitUntil("the first MSV") { await rig.commands().contains { $0.hasPrefix("MSV,") } }
+            await session.stop()
+            try await waitUntil("the walk ends", .seconds(10)) { session.menuShortcutInFlight == nil }
+            #expect(session.pendingKeyPresses == 0)
+            #expect(session.menuShortcutMessage == nil, "a walk the stop ended says nothing")
+        }
+        #expect(commands.filter { $0.hasPrefix("MSV,") }.count == 1, "\(commands)")
+        #expect(commands.last == "PSI,0")
     }
 
     /// The model `MDL` names wins over a station's override: an SDS100 behind a BCD436HP override
@@ -823,6 +1039,51 @@ private let holdDept = "<Department Name=\"Dept\" Index=\"200\" Hold=\"Off\"/>"
             #expect(await rig.received("HLD") == 0)
         }
         #expect(outcome.commands.last == "PSI,0")
+    }
+
+    /// Range pressed, then Hold in the same main-actor turn (before the walk's `perform` sets
+    /// `menu.isBusy`): Hold is disabled by the walk's flag and sends no `HLD`, so no `HLD` can land
+    /// behind the walk's `MNU,TOP,` (services-range design §10).
+    @Test func noHoldWhileAWalkRuns() async throws {
+        let commands = try await withModelSession(.bcd436hp) { rig in
+            let session = rig.session
+            #expect(session.canHold(.system))
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range)
+            #expect(!session.canHold(.system), "a walk is in flight")
+            session.hold(.system)
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+            _ = try await session.menu.exit()
+            try await waitUntil("out of the menu") { await !rig.isInMenu() }
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        #expect(!commands.contains { $0.hasPrefix("HLD") }, "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// An `HLD` on its way (its reply held back): a walk is refused `.busy` with nothing sent, and
+    /// the Range press says nothing (services-range design §5.1 step 0).
+    @Test func walkRefusedWhileAHoldIsInFlight() async throws {
+        let commands = try await withModelSession(.bcd436hp, replyDelays: ["HLD": .milliseconds(600)]) { rig in
+            let session = rig.session
+            session.hold(.system)
+            #expect(!session.canHold(.system), "in flight")
+            let before = await rig.commands().count
+            await #expect(throws: MenuActionError.busy) { try await session.openMenuShortcut(.range) }
+            #expect(session.menuShortcutInFlight == nil)
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == nil, "the press is refused too")
+            #expect(session.menuShortcutMessage == nil, "busy says nothing")
+            try await waitUntil("HLD sent") { await rig.commands().contains { $0.hasPrefix("HLD") } }
+            #expect(!(await rig.commands()).dropFirst(before).contains { $0.hasPrefix("MNU") || $0.hasPrefix("MSB") })
+            try await waitUntil("the hold ends", .seconds(5)) { session.canHold(.system) }
+            #expect(!(await rig.commands()).contains { $0.hasPrefix("MNU") }, "nothing of the refused walk")
+        }
+        #expect(commands.filter { $0.hasPrefix("HLD") }.count == 1, "\(commands)")
+        #expect(commands.last == "PSI,0")
     }
 
     @Test func doubleClickSendsOneHLD() async throws {

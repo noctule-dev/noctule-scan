@@ -128,6 +128,18 @@ private func eventually(within limit: Duration = .seconds(2), _ condition: @Send
         #expect(wire == [Data("MSV,,14\r".utf8), Data("MSV,,Custom 9\r".utf8)])
     }
 
+    @Test func pressRefusesServiceTypeAndRange() async throws {
+        let t = SimulatedScannerTransport { command in [.fields(command: command.name, fields: ["OK"])] }
+        let c = ScannerClient(transport: t); try await c.connect()
+        for key in [FrontPanelKey.serviceType, .range] {
+            do { try await c.press(key); Issue.record("expected invalidArgument") }
+            catch let error as ScannerClientError {
+                guard case .invalidArgument = error else { Issue.record("wrong error \(error)"); continue }
+            }
+        }
+        #expect(await t.sentCommands.filter { $0.name == "KEY" }.isEmpty)
+    }
+
     @Test func setMenuValueRejected() async throws {
         let t = SimulatedScannerTransport { command in [.fields(command: command.name, fields: ["NG"])] }
         let c = ScannerClient(transport: t); try await c.connect()

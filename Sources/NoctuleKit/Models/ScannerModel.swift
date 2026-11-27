@@ -191,8 +191,13 @@ public struct ModelProfile: Sendable, Equatable {
     public let holdMethod: HoldMethod
     /// The front-panel keys the model has and the product may send (design §5.11); a key it lacks sends nothing.
     public let frontPanelKeys: Set<FrontPanelKey>
+    /// The menu walks that stand in for the `T` and `R` keys (Plan 24, design §5.3): no model gets
+    /// those keys sent.
+    public let menuShortcuts: [MenuShortcut: MenuPath]
     /// The caption of the encoder's push on the Scanner view: Func on the SDS200, Vol on the handhelds.
     public let encoderPushCaption: String
+
+    private static let defaultMenuShortcuts: [MenuShortcut: MenuPath] = [.serviceTypes: .serviceTypes, .range: .range]
 
     public static func profile(for model: ScannerModel) -> ModelProfile {
         switch model {
@@ -202,7 +207,8 @@ public struct ModelProfile: Sendable, Equatable {
                          hasNetworkAudio: true, supportsRemoteRestart: true, supportsChargeStatus: false, supportsQuickKeys: true, usbProductIDs: [],
                          pushKeepAlive: nil, pushInterval: .milliseconds(100), displayRefreshInterval: .milliseconds(100),
                          lineInAudioOffset: .zero, display: .sds, menuNavigation: .keys, holdMethod: .softKeyLabel,
-                         frontPanelKeys: Set(FrontPanelKey.allCases), encoderPushCaption: "Func")
+                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .range]),
+                         menuShortcuts: Self.defaultMenuShortcuts, encoderPushCaption: "Func")
         case .sds100:
             ModelProfile(model: model, volumeRange: 0...15, squelchRange: 0...15,
                          transports: [.usbSerial], protocolVerifiedOnHardware: false, destructiveMenuItems: .sds,
@@ -211,8 +217,8 @@ public struct ModelProfile: Sendable, Equatable {
                          pushKeepAlive: PushKeepAlive(action: .renewSubscription, interval: .seconds(60)),
                          pushInterval: .milliseconds(100), displayRefreshInterval: .milliseconds(100),
                          lineInAudioOffset: .zero, display: .sds, menuNavigation: .keys, holdMethod: .softKeyLabel,
-                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .squelchPush]),
-                         encoderPushCaption: "Vol")
+                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .range, .squelchPush]),
+                         menuShortcuts: Self.defaultMenuShortcuts, encoderPushCaption: "Vol")
         case .sds150:
             ModelProfile(model: model, volumeRange: 0...15, squelchRange: 0...15,
                          transports: [.usbSerial, .bluetooth], protocolVerifiedOnHardware: true, destructiveMenuItems: .sds,
@@ -220,8 +226,8 @@ public struct ModelProfile: Sendable, Equatable {
                          usbProductIDs: [0x001A], pushKeepAlive: PushKeepAlive(command: "KAL", interval: .seconds(60)),
                          pushInterval: .milliseconds(100), displayRefreshInterval: .milliseconds(100),
                          lineInAudioOffset: .zero, display: .sds, menuNavigation: .keys, holdMethod: .softKeyLabel,
-                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .squelchPush, .range]),
-                         encoderPushCaption: "Vol")
+                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .range, .squelchPush]),
+                         menuShortcuts: Self.defaultMenuShortcuts, encoderPushCaption: "Vol")
         case .bcd436hp:
             ModelProfile(model: model, volumeRange: 0...15, squelchRange: 0...15,
                          transports: [.usbSerial], protocolVerifiedOnHardware: false, destructiveMenuItems: .bcd436hp,
@@ -230,8 +236,8 @@ public struct ModelProfile: Sendable, Equatable {
                          pushKeepAlive: PushKeepAlive(action: .renewSubscription, interval: .seconds(60)),
                          pushInterval: .milliseconds(100), displayRefreshInterval: .milliseconds(100),
                          lineInAudioOffset: .zero, display: .bcd436hp, menuNavigation: .menuCommands, holdMethod: .holdCommand,
-                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .squelchPush]),
-                         encoderPushCaption: "Vol")
+                         frontPanelKeys: Set(FrontPanelKey.allCases).subtracting([.serviceType, .range, .squelchPush]),
+                         menuShortcuts: Self.defaultMenuShortcuts, encoderPushCaption: "Vol")
         }
     }
 }

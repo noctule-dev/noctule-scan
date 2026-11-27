@@ -105,7 +105,8 @@ enum KeyRouting {
     ]
 
     static func decide(chord: KeyChord?, router: KeyboardRouter, isRepeat: Bool, focusElsewhere: Bool,
-                       menuChords: Set<KeyChord>, macMenuActive: Bool = false, macMenuShowing: Bool = false) -> Decision {
+                       menuChords: Set<KeyChord>, macMenuActive: Bool = false, macMenuShowing: Bool = false,
+                       menuShortcutsAllowed: Bool = true) -> Decision {
         guard !focusElsewhere, let chord else { return .pass }
         if macMenuActive || macMenuShowing {
             guard !menuChords.contains(chord) else { return .pass }
@@ -117,6 +118,8 @@ enum KeyRouting {
         }
         guard let key = router.key(for: chord) else { return .pass }
         guard !menuChords.contains(chord) else { return .pass }
+        // Services and Range walk the menu; only the Scanner view runs them (design §5.4).
+        if !menuShortcutsAllowed, MenuShortcut(key: key) != nil { return .swallow }
         if isRepeat && key != .scrollLeft && key != .scrollRight { return .swallow }
         return .press(key)
     }
@@ -179,6 +182,8 @@ struct KeyboardShortcuts: NSViewRepresentable {
     var menuKeys: MacMenuKeys? = nil
     /// Asked at event time: the Mac-style view shows and the scanner is in a menu (`KeyRouting`).
     var macMenuShowing: @MainActor () -> Bool = { false }
+    /// False in the Mac-style view, where Services and Range chords do nothing.
+    var menuShortcutsAllowed = true
     /// Asked at event time: the window's Quick Keys pop-over shows, so no key goes to the scanner.
     var stepsAside: @MainActor () -> Bool = { false }
     let press: @MainActor (FrontPanelKey) -> Void
@@ -194,6 +199,7 @@ struct KeyboardShortcuts: NSViewRepresentable {
         view.controlFocus = controlFocus
         view.menuKeys = menuKeys
         view.macMenuShowing = macMenuShowing
+        view.menuShortcutsAllowed = menuShortcutsAllowed
         view.stepsAside = stepsAside
         view.press = press
     }
@@ -208,6 +214,7 @@ struct KeyboardShortcuts: NSViewRepresentable {
         var controlFocus: ControlFocus?
         var menuKeys: MacMenuKeys?
         var macMenuShowing: @MainActor () -> Bool = { false }
+        var menuShortcutsAllowed = true
         var stepsAside: @MainActor () -> Bool = { false }
         private var monitor: Any?
         /// The closure installed as the local monitor (`viewDidMoveToWindow`), and the one tests call: a
@@ -243,7 +250,8 @@ struct KeyboardShortcuts: NSViewRepresentable {
             switch KeyRouting.decide(chord: chord, router: router, isRepeat: event.isARepeat,
                                      focusElsewhere: Self.focusElsewhere(in: window, controls: controlFocus),
                                      menuChords: menuChords, macMenuActive: menuKeys?.isActive ?? false,
-                                     macMenuShowing: macMenuShowing()) {
+                                     macMenuShowing: macMenuShowing(),
+                                     menuShortcutsAllowed: menuShortcutsAllowed) {
             case .pass: return event
             case .swallow: return nil
             case .press(let key):

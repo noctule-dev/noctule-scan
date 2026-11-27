@@ -185,6 +185,11 @@ MSI,<XML>,
 - Untried on the SDS models: `TypeLocation`, confirm prompts, an `MSV` the scanner rejects, a comma in an input value (the spec says it is sent as a tab; we never send one), `MNU`, `MSB`, `HLD`.
 - **Lost datagrams:** about 1 command in 12 got no reply within 2 s (four read replies and one `KEY` of roughly 60). The unanswered `KEY` had not taken effect. Never resend a state-changing command.
 
+## 5c. `T`/`R` keys, `SVC` and `LCR` (2026-11-26, issue #14)
+
+- **Key sheets** [spec]: Uniden's key sheets have columns for the BCD536HP and SDS100 (SDS spec V2.00) and the BCD436HP (BCDx36HP spec V1.05) and none for the SDS200. `T` (Service Type) is listed for the BCD536HP only; `R` (Range) for all three, though the BCD436HP manual says RANG is BCD536HP only. The SDS200, SDS150 and BCD436HP manuals reach Service Types by Func then Zip and list no Range key. [hw, BCD436HP and SDS200, the owner]: `KEY,T,P` and `KEY,R,P` act as a digit (Quick Key Navigation, `0`). The product sends neither to any model; Services and Range walk the menu instead (services-range design §5).
+- **`SVC` and `LCR`** [hw, read-only, one each, 2026-11-26]: the SDS150, SDS100 and BCD436HP answer `SVC` with 47 fields of `0`/`1` and `LCR` with `dd.dddddd`, `-ddd.dddddd` and a range (`0.0` on the SDS150, `20.0` on the others); the SDS200 answers `SVC,ERR` and `LCR,ERR`. The product doesn't send them.
+
 ## 5b. Favorites and quick keys (`GLT`, `FQK`, `SQK`, `DQK`; all three models, 2026-11-18)
 
 A spike at the owner's request (design `2026-11-18-quick-keys-design.md` §3 has the details and timings): the whole tree read on the SDS150 (fw 1.01.02), SDS100 (fw 1.26.01) and SDS200 (fw 1.26.01), then one key flipped and restored at each level with the owner's go-ahead. [hw] throughout.

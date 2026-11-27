@@ -22,6 +22,8 @@ struct KeypadView: View {
     let enabled: Bool
     /// The keys the model has; a key it lacks is left off the panel and its row closes up.
     var keys: Set<FrontPanelKey> = Set(FrontPanelKey.allCases)
+    /// A Services or Range walk is running: the whole keypad waits (`StationSession.menuShortcutInFlight`).
+    var walking: Bool = false
     let press: (FrontPanelKey) -> Void
 
     /// The SDS200's whole keypad (the rows of a model with every key).
@@ -45,9 +47,9 @@ struct KeypadView: View {
          PanelKey(key: .digit0, label: "0", caption: nil),
          PanelKey(key: .enterYes, label: "E / Yes", caption: nil)],
     ]
-    /// `allRows` without the keys the model lacks (design §5.11); a row left empty is dropped.
+    /// `allRows` without the keys the model lacks (design §5.11); Services and Range are menu shortcuts, not keys, so every model keeps them; a row left empty is dropped.
     static func rows(keys: Set<FrontPanelKey>) -> [[PanelKey]] {
-        allRows.map { $0.filter { keys.contains($0.key) } }.filter { !$0.isEmpty }
+        allRows.map { $0.filter { keys.contains($0.key) || MenuShortcut(key: $0.key) != nil } }.filter { !$0.isEmpty }
     }
     static let replay = PanelKey(key: .replay, label: "Replay", caption: "Record")
 
@@ -63,7 +65,15 @@ struct KeypadView: View {
             }
             button(Self.replay).frame(width: Self.keyWidth * 3 + Self.spacing * 2)
         }
-        .disabled(!enabled)
+        .disabled(!enabled || walking)
+    }
+
+    static func help(for key: FrontPanelKey) -> String? {
+        switch key {
+        case .serviceType: "Open Select Service Types"
+        case .range: "Open Set Range"
+        default: nil
+        }
     }
 
     private func button(_ key: PanelKey) -> some View {
@@ -80,6 +90,7 @@ struct KeypadView: View {
             .frame(maxWidth: .infinity)
         }
         .buttonStyle(PanelKeyStyle(height: 38))
+        .help(Self.help(for: key.key) ?? "")
         .accessibilityLabel(key.caption.map { "\(key.label), second function \($0)" } ?? key.label)
     }
 }

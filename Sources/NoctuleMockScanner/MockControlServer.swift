@@ -169,6 +169,8 @@ final class ControlCore: @unchecked Sendable {
     var log: [String] = []
     var volume = 2
     var squelch = 1
+    /// `Property F`: On after a `KEY,F,P` until the next `KEY` of any code is handled (assumed).
+    var functionOn = false
     var pushesSent = 0
     var subscribers: [ControlPeer: Subscriber] = [:]
     var answering = true
@@ -369,6 +371,7 @@ final class ControlCore: @unchecked Sendable {
                 return
             }
             _ = menu.key(args[0])
+            functionOn = args[0].uppercased() == "F"
             reply("KEY,OK", to: peer)
         case ("PSI", 1):
             guard let ms = Int(args[0]), ms >= 0 else {
@@ -425,7 +428,8 @@ final class ControlCore: @unchecked Sendable {
         return MockScreens.scannerInfoXML(scenario.moment(at: now), scenario: scenario, volume: volume, squelch: squelch,
                                           lineBreak: personality.xmlLineBreak,
                                           idleForm: personality.idleForm, seconds: now,
-                                          decimalRssi: personality.displayForm == .bcd436hp)
+                                          decimalRssi: personality.displayForm == .bcd436hp,
+                                          functionOn: functionOn)
     }
 
     // MARK: Holds (BCD436HP)

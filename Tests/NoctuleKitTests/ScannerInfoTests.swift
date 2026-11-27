@@ -22,6 +22,15 @@ import NoctuleKitTestSupport
         #expect(info.monitorList?.name == "lakeworks"); #expect(info.monitorList?.isProgrammed == true)
     }
 
+    @Test func functionOnReadsPropertyF() throws {
+        func info(_ attr: String) throws -> ScannerInfo {
+            try ScannerInfo(xml: XMLNode.parse(Data("<ScannerInfo Mode=\"Scan Mode\" V_Screen=\"conventional_scan\"><Property \(attr)VOL=\"5\"/></ScannerInfo>".utf8)))
+        }
+        #expect(try info("F=\"On\" ").functionOn == true)
+        #expect(try info("F=\"Off\" ").functionOn == false)
+        #expect(try info("").functionOn == nil)
+    }
+
     @Test func trunkIsActiveNotWeather() throws {
         let info = try ScannerInfo(xml: XMLNode.parse(fixture("gsi-trunk-sds200-1.24.00.xml")))
         #expect(info.hasActiveChannel); #expect(!info.isWeather)

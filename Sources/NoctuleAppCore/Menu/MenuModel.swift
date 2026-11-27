@@ -30,6 +30,16 @@ public enum MenuActionError: Error, Equatable, Sendable {
     /// A command or the reads around it went unanswered; state was re-read where possible. The
     /// command is never resent: it may or may not have taken effect.
     case noAnswer
+    /// A walk found the scanner already in a menu; nothing was sent, and the menu is shown.
+    case alreadyInMenu
+    /// A walk found Func on (`GSI`'s `Property F`), where Menu opens a different menu; nothing was sent.
+    case functionPending
+    /// A walk stopped: the screen it needed (`expected`, a step's screen or the destination) wasn't
+    /// what the scanner showed (`found`, the title `GSI` gave; nil outside a menu). Nothing more
+    /// was sent, the screen was re-read, and the scanner was left where it was. An `MSI` on a
+    /// step's new screen that goes unanswered or doesn't parse (the screen is then `.mirrored`, with
+    /// no list to check) also ends here, not as `.noAnswer`; an unanswered `GSI` re-read is `.noAnswer`.
+    case walkStopped(expected: String, found: String?)
 }
 
 /// The scanner's menu for one session, as UI-free state and actions (design §4.6, §5.1, §5.3-§5.5).
@@ -48,7 +58,12 @@ public enum MenuActionError: Error, Equatable, Sendable {
 /// `refreshInterval`.
 ///
 /// **Actions** each send at most one state-changing command (`KEY`, `MSV`, `MNU` or `MSB`) and never
-/// resend it.
+/// resend it, except `walk(_:)` (services-range design §5.2): "One action sends at most one
+/// state-changing command and never resends it, except a menu walk (Services and Range in the
+/// Scanner view): it enters the menu and opens one item per level, at most one command per step and
+/// at most four per walk, each sent only after a re-read shows the screen and item the walk expects,
+/// none resent, and it stops at the first mismatch, refusal or lost reply, leaving the scanner where
+/// it is."
 /// Each throws `.notConnected` unless attached, `.notInMenu` unless `content` is non-nil (`enter`
 /// and `refresh` excepted), and `.busy` while another action runs; `isBusy` covers the whole action,
 /// its re-read included. The destructive and value checks come before any traffic; `choose` and
@@ -95,6 +110,10 @@ public final class MenuModel {
     /// (`KEY,M,P`, `KEY,L,P`) or by its menu commands (`MNU`, `MSB`). Only which one command is sent
     /// differs; every guard around it is the same.
     @ObservationIgnored var navigation: MenuNavigation = .keys
+    /// How long a walk waits before its one grace re-read of a screen that still shows the one the
+    /// previous command was sent on (a radio slow to redraw; services-range design §5.1 step 3b).
+    /// Tests shorten it.
+    @ObservationIgnored var walkGrace: Duration = .milliseconds(300)
     /// Called after each command's reply, or its timeout (`StationSession.noteMenuCommandReply`).
     @ObservationIgnored var onCommandReply: (@MainActor () -> Void)?
     /// Called each time `isInMenu` changes, detach included (`StationSession` tells its quick keys).
@@ -259,12 +278,15 @@ public final class MenuModel {
                 self.apply(snapshot)
                 return snapshot.content
             }
-            return try await self.command(link) { client, permit in
-                switch self.navigation {
-                case .keys: try await client.press(.menu, onlyIf: permit)
-                case .menuCommands: try await client.openMenu(onlyIf: permit)
-                }
-            }
+            return try await self.command(link) { try await self.sendEnter($0, onlyIf: $1) }
+        }
+    }
+
+    /// The enter command (`KEY,M,P`, or `MNU,TOP,`), carrying the run's permit: `enter()`'s and a walk's.
+    private func sendEnter(_ client: ScannerClient, onlyIf permit: @escaping @Sendable () -> Bool) async throws {
+        switch navigation {
+        case .keys: try await client.press(.menu, onlyIf: permit)
+        case .menuCommands: try await client.openMenu(onlyIf: permit)
         }
     }
 
@@ -390,6 +412,120 @@ public final class MenuModel {
         }
     }
 
+    // MARK: Walk
+
+    /// What a walk makes of one re-read (`judge`).
+    enum WalkVerdict: Equatable {
+        /// The step's screen, with exactly one item of the step's name: send `MSV,,<itemIndex>`.
+        case proceed(itemIndex: Int)
+        /// `GSI` names the destination.
+        case arrived
+        /// The scanner still shows the screen the previous command was sent on (nil: outside a menu).
+        case stale
+        /// Anything else; `found` is the title `GSI` gave (normalised), nil outside a menu.
+        case mismatch(found: String?)
+    }
+
+    /// Opens `path.destination` by a checked menu walk (services-range design §5.1): reads `GSI`
+    /// and sends nothing if the scanner is already in a menu (the menu is shown as `refresh()`
+    /// shows it; `.alreadyInMenu`) or Func is on (`.functionPending`); else enters the menu as
+    /// `enter()` does, then for each step sends one `MSV,,<index>` only after the re-read that
+    /// followed the previous command shows the step's screen with exactly one item of the step's
+    /// name, and finally checks that `GSI` names the destination. A re-read still showing the
+    /// screen the previous command was sent on gets one grace re-read after `walkGrace`. Any
+    /// mismatch stops the walk: nothing more is sent, the screen is re-read once, and it throws
+    /// `.walkStopped`; a command's own failure (`.rejected`, `.noAnswer`, `.notConnected`) stops it
+    /// as `command` reports it. Nothing is resent, and the scanner is left where it stopped. One
+    /// action: `isBusy` holds for the whole walk. Returns the destination's content (a list, an
+    /// entry, or `.mirrored`).
+    @discardableResult
+    public func walk(_ path: MenuPath) async throws -> MenuContent? {
+        try await perform(inMenu: false) { link in
+            // The ceiling of §5.2 (enter plus three levels), checked here as well as by `MenuPath`.
+            guard (1...MenuPath.maxSteps).contains(path.steps.count) else { throw MenuActionError.invalidValue }
+            let info = try await self.readInfo(link)
+            if info.isMenu {
+                self.apply(try await self.snapshot(link, info))
+                throw MenuActionError.alreadyInMenu
+            }
+            if info.functionOn == true { throw MenuActionError.functionPending }
+
+            var current = try await self.commandSnapshot(link) { try await self.sendEnter($0, onlyIf: $1) }
+            // The screen the latest command was sent on: none (scanning) for the enter.
+            var previousTitle: String?
+            for step in path.steps {
+                let (verdict, judged) = try await self.judgeWithGrace(
+                    link, current, step: step, destination: path.destination, previousTitle: previousTitle)
+                guard case .proceed(let index) = verdict else {
+                    try await self.rereadAfterMismatch(link)
+                    throw MenuActionError.walkStopped(expected: step.screen, found: Self.walkTitle(judged.info))
+                }
+                previousTitle = Self.walkTitle(judged.info)
+                current = try await self.commandSnapshot(link) { try await $0.setMenuValue(String(index), onlyIf: $1) }
+            }
+            let (verdict, arrived) = try await self.judgeWithGrace(
+                link, current, step: nil, destination: path.destination, previousTitle: previousTitle)
+            guard verdict == .arrived else {
+                try await self.rereadAfterMismatch(link)
+                throw MenuActionError.walkStopped(expected: path.destination, found: Self.walkTitle(arrived.info))
+            }
+            return arrived.content
+        }
+    }
+
+    /// Judges `snapshot`; a `.stale` verdict gets one grace re-read (read-only: `GSI`, then `MSI`)
+    /// after `walkGrace`, and a second `.stale` counts as a mismatch. Returns the verdict and the
+    /// snapshot it was made on.
+    private func judgeWithGrace(_ link: Link, _ snapshot: Snapshot, step: MenuStep?, destination: String,
+                                previousTitle: String?) async throws -> (WalkVerdict, Snapshot) {
+        let verdict = Self.judge(snapshot, step: step, destination: destination, previousTitle: previousTitle)
+        guard verdict == .stale else { return (verdict, snapshot) }
+        try? await Task.sleep(for: walkGrace)
+        let again = try await fetch(link)
+        apply(again)
+        let second = Self.judge(again, step: step, destination: destination, previousTitle: previousTitle)
+        return (second == .stale ? .mismatch(found: Self.walkTitle(again.info)) : second, again)
+    }
+
+    /// `judge(info:screen:expecting:destination:previousTitle:)` on a snapshot. A kept snapshot
+    /// (its `MSI` unanswered, the old content shown) has no screen to judge.
+    private static func judge(_ snapshot: Snapshot, step: MenuStep?, destination: String,
+                              previousTitle: String?) -> WalkVerdict {
+        let screen: MenuScreen? = switch snapshot.content {
+        case .list(let screen) where !snapshot.kept, .entry(let screen) where !snapshot.kept: screen
+        default: nil
+        }
+        return judge(info: snapshot.info, screen: screen, expecting: step, destination: destination,
+                     previousTitle: previousTitle)
+    }
+
+    /// One walk check (services-range design §5.1 steps 3b and 4). With a `step`: `.proceed` when
+    /// `GSI` is in a menu titled `step.screen` and `MSI` is a list titled the same, holding exactly
+    /// one item named `step.item` (titles normalised by `breadcrumbTitle`, the item name trimmed;
+    /// both compared exactly, case included). With no step (arrival): `.arrived` when `GSI`'s title
+    /// is `destination`, whatever `MSI` says. Otherwise `.stale` when `GSI`'s title is still
+    /// `previousTitle` (nil: outside a menu), else `.mismatch` with that title.
+    static func judge(info: ScannerInfo, screen: MenuScreen?, expecting step: MenuStep?, destination: String,
+                      previousTitle: String?) -> WalkVerdict {
+        let seen = walkTitle(info)
+        if let step {
+            if let seen, seen == step.screen, let screen, screen.kind == .select,
+               screen.title.map(breadcrumbTitle) == step.screen {
+                let matches = screen.items.filter { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) == step.item }
+                if matches.count == 1, let item = matches.first { return .proceed(itemIndex: item.index) }
+            }
+        } else if let seen, seen == destination {
+            return .arrived
+        }
+        return seen == previousTitle ? .stale : .mismatch(found: seen)
+    }
+
+    /// `GSI`'s menu title, normalised; nil outside a menu (or with no title).
+    private static func walkTitle(_ info: ScannerInfo) -> String? {
+        guard info.isMenu else { return nil }
+        return info.menuTitle.map(breadcrumbTitle)
+    }
+
     // MARK: Action plumbing
 
     /// Runs one action: the connection, menu and busy checks, `isBusy` for the whole body (released
@@ -469,6 +605,13 @@ public final class MenuModel {
     /// the model detaches is withheld: then nothing went out, so no display nudge and no re-read.
     private func command(_ link: Link,
                          _ send: (ScannerClient, @escaping @Sendable () -> Bool) async throws -> Void) async throws -> MenuContent? {
+        try await commandSnapshot(link, send).content
+    }
+
+    /// `command(_:_:)`, returning the answered re-read it applied (a walk judges it). It returns
+    /// only for an OK whose re-read was answered; every other outcome throws as `command` does.
+    private func commandSnapshot(_ link: Link,
+                                 _ send: (ScannerClient, @escaping @Sendable () -> Bool) async throws -> Void) async throws -> Snapshot {
         let client = try await client(link)
         let reply: CommandReply
         do {
@@ -482,25 +625,24 @@ public final class MenuModel {
         onCommandReply?()
         guard isAlive(link), reply != .gone else { throw MenuActionError.notConnected }
 
-        let after: MenuContent?
-        let rereadAnswered: Bool
+        // The answered re-read; nil when it went unanswered.
+        let after: Snapshot?
         do {
             let snapshot = try await fetch(link)
             apply(snapshot)
-            after = snapshot.content
             // Kept: the screen's MSI went unanswered and its old content stays.
-            rereadAnswered = !snapshot.kept
+            after = snapshot.kept ? nil : snapshot
         } catch MenuActionError.notConnected {
             throw MenuActionError.notConnected
         } catch {
             // Unanswered re-read: content stays as it was; the refresh loop keeps trying.
-            after = content
-            rereadAnswered = false
+            after = nil
         }
-        // An OK whose outcome no read confirmed is reported as unanswered.
-        if !rereadAnswered, reply == .ok { throw MenuActionError.noAnswer }
         switch reply {
-        case .ok: return after
+        case .ok:
+            // An OK whose outcome no read confirmed is reported as unanswered.
+            guard let after else { throw MenuActionError.noAnswer }
+            return after
         case .rejected(let response): throw MenuActionError.rejected(response)
         case .unanswered: throw MenuActionError.noAnswer
         case .gone: throw MenuActionError.notConnected
