@@ -68,7 +68,7 @@ private func repositoryText(_ path: String) throws -> String {
         let badges = [
             "https://github.com/noctule-dev/noctule-scan/actions/workflows/ci.yml/badge.svg?branch=main",
             "img.shields.io/github/license/noctule-dev/noctule-scan",
-            "img.shields.io/github/v/release/noctule-dev/noctule-scan?include_prereleases",
+            "img.shields.io/github/v/release/noctule-dev/noctule-scan)",
             "img.shields.io/badge/Swift-6.4-",
             "img.shields.io/badge/Xcode-27.2-",
             "img.shields.io/badge/platform-macOS-",
@@ -79,6 +79,8 @@ private func repositoryText(_ path: String) throws -> String {
             #expect(found != nil, "README lacks the badge \(badge), or has it out of order")
             if let found { from = found.upperBound }
         }
+        // The release badge shows only stable releases.
+        #expect(!readme.contains("include_prereleases"), "the release badge counts pre-releases")
         for link in ["CONTRIBUTING.md", "TRADEMARKS.md", "LICENSE", "docs/specs/README.md"] {
             #expect(readme.contains("](\(link))"), "README doesn't link \(link)")
         }
