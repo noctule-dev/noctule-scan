@@ -921,6 +921,7 @@ func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [
             await session.stop()
             try await waitUntil("the walk ends", .seconds(10)) { session.menuShortcutInFlight == nil }
             #expect(session.pendingKeyPresses == 0)
+            #expect(session.menuShortcutMessage == nil, "a walk the stop ended says nothing")
         }
         #expect(commands.filter { $0.hasPrefix("MSV,") }.count == 1, "\(commands)")
         #expect(commands.last == "PSI,0")

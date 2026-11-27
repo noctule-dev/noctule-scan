@@ -141,6 +141,9 @@ public enum HoldLevel: Sendable, CaseIterable {
 /// **Control** (only while connected; otherwise ignored): `press(_:)` through a `KeyPressQueue`
 /// on `runner.control()` (each reply feeds `noteKeyReply`), `setScannerVolume`/`setScannerSquelch`
 /// (clamped to the model's range, 250 ms debounce), and `hold(_:)` via the labelled soft key.
+/// Services and Range are never `KEY` presses: `press(_:)` routes them to the menu walk
+/// (`startMenuShortcut(_:)`, `openMenuShortcut(_:)`; services-range design §5.4), refused while a
+/// key is queued or sending, and every other key is dropped while the walk runs.
 /// Menus: `menu` (`MenuModel`) is attached to `runner.control()` on `.connected` and detached on
 /// any other phase, before the stop's `PSI,0`; it gets every push, and each menu command's reply
 /// (or timeout) brings the display fetch forward like a key reply.
@@ -352,6 +355,14 @@ public final class StationSession {
     /// True while a BCD436HP `HLD` waits for its reply: a second click sends nothing, and
     /// `canHold` is false. Observed, so the controls disable.
     private(set) var holdInFlight = false
+    /// The Services or Range walk running now (`openMenuShortcut(_:)`), set before the walk's first
+    /// await and cleared when it ends, on every path. While set, `press(_:)` drops every key and a
+    /// second shortcut is refused `.busy`. Observed, so the keypad disables.
+    public private(set) var menuShortcutInFlight: MenuShortcut?
+    /// Why the last Services or Range walk started by `startMenuShortcut(_:)` failed
+    /// (`MenuShortcutText`); nil when it succeeded, while one runs, and after a refusal that needs
+    /// no words (`.busy`).
+    public private(set) var menuShortcutMessage: String?
     /// Observed (unlike the rest of the run state) because views read `model`, which reads it.
     private var detectedModel: ScannerModel?
     @ObservationIgnored private var levelGenerations: [Level: Int] = [:]
@@ -1073,12 +1084,84 @@ public final class StationSession {
     public var model: ScannerModel { detectedModel ?? station.connection.modelOverride ?? .sds200 }
 
     /// Presses a front-panel key (`KEY,<code>,P`) through the run's `KeyPressQueue`, in order, one
-    /// at a time. Ignored unless connected; dropped while `maxQueuedKeys` are pending, and dropped
-    /// when the model lacks the key (`ModelProfile.frontPanelKeys`; design §5.11).
+    /// at a time. Ignored unless connected. Services and Range (`MenuShortcut(key:)`) are never
+    /// sent as keys: they start the menu walk (`startMenuShortcut(_:)`; services-range design
+    /// §5.4). Any other key is dropped while a walk runs (`menuShortcutInFlight`), while
+    /// `maxQueuedKeys` are pending, and when the model lacks the key (`ModelProfile.frontPanelKeys`;
+    /// design §5.11). A key that is yielded counts in `pendingKeyPresses` until the queue drops it
+    /// or its send ends.
     public func press(_ key: FrontPanelKey) {
-        guard isConnected, let keyInput,
+        guard isConnected else { return }
+        if let shortcut = MenuShortcut(key: key) {
+            startMenuShortcut(shortcut)
+            return
+        }
+        guard menuShortcutInFlight == nil, let keyInput, let gate = keyGate,
               ModelProfile.profile(for: model).frontPanelKeys.contains(key) else { return }
+        gate.keyAccepted()
         keyInput.yield(key)
+    }
+
+    /// Keys `press(_:)` handed to this run's queue that it hasn't dropped and whose send hasn't
+    /// ended (sent, failed, or withheld by a closed gate). The count lives in the run's `KeyGate`,
+    /// so it is 0 once `stopKeyQueue()` lets go of the gate, and a send from an earlier run that
+    /// ends later can't change this run's count.
+    var pendingKeyPresses: Int { keyGate?.pendingKeys ?? 0 }
+
+    /// The view's entry for Services and Range: clears `menuShortcutMessage`, then runs
+    /// `openMenuShortcut(_:)`'s checks at once (so a second press while one runs is refused here,
+    /// before `MenuModel`) and the walk in a task, setting `menuShortcutMessage` from
+    /// `MenuShortcutText` if it fails. A walk that fails because the session stopped or the run
+    /// changed under it says nothing, as a stopped hold doesn't.
+    public func startMenuShortcut(_ shortcut: MenuShortcut) {
+        menuShortcutMessage = nil
+        let path: MenuPath
+        do {
+            path = try beginMenuShortcut(shortcut)
+        } catch {
+            menuShortcutMessage = MenuShortcutText.message(for: error, shortcut: shortcut)
+            return
+        }
+        let run = runner
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.runMenuShortcut(path)
+            } catch {
+                guard self.isConnected, self.runner === run else { return }
+                let failure = error as? MenuActionError ?? .noAnswer
+                self.menuShortcutMessage = MenuShortcutText.message(for: failure, shortcut: shortcut)
+            }
+        }
+    }
+
+    /// Opens the shortcut's screen by `MenuModel.walk(_:)` with the model's path
+    /// (`ModelProfile.menuShortcuts`). Throws `.notConnected` unless connected; `.busy` while a walk
+    /// runs or a key press is queued or sending (`pendingKeyPresses`; design §5.1 step 0), with
+    /// nothing sent; `.walkStopped(expected: <destination>, found: nil)` when the model has no path.
+    /// Otherwise `menuShortcutInFlight` is set with no await after those checks, and cleared when the
+    /// walk ends, however it ends.
+    @discardableResult
+    public func openMenuShortcut(_ shortcut: MenuShortcut) async throws -> MenuContent? {
+        let path = try beginMenuShortcut(shortcut)
+        return try await runMenuShortcut(path)
+    }
+
+    /// `openMenuShortcut`'s checks, and the flag; synchronous, so two presses can't both pass.
+    private func beginMenuShortcut(_ shortcut: MenuShortcut) throws(MenuActionError) -> MenuPath {
+        guard isConnected else { throw .notConnected }
+        guard menuShortcutInFlight == nil, pendingKeyPresses == 0 else { throw .busy }
+        guard let path = ModelProfile.profile(for: model).menuShortcuts[shortcut] else {
+            throw .walkStopped(expected: MenuShortcutText.destination(of: shortcut), found: nil)
+        }
+        menuShortcutInFlight = shortcut
+        return path
+    }
+
+    /// Runs the walk a `beginMenuShortcut` call set the flag for, and clears the flag on every path.
+    private func runMenuShortcut(_ path: MenuPath) async throws -> MenuContent? {
+        defer { menuShortcutInFlight = nil }
+        return try await menu.walk(path)
     }
 
     /// Sets the scanner's volume (`VOL,<n>`), clamped to the model's range, 250 ms after the last
@@ -1162,17 +1245,25 @@ public final class StationSession {
         display?.softKey(labelled: level.softKeyLabel)
     }
 
-    /// Closed when a stop begins: the run's queued keys are dropped, not sent.
+    /// Closed when a stop begins: the run's queued keys are dropped, not sent. Also counts the
+    /// run's pending key presses (`pendingKeyPresses`): one per key `press(_:)` yields, ended once
+    /// by the feeder when the queue drops it, or by the send's `defer` when its send ends.
     final class KeyGate: Sendable {
         private let open = Mutex(true)
+        private let pending = Mutex(0)
         var isOpen: Bool { open.withLock { $0 } }
         func close() { open.withLock { $0 = false } }
+        var pendingKeys: Int { pending.withLock { $0 } }
+        func keyAccepted() { pending.withLock { $0 += 1 } }
+        func keyEnded() { pending.withLock { $0 -= 1 } }
     }
 
     private func startKeyQueue(_ runner: StationRunner) {
         let gate = KeyGate()
         keyGate = gate
         let queue = KeyPressQueue(maxQueued: Self.maxQueuedKeys) { [weak self] key in
+            // However the send ends (sent, failed, withheld), the key is no longer pending.
+            defer { gate.keyEnded() }
             // The runner's shared client (nil once runner.stop() begins), and only while the gate
             // is open: it closes as the session's stop begins, before any of the stop's awaits.
             guard gate.isOpen, let client = await runner.control(), gate.isOpen else {
@@ -1186,12 +1277,15 @@ public final class StationSession {
         keyInput = input
         // One feeder, so presses reach the queue in the order they were made.
         keyTask = Task {
-            for await key in keys { _ = await queue.enqueue(key) }
+            for await key in keys {
+                // A press the queue drops (full) is no longer pending.
+                if !(await queue.enqueue(key)) { gate.keyEnded() }
+            }
         }
     }
 
     /// Closes the gate (keys still queued are dropped) and ends the feeder. Synchronous, so it can
-    /// be a stop's first step.
+    /// be a stop's first step. Letting go of the gate resets `pendingKeyPresses` to 0.
     func stopKeyQueue() {
         holdInFlight = false
         keyGate?.close()
