@@ -24,6 +24,7 @@ The design notes, protocol notes and plans behind Noctule Scan, in the order the
 
 **The app and its menus**
 - [`2026-11-10-remote-menus-design.md`](2026-11-10-remote-menus-design.md): driving the scanner's menus remotely (`KEY`, `MSI`, `MSV`) and showing them in the app.
+- [`2026-11-26-services-range-design.md`](2026-11-26-services-range-design.md): the Scanner view's Services and Range buttons walk the menu to Select Service Types and Set Range, one button set on every model (issue #14).
 
 **USB and the SDS100, SDS150, SDS200 and BCD436HP**
 - [`2026-11-11-sds150-usb-design.md`](2026-11-11-sds150-usb-design.md): the SDS150 over USB serial: the command line, then the app; hardware checks and results.
