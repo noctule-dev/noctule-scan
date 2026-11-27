@@ -1041,6 +1041,51 @@ func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [
         #expect(outcome.commands.last == "PSI,0")
     }
 
+    /// Range pressed, then Hold in the same main-actor turn (before the walk's `perform` sets
+    /// `menu.isBusy`): Hold is disabled by the walk's flag and sends no `HLD`, so no `HLD` can land
+    /// behind the walk's `MNU,TOP,` (services-range design §10).
+    @Test func noHoldWhileAWalkRuns() async throws {
+        let commands = try await withModelSession(.bcd436hp) { rig in
+            let session = rig.session
+            #expect(session.canHold(.system))
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range)
+            #expect(!session.canHold(.system), "a walk is in flight")
+            session.hold(.system)
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+            _ = try await session.menu.exit()
+            try await waitUntil("out of the menu") { await !rig.isInMenu() }
+            try await Task.sleep(for: .milliseconds(300))
+        }
+        #expect(!commands.contains { $0.hasPrefix("HLD") }, "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// An `HLD` on its way (its reply held back): a walk is refused `.busy` with nothing sent, and
+    /// the Range press says nothing (services-range design §5.1 step 0).
+    @Test func walkRefusedWhileAHoldIsInFlight() async throws {
+        let commands = try await withModelSession(.bcd436hp, replyDelays: ["HLD": .milliseconds(600)]) { rig in
+            let session = rig.session
+            session.hold(.system)
+            #expect(!session.canHold(.system), "in flight")
+            let before = await rig.commands().count
+            await #expect(throws: MenuActionError.busy) { try await session.openMenuShortcut(.range) }
+            #expect(session.menuShortcutInFlight == nil)
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == nil, "the press is refused too")
+            #expect(session.menuShortcutMessage == nil, "busy says nothing")
+            try await waitUntil("HLD sent") { await rig.commands().contains { $0.hasPrefix("HLD") } }
+            #expect(!(await rig.commands()).dropFirst(before).contains { $0.hasPrefix("MNU") || $0.hasPrefix("MSB") })
+            try await waitUntil("the hold ends", .seconds(5)) { session.canHold(.system) }
+            #expect(!(await rig.commands()).contains { $0.hasPrefix("MNU") }, "nothing of the refused walk")
+        }
+        #expect(commands.filter { $0.hasPrefix("HLD") }.count == 1, "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
     @Test func doubleClickSendsOneHLD() async throws {
         var setup = bcdSetup()
         setup.replyDelays = ["HLD": .milliseconds(600)]

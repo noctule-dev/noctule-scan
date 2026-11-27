@@ -394,4 +394,31 @@ struct StationSessionQuickKeysTests {
             quickKeys.close()
         }
     }
+
+    /// A tile's click under way (its `FQK` set's reply takes the mock's 0.8 s): Services and Range
+    /// are refused `.busy` and send nothing, so no walk's enter can be written ahead of a set still
+    /// waiting for the slot (services-range design §5.1 step 0, §10).
+    @Test func walkRefusedWhileAQuickKeySetIsPending() async throws {
+        let outcome = try await withSession(Setup(quickKeysPollInterval: pollInterval)) { rig in
+            let session = rig.session
+            let quickKeys = session.quickKeys
+            rig.start()
+            try await rig.waitConnected()
+            quickKeys.open()
+            try await waitUntil("every list read") { allFresh(quickKeys) }
+            #expect(!quickKeys.hasPendingChange)
+            let click = Task { @MainActor in await quickKeys.toggle(.list(4)) }
+            try await waitUntil("the set is sent") { await rig.commands.contains { $0.hasPrefix("FQK,") } }
+            #expect(quickKeys.hasPendingChange)
+            await #expect(throws: MenuActionError.busy) { try await session.openMenuShortcut(.range) }
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == nil, "the press is refused too")
+            #expect(session.menuShortcutMessage == nil, "busy says nothing")
+            await click.value
+            #expect(!quickKeys.hasPendingChange)
+            quickKeys.close()
+        }
+        #expect(!outcome.commands.contains { $0.hasPrefix("KEY,M") || $0.hasPrefix("MSV") }, "\(outcome.commands)")
+        #expect(outcome.commands.filter { $0.hasPrefix("FQK,") }.count == 1, "\(outcome.commands)")
+    }
 }

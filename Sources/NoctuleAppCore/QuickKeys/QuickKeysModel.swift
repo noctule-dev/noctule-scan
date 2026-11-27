@@ -328,6 +328,10 @@ public final class QuickKeysModel {
     public private(set) var isInMenu = false
     /// The scopes with a `toggle` queued or under way: their rows are `.busy`.
     private var busyScopes: Set<Scope> = []
+    /// A click is queued or under way (its checks, its one set, its re-read): `StationSession` starts no
+    /// menu walk meanwhile, so no walk's enter is written ahead of a set still waiting for the client's
+    /// request slot (services-range design §5.1 step 0).
+    var hasPendingChange: Bool { !busyScopes.isEmpty }
 
     @ObservationIgnored let cacheURL: URL?
     /// How often an open model polls the states (design §5.4: about 2 s).
