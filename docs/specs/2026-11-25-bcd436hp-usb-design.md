@@ -316,6 +316,8 @@ builder's):
 
 ### 5.3 The screen
 
+> **Note, 2026-11-26 (Plan 24):** the Scanner view's keypad is now one button set on every model, so the panel bullet's "no Services key" (and §5.11's dropped Services and Range buttons) is reversed: Services and Range are menu shortcuts that walk the menu (`MNU,TOP,` on this model), never `KEY,T` or `KEY,R`. See `2026-11-26-services-range-design.md`.
+
 A per-model display layout (names the builder's) with two values: **columns** (30 for the SDS
 models, 24 for the BCD436HP) and **whether the screen has a soft-key line** (yes for the SDS
 models on the scan screen and on entry screens, as today; **no for the BCD436HP on any screen**: it has no soft keys, **(the owner, 2026-11-25: "there are no soft keys on the bcd")**, and its `STS` showed no soft-key line [hw]).
@@ -475,6 +477,8 @@ BCD436HP (`config/dev-scanner.env.example` gains the key):
 
 ### 5.11 The handhelds' panel and encoder (the SDS100 and SDS150 too)
 
+> **Note, 2026-11-26 (Plan 24):** the table's `T`/`R` rows (Services and Range buttons left off the SDS100, SDS150 and BCD436HP) are reversed: every model shows Services and Range, as menu walks, and no model is sent `KEY,T` or `KEY,R`. `Q` (and the SDS150's lacking `R` as a key) still hold. See `2026-11-26-services-range-design.md`.
+
 The SDS100, SDS150 and BCD436HP have one multifunction encoder on top: turning it scrolls, one
 press makes turning set volume, Func then a press makes it set squelch **(the owner, 2026-11-25;
 SDS150 owner's manual: "Press FUNCTION then tap scroll to display the squelch level")**. Its press
@@ -549,7 +553,7 @@ Each item at the owner's go-ahead; results into this document, the protocol note
   (`MNU,TOP,` and `MSB,,RETURN_PREVOUS_MODE` in the trace), Back once (`MSB,,`), and three minutes
   in a menu (renewals past the push lifetime, `MSI` answering); the 24-column screen and the
   14-line scan screen; an unplug and replug; quit (`PSI,0` last).
-- **H6** In the app: Hold at each level from the Mac-style view, on and off, on a trunked and a
+- **H6** **(Changed 2026-11-26, Plan 24: the Scanner view's Services and Range buttons walk the menu; test them by the services-range design §7 S1, not as keys.)** In the app: Hold at each level from the Mac-style view, on and off, on a trunked and a
   conventional system (`HLD,CFREQ`); one `GSI` during an ID search, to settle `STGID` (§5.3); the Scanner view's keys once each (Func, Zip, Range, Replay, Backlight,
   the digits); a `VOL` and an `SQL` step; a name entry opened and backed out of; `STS` at 100 ms
   beside `PSI,100` for some minutes.
@@ -558,7 +562,7 @@ Each item at the owner's go-ahead; results into this document, the protocol note
 - **H9** Line-in on the owner's rig (the jack is wired to the USB audio interface): recordings
   line up with the hits (`lineInAudioOffset`), and the level at the radio's volume.
 - **H10** The BCD436HP and an SDS handheld at once: two stations, each with a saved port.
-- **H11** On the SDS150 and the SDS100 (the owner's, in the app): the panel shows no Services key
+- **H11** **(Changed 2026-11-26, Plan 24: "no Services key, no Range key" becomes "Services and Range open their screens", services-range design §7 S1; the rest stands.)** On the SDS150 and the SDS100 (the owner's, in the app): the panel shows no Services key
   and no squelch push, the SDS150 no Range key (the owner confirms it has none), the scroll knob's
   push sets volume as on the radio, and the light key toggles the backlight.
 

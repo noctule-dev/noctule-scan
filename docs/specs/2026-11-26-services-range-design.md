@@ -265,6 +265,12 @@ H11 change: H11's "no Services key, no Range key" becomes "Services and Range op
   nothing sent.
 - **S3** Read Select Service Types' `MSI` once on each model (it happens in S1): record its shape
   in the protocol notes.
+- **S4** (added at the build, 2026-11-26) The BCD436HP's top-menu `MenuSummary name` must normalise to
+  `Menu`, and on the SDS100 and SDS150 `GSI`'s and `MSI`'s screen names must agree at each step: the
+  walk's stricter check (§10) stops otherwise.
+- **S5** (added at the build) The click-through the builder could not do: the Scanner view's
+  Services and Range buttons, the failed-walk caption, the double-click and a click right after a
+  digit, on the mocks (no computer-use tools or screen recording in the build session).
 
 ## 8. Documents
 
@@ -281,3 +287,41 @@ H11 change: H11's "no Services key, no Range key" becomes "Services and Range op
 Names (the action, the error cases, the path types); how Services and Range leave
 `FrontPanelKey` while saved key maps keep decoding; where a failed walk's message shows; how tests
 force a mismatch on the mock; whether the walk shares code with `choose(_:on:)`.
+
+## 10. What was built (2026-11-26)
+
+Differences from §5 and rulings made during the build. Those marked (designer's call) or "the
+builder's" are not the owner's; the owner's rulings are the walk approach (the §5.2 exception), the
+Scanner view only (nothing added to the Mac-style view), and the approval of this design and plan.
+
+- **A stricter step check (designer's call).** A step proceeds only when both `GSI`'s menu title and
+  `MSI`'s `Name`, each through `breadcrumbTitle`, equal the expected screen, and `MSI` lists the item
+  exactly once; §5.1 3b asks for `MSI` only. It fails closed (stops, sends nothing more), and so
+  relies on `GSI`'s and `MSI`'s names agreeing on hardware (§7 S4).
+- **`MenuActionError.walkStopped(expected:found:)`.** `expected` is the screen needed at the failing
+  step (for example `Menu`), or the destination at arrival; the Scanner view's text always names the
+  destination (`MenuShortcutText`). An unanswered `MSI` on a step's new screen is `.walkStopped`, not
+  `.noAnswer`. `alreadyInMenu` and `functionPending` stop the walk before anything is sent.
+- **`enter()` and the walk share one `sendEnter`** helper (same permit, same request slot).
+- **The key-queue refusal (§5.1 step 0) lives in `StationSession`**, not `MenuModel`
+  (`pendingKeyPresses`, counted in the run's `KeyGate`: +1 before the yield, -1 exactly once when the
+  queue drops the key or its send ends; reset when the gate is dropped). A double-click is refused
+  `.busy` by the session (`menuShortcutInFlight`) before `MenuModel`, so it walks once. Other key
+  presses (keypad, chords, the Mac controls bar's Avoid, an SDS soft-key Hold through `press`) are
+  dropped while a walk runs. A click less than a reply-time after a digit is refused silently
+  (busy, so no message).
+- **A failed walk's message** (`menuShortcutMessage`) shows in a fixed-height caption under the
+  keypad, only while connected, cleared after 5 s or by the next click. The Scanner view shows it
+  alone (it never showed `menu.lastError`). `MacMenuView`'s exhaustive error switch gained texts for
+  the three new errors; no control or chord was added to the Mac-style view, and Services and Range
+  chords are swallowed there.
+- **The mock.** Select Service Types sits after Set Your Location (indexes after it shifted by one).
+  `Property F` reads On after `KEY,F,P` until any other handled `KEY` (assumed, not seen on hardware).
+  Known gap: the BCD436HP mock's hold keys (`KEY,A|B|C,P`) don't clear Func.
+- **A walk ending on an `MSI` `TypeError` screen** is covered only by `judge` unit tests; the mock has
+  no reachable destination like it.
+- **Hand check (Task 5).** The app launched and quit cleanly on the network mock and the BCD436HP
+  serial mock (no stray commands, `PSI,0` last, counters 0). The click-through and screenshots were
+  not done: the build session had no computer-use tools and no Screen Recording (§7 S5).
+- **A known window, accepted for now:** between `startMenuShortcut` and the walk setting
+  `menu.isBusy` (one main-actor turn), the BCD436HP Hold controls' `canHold` is still true.
