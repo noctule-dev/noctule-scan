@@ -109,6 +109,8 @@ public struct ScannerInfo: Sendable, Equatable {
     public var volume: Int?
     public var squelch: Int?
     public var attenuatorOn: Bool?
+    /// `Property F`: the Func key's state ("On"/"Off").
+    public var functionOn: Bool?
     public var recordingOn: Bool?
     public var p25Status: String?
     public var muted: Bool?
@@ -183,6 +185,7 @@ public struct ScannerInfo: Sendable, Equatable {
         volume = int(p?["VOL"])
         squelch = int(p?["SQL"])
         attenuatorOn = onOff(p?["Att"])
+        functionOn = onOff(p?["F"])
         recordingOn = onOff(p?["Rec"])
         p25Status = p?["P25Status"]
         muted = p?["Mute"].map { $0 == "Mute" }

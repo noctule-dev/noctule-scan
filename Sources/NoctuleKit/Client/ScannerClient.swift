@@ -497,6 +497,10 @@ public actor ScannerClient {
 
     /// `KEY,<key>,P`. A state-changing command: never resent. `onlyIf`: see `send(_:onlyIf:)`.
     public func press(_ key: FrontPanelKey, onlyIf proceed: (@Sendable () -> Bool)? = nil) async throws {
+        // T and R are never sent (Plan 24): menu shortcuts open those screens by a checked walk.
+        guard MenuShortcut(key: key) == nil else {
+            throw ScannerClientError.invalidArgument("the scanner has no \(key.rawValue) key")
+        }
         try await expectOK(ScannerCommand("KEY", key.rawValue, "P"), onlyIf: proceed)
     }
 

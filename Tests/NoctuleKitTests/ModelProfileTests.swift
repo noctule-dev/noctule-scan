@@ -30,7 +30,7 @@ import Testing
         #expect(p.supportsQuickKeys && !p.supportsChargeStatus && !p.supportsRemoteRestart && !p.hasNetworkAudio)
         #expect(p.usbProductIDs == [0x001A] && !p.protocolVerifiedOnHardware)
         #expect(p.display == .bcd436hp && p.menuNavigation == .menuCommands && p.holdMethod == .holdCommand)
-        #expect(p.frontPanelKeys == Set(FrontPanelKey.allCases).subtracting([.serviceType, .squelchPush]))
+        #expect(p.frontPanelKeys == Set(FrontPanelKey.allCases).subtracting([.serviceType, .range, .squelchPush]))
         #expect(p.destructiveMenuItems == .bcd436hp)
         #expect(p.encoderPushCaption == "Vol")
     }
@@ -46,9 +46,9 @@ import Testing
     @Test func handheldPanels() {
         let all = Set(FrontPanelKey.allCases)
         let sds200 = ModelProfile.profile(for: .sds200)
-        #expect(sds200.frontPanelKeys == all && sds200.encoderPushCaption == "Func")
+        #expect(sds200.frontPanelKeys == all.subtracting([.serviceType, .range]) && sds200.encoderPushCaption == "Func")
         let sds100 = ModelProfile.profile(for: .sds100)
-        #expect(sds100.frontPanelKeys == all.subtracting([.serviceType, .squelchPush]) && sds100.encoderPushCaption == "Vol")
+        #expect(sds100.frontPanelKeys == all.subtracting([.serviceType, .range, .squelchPush]) && sds100.encoderPushCaption == "Vol")
         let sds150 = ModelProfile.profile(for: .sds150)
         #expect(sds150.frontPanelKeys == all.subtracting([.serviceType, .squelchPush, .range])
                 && sds150.encoderPushCaption == "Vol")
