@@ -4,7 +4,7 @@ A Mac app and command-line tool for controlling, listening to and logging Uniden
 
 [![CI](https://github.com/noctule-dev/noctule-scan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/noctule-dev/noctule-scan/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/noctule-dev/noctule-scan)](LICENSE)
-[![Latest release](https://img.shields.io/github/v/release/noctule-dev/noctule-scan?include_prereleases)](https://github.com/noctule-dev/noctule-scan/releases)
+[![Latest release](https://img.shields.io/github/v/release/noctule-dev/noctule-scan)](https://github.com/noctule-dev/noctule-scan/releases/latest)
 ![Swift 6.4](https://img.shields.io/badge/Swift-6.4-orange)
 ![Xcode 27.2](https://img.shields.io/badge/Xcode-27.2-blue)
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
