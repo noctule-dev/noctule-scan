@@ -700,12 +700,14 @@ struct ModelSessionRig {
 /// that personality), connected (and, on USB, past its first push) unless `connect` is false; the
 /// session and the mock are stopped on every path. Returns every command the mock received.
 @MainActor
-func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [:], connect: Bool = true,
+func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [:], faults: MockFaults = .none,
+                      connect: Bool = true,
                       _ body: (ModelSessionRig) async throws -> Void) async throws -> [String] {
     switch model {
     case .sds200:
         var setup = Setup()
         setup.replyDelays = replyDelays
+        setup.faults = faults
         let outcome = try await withSession(setup) { rig in
             if connect {
                 rig.start()
@@ -719,6 +721,7 @@ func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [
     case .sds100, .sds150, .bcd436hp:
         var setup = USBSetup()
         setup.replyDelays = replyDelays
+        setup.faults = faults
         setup.personality = switch model {
         case .sds100: .sds100
         case .sds150: .sds150
@@ -841,6 +844,45 @@ func withModelSession(_ model: SessionModel, replyDelays: [String: Duration] = [
             try await waitUntil("the key's send ends", .seconds(5)) { session.pendingKeyPresses == 0 }
         }
         #expect(!commands.contains("KEY,M,P"), "\(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// A key whose reply is lost (about 1 UDP command in 12 on the SDS200) still ends its pending
+    /// count when its send times out, so the next Range press runs the walk.
+    @Test func unansweredKeyStillLetsAWalkRun() async throws {
+        let commands = try await withModelSession(.sds200, faults: MockFaults(dropNextReply: "KEY")) { rig in
+            let session = rig.session
+            session.press(.digit1)
+            #expect(session.pendingKeyPresses == 1)
+            try await waitUntil("KEY,1,P") { await rig.commands().contains("KEY,1,P") }
+            try await waitUntil("the key's send times out", .seconds(10)) { session.pendingKeyPresses == 0 }
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range, "not refused busy")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+        }
+        #expect(count(commands, "KEY,1") == 1, "never resent: \(commands)")
+        #expect(commands.last == "PSI,0")
+    }
+
+    /// More presses than the queue holds (replies held back): the dropped ones end their count at
+    /// once, the sent ones when their sends end, and then a walk runs.
+    @Test func fullQueueStillLetsAWalkRun() async throws {
+        let presses = StationSession.maxQueuedKeys + 2
+        let commands = try await withModelSession(.sds150, replyDelays: ["KEY": .milliseconds(200)]) { rig in
+            let session = rig.session
+            for _ in 0..<presses { session.press(.digit2) }
+            try await waitUntil("every send ends", .seconds(15)) { session.pendingKeyPresses == 0 }
+            #expect(count(await rig.commands(), "KEY,2") == StationSession.maxQueuedKeys, "the queue dropped the rest")
+            session.press(.range)
+            #expect(session.menuShortcutInFlight == .range, "not refused busy")
+            try await waitUntil("Set Range") {
+                await rig.menuPath().last == "Set Range" && session.menuShortcutInFlight == nil
+            }
+            #expect(session.menuShortcutMessage == nil)
+        }
         #expect(commands.last == "PSI,0")
     }
 
