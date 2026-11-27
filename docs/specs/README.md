@@ -78,3 +78,4 @@ Each plan was the step-by-step implementation plan for one piece of work. They s
 - [`2026-11-20-plan-21-open-source-prep.md`](2026-11-20-plan-21-open-source-prep.md): Plan 21, taking Noctule Scan public (done 2026-11-22; Results at the end).
 - [`2026-11-22-plan-22-update-check.md`](2026-11-22-plan-22-update-check.md): Plan 22, checking GitHub for a newer release (design: [`2026-11-22-update-check-design.md`](2026-11-22-update-check-design.md)).
 - [`2026-11-25-plan-23-bcd436hp-usb.md`](2026-11-25-plan-23-bcd436hp-usb.md): Plan 23, the BCD436HP over USB (design: [`2026-11-25-bcd436hp-usb-design.md`](2026-11-25-bcd436hp-usb-design.md); built against the mock, hardware session pending).
+- [`2026-11-26-plan-24-services-range.md`](2026-11-26-plan-24-services-range.md): Plan 24, Services and Range walk the menu (design: [`2026-11-26-services-range-design.md`](2026-11-26-services-range-design.md); issue #14).
